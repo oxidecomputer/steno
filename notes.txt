@@ -1,0 +1,36 @@
+Notes for future work
+-----------------------
+
+Breakpoints, pausing, etc: create a common "wait" function.  Arguments describe
+the event (e.g., starting action for node X).  In pause mode, it checks a
+condition and decides whether to wait.  In "step" mode, it decrements a
+semaphore.  In normal mode, it does nothing.)  Could add CLI tool that runs up
+to a breakpoint and exits (optionally dumps log).  Could then add a "step"
+version.
+
+Subsagas and recovery: this might "just work" if saga actions that
+create subsagas were idempotent.  But I don't think they are today.  Maybe
+if we first-class `SagaActionSaga`, the framework can ensure that this is
+done idempotently.  Relatedly, if we add policies around whether each node has
+an "undo" action, for this type of node, we might need that policy to differ
+depending on the SagaActionSaga (and not the Saga behind it).
+
+Static typing in the construction and execution of the graph:
+
+- Probably: this isn't so much input/output for each function, but a set of
+  state depended-on by the function and a set of state produced by the
+  function.  (The difference is that the input of one does not need to
+  match the output of the previous one, like I was previously assuming).
+- starting to see how a macro could allow you to say field X has type Y and
+  insert into the beginning of your function the appropriate calls to
+  lookup(), though that still wouldn't be statically type-checked.
+- Would one piece of this be to use macros on the action functions that
+  also generate input and output types specific to that function?  Would
+  they also need to generate glue code from previous and subsequent nodes?
+- I think we want the Graph data structure to erase the specific
+  input/output types as we do today.  But maybe when it's still in the
+  builder stage, we keep track of these types so that we can fail at
+  compile time when constructing an invalid graph.
+
+Even if we skip the static typing: the interface for constructing a saga DAG
+feels like it needs work.
