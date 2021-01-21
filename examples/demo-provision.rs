@@ -4,7 +4,6 @@
 
 use anyhow::Context;
 use std::fs;
-use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use steno::make_provision_saga;
@@ -52,9 +51,8 @@ enum Demo {
  */
 
 async fn cmd_dot() -> Result<(), anyhow::Error> {
-    let mut stdout = io::stdout();
     let saga_template = make_provision_saga();
-    saga_template.print_dot(&mut stdout).unwrap();
+    println!("{}", saga_template.dot());
     Ok(())
 }
 
@@ -63,11 +61,10 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
  */
 
 async fn cmd_info() -> Result<(), anyhow::Error> {
-    let mut stderr = io::stderr();
     let saga_template = make_provision_saga();
     eprintln!("*** saga template definition ***");
     eprintln!("saga template graph: ");
-    saga_template.print_dot(&mut stderr).unwrap();
+    eprintln!("{}", saga_template.dot());
 
     eprintln!("*** initial state ***");
     let exec = SagaExecutor::new(saga_template, "provision-info");

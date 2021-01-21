@@ -6,12 +6,12 @@ use crate::saga_action::SagaActionStartNode;
 use anyhow::anyhow;
 use petgraph::dot;
 use petgraph::graph::NodeIndex;
+use petgraph::Directed;
 use petgraph::Graph;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -84,14 +84,29 @@ impl SagaTemplate {
         Err(anyhow!("saga template has no node named \"{}\"", target_name))
     }
 
-    /*
-     * TODO-cleanup It would be more idiomatic to return a Dot struct that impls
-     * Display to do this.
+    /**
+     * Returns an object that can be used to print a graphiz-format
+     * representation of the underlying node graph.
      */
-    pub fn print_dot(&self, out: &mut dyn io::Write) -> io::Result<()> {
-        let dot =
-            dot::Dot::with_config(&self.graph, &[dot::Config::EdgeNoLabel]);
-        write!(out, "{:?}", dot)
+    pub fn dot<'a>(&'a self) -> SagaTemplateDot<'a> {
+        SagaTemplateDot(&self.graph)
+    }
+}
+
+/**
+ * Graphviz-formatted view of a saga graph
+ *
+ * Use the `Display` impl to print a representation suitable as input to the
+ * `dot` command.  You could put this into a file `graph.out` and run something
+ * like `dot -Tpng -o graph.png graph.out` to produce `graph.png`, a visual
+ * representation of the saga graph.
+ */
+pub struct SagaTemplateDot<'a>(&'a Graph<String, (), Directed, u32>);
+impl<'a> fmt::Display for SagaTemplateDot<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let config = &[dot::Config::EdgeNoLabel];
+        let dot = dot::Dot::with_config(&self.0, config);
+        write!(f, "{:?}", dot)
     }
 }
 
