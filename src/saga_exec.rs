@@ -29,7 +29,6 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
-use std::io;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -1042,122 +1041,92 @@ impl SagaExecutor {
         }
     }
 
-    /*
-     * TODO-cleanup It would be more idiomatic to return an object that impls
-     * Display or Debug to do this.
-     */
-    // TODO-liveness does this writer need to be async?
-    /**
-     * Summarize the current execution status of the saga
-     */
-    pub fn print_status<'a, 'b, 'c>(
-        &'a self,
-        out: &'b mut (dyn io::Write + Send),
-        indent_level: usize,
-    ) -> BoxFuture<'c, io::Result<()>>
-    where
-        'a: 'c,
-        'b: 'c,
-    {
-        /* TODO-cleanup There must be a better way to do this. */
-        let mut max_depth_of_node: BTreeMap<NodeIndex, usize> = BTreeMap::new();
-        max_depth_of_node.insert(self.saga_template.start_node, 0);
-
-        let mut nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>> =
-            BTreeMap::new();
-
-        let graph = &self.saga_template.graph;
-        let topo_visitor = Topo::new(graph);
-        for node in topo_visitor.iter(graph) {
-            if let Some(d) = max_depth_of_node.get(&node) {
-                assert_eq!(*d, 0);
-                assert_eq!(node, self.saga_template.start_node);
-                assert_eq!(max_depth_of_node.len(), 1);
-                continue;
-            }
-
-            if node == self.saga_template.end_node {
-                continue;
-            }
-
-            let mut max_parent_depth: Option<usize> = None;
-            for p in graph.neighbors_directed(node, Incoming) {
-                let parent_depth = *max_depth_of_node.get(&p).unwrap();
-                match max_parent_depth {
-                    Some(x) if x >= parent_depth => (),
-                    _ => max_parent_depth = Some(parent_depth),
-                };
-            }
-
-            let depth = max_parent_depth.unwrap() + 1;
-            max_depth_of_node.insert(node, depth);
-
-            nodes_at_depth.entry(depth).or_insert(Vec::new()).push(node);
-        }
-
-        let big_indent = indent_level * 16;
-
+    pub fn status(&self) -> BoxFuture<'_, SagaExecStatus> {
         async move {
             let live_state = self.live_state.lock().await;
 
-            write!(
-                out,
-                "{:width$}+ saga execution: {}\n",
-                "",
-                self.saga_id,
-                width = big_indent
-            )?;
-            for (d, nodes) in nodes_at_depth {
-                write!(
-                    out,
-                    "{:width$}+-- stage {:>2}: ",
-                    "",
-                    d,
-                    width = big_indent
-                )?;
-                if nodes.len() == 1 {
-                    let node = nodes[0];
-                    let node_label = format!(
-                        "{} (produces \"{}\")",
-                        self.saga_template.node_labels[&node],
-                        &self.saga_template.node_names[&node]
-                    );
-                    let node_state = live_state.node_exec_state(&node);
-                    write!(out, "{}: {}\n", node_state, node_label)?;
-                } else {
-                    write!(out, "+ (actions in parallel)\n")?;
-                    for node in nodes {
-                        let node_label = format!(
-                            "{} (produces \"{}\")",
-                            self.saga_template.node_labels[&node],
-                            &self.saga_template.node_names[&node]
-                        );
-                        let node_state = live_state.node_exec_state(&node);
-                        let child_sagas = live_state.child_sagas.get(&node);
-                        let subsaga_char =
-                            if child_sagas.is_some() { '+' } else { '-' };
+            /*
+             * First, determine the maximum depth of each node.  Use this to
+             * figure out the list of nodes at each level of depth.  This
+             * information is used to figure out where to print each node's
+             * status vertically.
+             */
+            let mut max_depth_of_node: BTreeMap<NodeIndex, usize> =
+                BTreeMap::new();
+            max_depth_of_node.insert(self.saga_template.start_node, 0);
+            let mut nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>> =
+                BTreeMap::new();
+            let mut node_exec_states = BTreeMap::new();
+            let mut child_sagas = BTreeMap::new();
 
-                        write!(
-                            out,
-                            "{:width$}{:>14}+-{} {}: {}\n",
-                            "",
-                            "",
-                            subsaga_char,
-                            node_state,
-                            node_label,
-                            width = big_indent
-                        )?;
+            let graph = &self.saga_template.graph;
+            let topo_visitor = Topo::new(graph);
+            for node in topo_visitor.iter(graph) {
+                /* Record the current execution state for this node. */
+                node_exec_states
+                    .insert(node, live_state.node_exec_state(&node));
 
-                        if let Some(sagas) = child_sagas {
-                            for c in sagas {
-                                c.print_status(out, indent_level + 1).await?;
-                            }
-                        }
+                /*
+                 * If there's a child saga for this node, construct its status.
+                 */
+                if let Some(child_execs) = live_state.child_sagas.get(&node) {
+                    /*
+                     * TODO-correctness check lock order.  This seems okay
+                     * because we always take locks from parent -> child and
+                     * there cannot be cycles.
+                     */
+                    let mut statuses = Vec::new();
+                    for c in child_execs {
+                        statuses.push(c.status().await);
                     }
+                    child_sagas
+                        .insert(node, statuses)
+                        .expect_none("duplicate child status");
                 }
+
+                /*
+                 * Compute the node's depth.  This must be 0 (already stored
+                 * above) for the root node and we don't care about doing this
+                 * for the end node.
+                 */
+                if let Some(d) = max_depth_of_node.get(&node) {
+                    assert_eq!(*d, 0);
+                    assert_eq!(node, self.saga_template.start_node);
+                    assert_eq!(max_depth_of_node.len(), 1);
+                    continue;
+                }
+
+                /*
+                 * We don't want to include the end node because we don't want
+                 * to try to print it later.  This should always be the last
+                 * iteration of the loop.
+                 */
+                if node == self.saga_template.end_node {
+                    continue;
+                }
+
+                let mut max_parent_depth: Option<usize> = None;
+                for p in graph.neighbors_directed(node, Incoming) {
+                    let parent_depth = *max_depth_of_node.get(&p).unwrap();
+                    match max_parent_depth {
+                        Some(x) if x >= parent_depth => (),
+                        _ => max_parent_depth = Some(parent_depth),
+                    };
+                }
+
+                let depth = max_parent_depth.unwrap() + 1;
+                max_depth_of_node.insert(node, depth);
+
+                nodes_at_depth.entry(depth).or_insert(Vec::new()).push(node);
             }
 
-            Ok(())
+            SagaExecStatus {
+                saga_id: self.saga_id,
+                saga_template: Arc::clone(&self.saga_template),
+                nodes_at_depth,
+                node_exec_states,
+                child_sagas,
+            }
         }
         .boxed()
     }
@@ -1323,7 +1292,7 @@ impl SagaExecLiveState {
 }
 
 /**
- * Summarizes the final state of a saga execution.
+ * Summarizes the final state of a saga execution
  */
 pub struct SagaExecResult {
     pub saga_id: SagaId,
@@ -1370,6 +1339,94 @@ impl SagaExecResult {
                 name
             ));
         Ok(parsed)
+    }
+}
+
+/**
+ * Summarizes in-progress execution state of a saga
+ *
+ * The only thing you can do with this currently is print it using `Display`.
+ */
+#[derive(Debug)]
+pub struct SagaExecStatus {
+    saga_id: SagaId,
+    nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>>,
+    node_exec_states: BTreeMap<NodeIndex, SagaNodeExecState>,
+    child_sagas: BTreeMap<NodeIndex, Vec<SagaExecStatus>>,
+    saga_template: Arc<SagaTemplate>,
+}
+
+impl fmt::Display for SagaExecStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.print(f, 0)
+    }
+}
+
+impl SagaExecStatus {
+    fn print(
+        &self,
+        out: &mut fmt::Formatter<'_>,
+        indent_level: usize,
+    ) -> fmt::Result {
+        let big_indent = indent_level * 16;
+        write!(
+            out,
+            "{:width$}+ saga execution: {}\n",
+            "",
+            self.saga_id,
+            width = big_indent
+        )?;
+        for (d, nodes) in &self.nodes_at_depth {
+            write!(
+                out,
+                "{:width$}+-- stage {:>2}: ",
+                "",
+                d,
+                width = big_indent
+            )?;
+            if nodes.len() == 1 {
+                let node = nodes[0];
+                let node_label = format!(
+                    "{} (produces \"{}\")",
+                    self.saga_template.node_labels[&node],
+                    &self.saga_template.node_names[&node]
+                );
+                let node_state = &self.node_exec_states[&node];
+                write!(out, "{}: {}\n", node_state, node_label)?;
+            } else {
+                write!(out, "+ (actions in parallel)\n")?;
+                for node in nodes {
+                    let node_label = format!(
+                        "{} (produces \"{}\")",
+                        self.saga_template.node_labels[&node],
+                        &self.saga_template.node_names[&node]
+                    );
+                    let node_state = &self.node_exec_states[&node];
+                    let child_sagas = self.child_sagas.get(&node);
+                    let subsaga_char =
+                        if child_sagas.is_some() { '+' } else { '-' };
+
+                    write!(
+                        out,
+                        "{:width$}{:>14}+-{} {}: {}\n",
+                        "",
+                        "",
+                        subsaga_char,
+                        node_state,
+                        node_label,
+                        width = big_indent
+                    )?;
+
+                    if let Some(sagas) = child_sagas {
+                        for c in sagas {
+                            c.print(out, indent_level + 1)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

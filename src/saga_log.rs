@@ -332,7 +332,7 @@ impl fmt::Debug for SagaLog {
         write!(f, "creator:           {}\n", self.creator)?;
         write!(
             f,
-            "direction:             {}\n",
+            "direction:         {}\n",
             if !self.unwinding { "forward" } else { "unwinding" }
         )?;
         write!(f, "events ({} total):\n", self.events.len())?;

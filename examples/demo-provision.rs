@@ -71,7 +71,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
 
     eprintln!("*** initial state ***");
     let exec = SagaExecutor::new(saga_template, "provision-info");
-    exec.print_status(&mut stderr, 0).await.unwrap();
+    eprintln!("{}", exec.status().await);
     Ok(())
 }
 
@@ -121,7 +121,6 @@ struct RunArgs {
 }
 
 async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
-    let mut stderr = io::stderr();
     let saga_template = make_provision_saga();
     let exec = if let Some(input_log_path) = &args.recover_from {
         eprintln!("recovering from log: {}", input_log_path.display());
@@ -142,7 +141,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         })?;
 
         eprint!("recovered state\n");
-        exec.print_status(&mut stderr, 0).await.unwrap();
+        eprintln!("{}", exec.status().await);
         eprintln!("");
         exec
     } else {
@@ -163,7 +162,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     eprintln!("*** finished saga ***");
 
     eprintln!("\n*** final state ***");
-    exec.print_status(&mut stderr, 0).await.unwrap();
+    eprintln!("{}", exec.status().await);
 
     if let Some(output_log_path) = &args.dump_to {
         let result = exec.result();
