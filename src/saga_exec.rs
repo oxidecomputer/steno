@@ -352,10 +352,13 @@ enum RecoveryDirection {
 
 impl SagaExecutor {
     /** Create an executor to run the given saga. */
-    pub fn new(w: Arc<SagaTemplate>, creator: &str) -> SagaExecutor {
+    pub fn new(
+        saga_template: Arc<SagaTemplate>,
+        creator: &str,
+    ) -> SagaExecutor {
         let saga_id = SagaId(Uuid::new_v4());
         let sglog = SagaLog::new(creator, saga_id);
-        SagaExecutor::new_recover(w, sglog, creator).unwrap()
+        SagaExecutor::new_recover(saga_template, sglog, creator).unwrap()
     }
 
     /**
@@ -636,6 +639,13 @@ impl SagaExecutor {
         self.make_ancestor_tree(tree, live_state, node, false);
     }
 
+    /**
+     * Simulates an error at a given node in the saga graph
+     *
+     * When execution reaches this node, instead of running the normal action
+     * for this node, an error will be generated and processed as though the
+     * action itself had produced the error.
+     */
     pub async fn inject_error(&self, node_id: NodeIndex) {
         let mut live_state = self.live_state.lock().await;
         live_state.injected_errors.insert(node_id);
@@ -969,6 +979,19 @@ impl SagaExecutor {
             .expect("unexpected channel failure");
     }
 
+    /*
+     * TODO-design Today, callers that invoke run() maintain a handle to the
+     * SagaExec so that they can control and check the status of execution.
+     * But ideally, once a caller has invoked run(), they wouldn't be able to
+     * call it again; and ideally, they wouldn't be able to get the result of
+     * the saga until run() had finished.  One way we might do this is to
+     * have run() consume the WfExec, return immediately an object that can be
+     * used only for status and control, and provide a method on that object
+     * that turns into the result.
+     */
+    /**
+     * Runs the saga to completion asynchronously
+     */
     pub fn run(&self) -> impl Future<Output = ()> + '_ {
         let mut rx = self.finish_tx.subscribe();
 
@@ -978,6 +1001,14 @@ impl SagaExecutor {
         }
     }
 
+    /**
+     * Returns a [`SagaExecResult`] describing the result of the saga, including
+     * data produced by its actions.
+     *
+     * # Panics
+     *
+     * If the saga has not yet completed.
+     */
     pub fn result(&self) -> SagaExecResult {
         /*
          * TODO-cleanup is there a way to make this safer?  If we could know
@@ -1012,10 +1043,13 @@ impl SagaExecutor {
     }
 
     /*
-     * TODO-cleanup It would be more idiomatic to return a Dot struct that impls
-     * Display to do this.
+     * TODO-cleanup It would be more idiomatic to return an object that impls
+     * Display or Debug to do this.
      */
     // TODO-liveness does this writer need to be async?
+    /**
+     * Summarize the current execution status of the saga
+     */
     pub fn print_status<'a, 'b, 'c>(
         &'a self,
         out: &'b mut (dyn io::Write + Send),
@@ -1294,11 +1328,20 @@ impl SagaExecLiveState {
 pub struct SagaExecResult {
     pub saga_id: SagaId,
     pub sglog: SagaLog,
-    pub node_results: BTreeMap<String, SagaActionResult>,
+    node_results: BTreeMap<String, SagaActionResult>,
     succeeded: bool,
 }
 
 impl SagaExecResult {
+    /**
+     * Returns the data produced by a node in the saga, if the saga completed
+     * successfully.  Otherwise, returns an error.
+     *
+     * # Panics
+     *
+     * If the saga has no node called `name`, or if the type produced by this
+     * node does not match `T`.
+     */
     pub fn lookup_output<T: SagaActionOutput + 'static>(
         &self,
         name: &str,
@@ -1429,11 +1472,10 @@ impl SagaContext {
      * # Panics
      *
      * This function panics if there was no data previously stored with name
-     * `name` or if the type of that data was not `T`.  (Data is stored as
-     * `Arc<dyn Any>` and downcast to `T` here.)  The assumption here is actions
-     * within a saga are tightly coupled, so the caller knows exactly what
-     * the previous action stored.  We would enforce this at compile time if we
-     * could.
+     * `name` or if the type of that data was not `T`.  The assumption here is
+     * that actions within a saga are tightly coupled, so the caller knows
+     * exactly what the previous action stored.  We would enforce this at
+     * compile time if we could.
      */
     pub fn lookup<T: SagaActionOutput + 'static>(&self, name: &str) -> T {
         let item = self
@@ -1447,8 +1489,14 @@ impl SagaContext {
     }
 
     /**
-     * Execute a new dsaga `sg` and wait for it to complete.  `sg` is considered
-     * a "child" saga of the current saga.
+     * Execute a new saga `sg` within this saga and wait for it to complete.
+     *
+     * `sg` is considered a "child" saga of the current saga, meaning that
+     * control actions (like pause) on the current saga will affect the child
+     * and status reporting of the current saga will show the status of the
+     * child.
+     */
+    /*
      * TODO Is there some way to prevent people from instantiating their own
      * SagaExecutor by mistake instead?  Even better: if they do that, can we
      * detect that they're part of a saga already somehow and make the new
@@ -1458,6 +1506,8 @@ impl SagaContext {
      * Saga was constructed what the whole graph looks like, instead of only
      * knowing about child sagas once we start executing the node that
      * creates them.
+     * TODO We probably need to ensure that the child saga is running in the
+     * same SEC.
      */
     pub async fn child_saga(&self, sg: Arc<SagaTemplate>) -> Arc<SagaExecutor> {
         let e = Arc::new(SagaExecutor::new(sg, &self.creator));
@@ -1472,6 +1522,9 @@ impl SagaContext {
         e
     }
 
+    /**
+     * Returns the human-readable label for the current saga node
+     */
     pub fn node_label(&self) -> &str {
         self.saga_template.node_labels.get(&self.node_id).unwrap()
     }
