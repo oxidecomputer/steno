@@ -70,6 +70,11 @@ pub struct SagaTemplate {
 }
 
 impl SagaTemplate {
+    /*
+     * TODO-cleanup we may want to use a newtype for NodeIndex here.  It's
+     * sketchy that this is exposed publicly but there's no way for callers to
+     * write down this type.
+     */
     pub fn node_for_name(
         &self,
         target_name: &str,
