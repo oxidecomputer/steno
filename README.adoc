@@ -2,7 +2,7 @@
 :toc: left
 :icons: font
 
-= workflow-doodling
+= steno
 
 This repo contains an in-progress prototype interface for sagas based on distributed sagas.
 
