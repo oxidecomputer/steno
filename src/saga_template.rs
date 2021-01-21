@@ -43,14 +43,12 @@ impl fmt::Display for SagaId {
 }
 
 /**
- * Sagas help organize execution of a set of asynchronous tasks that can fail
+ * A directed acyclic graph (DAG) where each node implements `SagaAction`
  *
- * Each saga template is a directed acyclic graph (DAG) where each node
- * implements `SagaAction`.  With each node, there's typically an execution
- * action and an undo action.  Execution guarantees that eventually all saga
- * nodes will complete successfully or else that any nodes whose actions may
- * have run have also had their undo action run.  This abstraction is based on
- * the distributed saga pattern.
+ * With each node, there's an execution action and an undo action.  Execution of
+ * the saga guarantees that eventually all saga nodes will complete successfully
+ * or else that any nodes whose actions may have run have also had their undo
+ * action run.
  *
  * You define a saga template using [`SagaTemplateBuilder`].  You can execute a
  * saga as many times as you want using [`crate::SagaExecutor`].

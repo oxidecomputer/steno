@@ -1,4 +1,15 @@
-//! In-progress prototype implementation based on distributed sagas
+//! Steno is an in-progress prototype based on distributed sagas.
+//!
+//! Sagas help organize execution of a set of asynchronous tasks that can fail,
+//! providing useful semantics for unwinding the whole operation when that
+//! happens.
+//!
+//! ## Getting started
+//!
+//! * Write some functions that will be used as _actions_ and _undo actions_ for
+//!   your saga.  Package these into a [`SagaActionFunc`].
+//! * Use [`SagaTemplateBuilder`] to build a graph of these actions.
+//! * Use [`SagaExecutor`] to execute the saga.
 
 #![deny(elided_lifetimes_in_paths)]
 #![feature(option_expect_none)]

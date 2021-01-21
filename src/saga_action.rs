@@ -24,7 +24,7 @@ pub type SagaError = anyhow::Error;
 /** Result of a saga action */
 // TODO-cleanup can we drop this Arc?
 pub type SagaActionResult = Result<Arc<JsonValue>, SagaError>;
-/** Result of a saga undo action. */
+/** Result of a saga undo action */
 pub type SagaUndoResult = Result<(), SagaError>;
 
 /**

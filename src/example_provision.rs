@@ -36,8 +36,13 @@ use std::sync::Arc;
  *          boot instance
  */
 
-/*
- * Construct a demo "provision" saga matching the description above.
+/**
+ * Returns a demo "VM provision" saga
+ *
+ * The actions in this saga do essentially nothing.  They print out what node is
+ * running, they produce some data, and they consume some data from previous
+ * nodes.  The intent is just to exercise the API.  You can interact with this
+ * using the `demo-provision` example.
  */
 pub fn make_provision_saga() -> Arc<SagaTemplate> {
     let mut w = SagaTemplateBuilder::new();
