@@ -12,10 +12,16 @@
 //! * Use [`SagaExecutor`] to execute the saga.
 
 #![deny(elided_lifetimes_in_paths)]
-#![feature(option_expect_none)]
-#![feature(or_patterns)]
+/*
+ * We disable the warning for unstable name collisions because we deliberately
+ * have some conflicts in rust_features.rs (corresponding to backports of
+ * unstable features).  If and when these features are stabilized, we should see
+ * warnings that our backported versions are unused and we can remove them.
+ */
+#![allow(unstable_name_collisions)]
 
 mod example_provision;
+mod rust_features;
 mod saga_action;
 mod saga_exec;
 mod saga_log;

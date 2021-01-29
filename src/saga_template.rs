@@ -1,5 +1,6 @@
 //! Facilities for constructing saga graphs
 
+use crate::rust_features::ExpectNone;
 use crate::saga_action::SagaAction;
 use crate::saga_action::SagaActionEndNode;
 use crate::saga_action::SagaActionStartNode;

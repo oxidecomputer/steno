@@ -1,5 +1,6 @@
 //! Manages execution of a saga
 
+use crate::rust_features::ExpectNone;
 use crate::saga_action::SagaAction;
 use crate::saga_action::SagaActionInjectError;
 use crate::saga_action::SagaActionOutput;
@@ -1457,7 +1458,7 @@ fn recovery_validate_parent(
     parent_status: &SagaNodeLoadStatus,
     child_status: &SagaNodeLoadStatus,
 ) -> bool {
-    match (child_status, parent_status) {
+    match child_status {
         /*
          * If the child node has started, finished successfully, finished with
          * an error, or even started undoing, the only allowed status for the
@@ -1471,37 +1472,31 @@ fn recovery_validate_parent(
          * execution.  If we did, then the "undo started" load state could be
          * associated with a parent that failed.)
          */
-        (
-            SagaNodeLoadStatus::Started
-            | SagaNodeLoadStatus::Succeeded(_)
-            | SagaNodeLoadStatus::Failed
-            | SagaNodeLoadStatus::UndoStarted,
-            SagaNodeLoadStatus::Succeeded(_),
-        ) => true,
+        SagaNodeLoadStatus::Started
+        | SagaNodeLoadStatus::Succeeded(_)
+        | SagaNodeLoadStatus::Failed
+        | SagaNodeLoadStatus::UndoStarted => {
+            matches!(parent_status, SagaNodeLoadStatus::Succeeded(_))
+        }
 
         /*
          * If we've finished undoing the child node, then the parent must be
          * either "done" or one of the undoing states.
          */
-        (
-            SagaNodeLoadStatus::UndoFinished,
+        SagaNodeLoadStatus::UndoFinished => matches!(parent_status,
             SagaNodeLoadStatus::Succeeded(_)
             | SagaNodeLoadStatus::UndoStarted
-            | SagaNodeLoadStatus::UndoFinished,
-        ) => true,
+            | SagaNodeLoadStatus::UndoFinished),
 
         /*
          * If a node has never started, the only illegal states for a parent are
          * those associated with undoing, since the child must be undone first.
          */
-        (
-            SagaNodeLoadStatus::NeverStarted,
+        SagaNodeLoadStatus::NeverStarted => matches!(parent_status,
             SagaNodeLoadStatus::NeverStarted
             | SagaNodeLoadStatus::Started
             | SagaNodeLoadStatus::Succeeded(_)
-            | SagaNodeLoadStatus::Failed,
-        ) => true,
-        _ => false,
+            | SagaNodeLoadStatus::Failed),
     }
 }
 
