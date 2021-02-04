@@ -77,6 +77,13 @@ impl<T: Debug + DeserializeOwned + Serialize + Send + Sync> SagaActionOutput
  * We currently don't expose the `SagaAction` trait directly to users, but we
  * easily could if that proved useful.  We may want to think more carefully
  * about the `SagaActionResult` type if we do that.
+ *
+ * The intent is that SagaActions are stateless -- any state is supposed to be
+ * stored via the saga framework itself.  As a result, it should be easy to make
+ * these Send and Sync.  This is important because we want to be able to have
+ * multiple references to the same SagaAction in multiple threads -- as might
+ * happen if the same action appeared multiple times in the saga or in different
+ * sagas.
  */
 #[async_trait]
 pub trait SagaAction: Debug + Send + Sync {
@@ -187,17 +194,37 @@ pub struct SagaActionFunc<
     UndoFuncType,
 > where
     ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput>>
-        + Send
-        + Sync
-        + 'static,
+    ActionFutType:
+        Future<Output = SagaFuncResult<ActionFuncOutput>> + Send + 'static,
     ActionFuncOutput: SagaActionOutput + 'static,
     UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = SagaUndoResult> + Send + Sync + 'static,
+    UndoFutType: Future<Output = SagaUndoResult> + Send + 'static,
 {
     action_func: ActionFuncType,
     undo_func: UndoFuncType,
-    phantom: PhantomData<(ActionFutType, UndoFutType)>,
+    /*
+     * The PhantomData type parameter below deserves some explanation.  First:
+     * this struct needs to store the above fields of type ActionFuncType and
+     * UndoFuncType.  These are async functions (i.e., they produce futures), so
+     * we need additional type parameters and trait bounds to describe the
+     * futures that they produce.  But we don't actually use these futures in
+     * the struct.  Consumers implicitly specify them when they specify the
+     * corresponding function type parameters.  This is a typical case for using
+     * PhantomData to reference these type parameters without really using them.
+     *
+     * Like many future types, ActionFutType and UndoFutType will be Send, but
+     * not necessarily Sync.  (We don't want to impose Sync on the caller
+     * because many useful futures are not Sync -- like
+     * hyper::client::ResponseFuture, for example.)  As a result, the obvious
+     * choice of `PhantomData<(ActionFutType, UndoFutType)>` won't be Sync, and
+     * then this struct (SagaActionFunc) won't be Sync -- and that's bad.  See
+     * the comment on the SagaAction trait for why this must be Sync.
+     *
+     * On the other hand, the type `PhantomData<fn() -> (ActionFutType,
+     * UndoFutType)>` is Sync and also satisfies our need to reference these
+     * type parameters in the struct's contents.
+     */
+    phantom: PhantomData<fn() -> (ActionFutType, UndoFutType)>,
 }
 
 impl<
@@ -216,13 +243,11 @@ impl<
     >
 where
     ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput>>
-        + Send
-        + Sync
-        + 'static,
+    ActionFutType:
+        Future<Output = SagaFuncResult<ActionFuncOutput>> + Send + 'static,
     ActionFuncOutput: SagaActionOutput + 'static,
     UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = SagaUndoResult> + Send + Sync + 'static,
+    UndoFutType: Future<Output = SagaUndoResult> + Send + 'static,
 {
     /**
      * Construct a `SagaAction` from a pair of functions, using `action_func`
@@ -263,10 +288,8 @@ pub fn new_action_noop_undo<ActionFutType, ActionFuncType, ActionFuncOutput>(
 ) -> Arc<dyn SagaAction>
 where
     ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput>>
-        + Send
-        + Sync
-        + 'static,
+    ActionFutType:
+        Future<Output = SagaFuncResult<ActionFuncOutput>> + Send + 'static,
     ActionFuncOutput: SagaActionOutput + 'static,
 {
     SagaActionFunc::new_action(f, undo_noop)
@@ -289,13 +312,11 @@ impl<
     >
 where
     ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput>>
-        + Send
-        + Sync
-        + 'static,
+    ActionFutType:
+        Future<Output = SagaFuncResult<ActionFuncOutput>> + Send + 'static,
     ActionFuncOutput: SagaActionOutput + 'static,
     UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = SagaUndoResult> + Send + Sync + 'static,
+    UndoFutType: Future<Output = SagaUndoResult> + Send + 'static,
 {
     async fn do_it(&self, sgctx: SagaContext) -> SagaActionResult {
         let label = sgctx.node_label().to_owned();
@@ -336,13 +357,11 @@ impl<
     >
 where
     ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput>>
-        + Send
-        + Sync
-        + 'static,
+    ActionFutType:
+        Future<Output = SagaFuncResult<ActionFuncOutput>> + Send + 'static,
     ActionFuncOutput: SagaActionOutput + 'static,
     UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = SagaUndoResult> + Send + Sync + 'static,
+    UndoFutType: Future<Output = SagaUndoResult> + Send + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         /*
