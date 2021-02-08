@@ -1022,6 +1022,29 @@ impl SagaExecutor {
             .expect("attempted to get result while saga still running?");
         assert_eq!(live_state.exec_state, SagaState::Done);
 
+        /*
+         * We don't allow callers to access outputs from a saga that failed
+         * because it's not obvious yet why this would be useful and it's too
+         * easy to shoot yourself in the foot by not checking whether the saga
+         * failed.  If this becomes useful, we could expose it in a way that
+         * makes sure callers have checked this.
+         * TODO-cleanup If we make SagaExecResult an enum of success or failure,
+         * that alone might help.
+         */
+        if live_state.nodes_undone.contains_key(&self.saga_template.start_node)
+        {
+            assert!(live_state
+                .nodes_undone
+                .contains_key(&self.saga_template.end_node));
+            return SagaExecResult {
+                saga_id: self.saga_id,
+                sglog: live_state.sglog.clone(),
+                node_results: BTreeMap::new(),
+                succeeded: false,
+            };
+        }
+
+        assert!(live_state.nodes_undone.is_empty());
         let mut node_results = BTreeMap::new();
         for (node_id, output) in &live_state.node_outputs {
             if *node_id == self.saga_template.start_node
