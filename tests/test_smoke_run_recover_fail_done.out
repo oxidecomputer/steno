@@ -1,0 +1,29 @@
+recovering from log: /dev/stdin
+recovered state
++ saga execution: sg-049b2522-308d-442e-bc65-9bfaef863597
++-- stage  1: undone: InstanceCreate (produces "instance_id")
++-- stage  2: + (actions in parallel)
+              +-- undone: VpcAllocIp (produces "instance_ip")
+              +-- undone: VolumeCreate (produces "volume_id")
+              +-- undone: ServerAlloc (subsaga) (produces "server_id")
++-- stage  3: undone: InstanceConfigure (produces "instance_configure")
++-- stage  4: undone: VolumeAttach (produces "volume_attach")
++-- stage  5: failed: InstanceBoot (produces "instance_boot")
++-- stage  6: abandoned: Print (produces "print")
+
+
+*** running saga ***
+*** finished saga ***
+
+*** final state ***
++ saga execution: sg-049b2522-308d-442e-bc65-9bfaef863597
++-- stage  1: undone: InstanceCreate (produces "instance_id")
++-- stage  2: + (actions in parallel)
+              +-- undone: VpcAllocIp (produces "instance_ip")
+              +-- undone: VolumeCreate (produces "volume_id")
+              +-- undone: ServerAlloc (subsaga) (produces "server_id")
++-- stage  3: undone: InstanceConfigure (produces "instance_configure")
++-- stage  4: undone: VolumeAttach (produces "volume_attach")
++-- stage  5: failed: InstanceBoot (produces "instance_boot")
++-- stage  6: abandoned: Print (produces "print")
+

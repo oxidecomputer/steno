@@ -1,7 +1,7 @@
 //! Persistent state for sagas
 
+use crate::saga_action::SagaActionError;
 use crate::saga_template::SagaId;
-use crate::SagaError;
 use anyhow::anyhow;
 use anyhow::Context;
 use chrono::DateTime;
@@ -15,10 +15,24 @@ use std::fmt;
 use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
+use thiserror::Error;
 
 /* TODO-cleanup newtype for this? */
 type SagaNodeId = u64;
-type SagaLogResult = Result<(), SagaError>;
+
+#[derive(Debug, Error)]
+pub enum SagaLogError {
+    #[error(
+        "event type {event_type} is illegal with current \
+        load status {current_status:?}"
+    )]
+    IllegalEventForState {
+        current_status: SagaNodeLoadStatus,
+        event_type: SagaNodeEventType,
+    },
+}
+
+type SagaLogResult = Result<(), SagaLogError>;
 
 /**
  * Event types that may be found in the log for a particular action
@@ -36,7 +50,7 @@ pub enum SagaNodeEventType {
     /** The action completed successfully (with output data) */
     Succeeded(Arc<JsonValue>),
     /** The action failed */
-    Failed,
+    Failed(SagaActionError),
     /** The undo action has started running */
     UndoStarted,
     /** The undo action has finished */
@@ -48,7 +62,7 @@ impl fmt::Display for SagaNodeEventType {
         f.write_str(match self {
             SagaNodeEventType::Started => "started",
             SagaNodeEventType::Succeeded(_) => "succeeded",
-            SagaNodeEventType::Failed => "failed",
+            SagaNodeEventType::Failed(_) => "failed",
             SagaNodeEventType::UndoStarted => "undo started",
             SagaNodeEventType::UndoFinished => "undo finished",
         })
@@ -76,9 +90,9 @@ pub enum SagaNodeLoadStatus {
     /** The action completed successfully (with output data) */
     Succeeded(Arc<JsonValue>),
     /** The action failed */
-    Failed,
-    /** The undo action has started running */
-    UndoStarted,
+    Failed(SagaActionError),
+    /** The undo action has started running (with output data from success) */
+    UndoStarted(Arc<JsonValue>),
     /** The undo action has finished */
     UndoFinished,
 }
@@ -88,7 +102,7 @@ impl SagaNodeLoadStatus {
     fn next_status(
         &self,
         event_type: &SagaNodeEventType,
-    ) -> Result<SagaNodeLoadStatus, SagaError> {
+    ) -> Result<SagaNodeLoadStatus, SagaLogError> {
         match (self, event_type) {
             (SagaNodeLoadStatus::NeverStarted, SagaNodeEventType::Started) => {
                 Ok(SagaNodeLoadStatus::Started)
@@ -97,25 +111,21 @@ impl SagaNodeLoadStatus {
                 SagaNodeLoadStatus::Started,
                 SagaNodeEventType::Succeeded(out),
             ) => Ok(SagaNodeLoadStatus::Succeeded(Arc::clone(out))),
-            (SagaNodeLoadStatus::Started, SagaNodeEventType::Failed) => {
-                Ok(SagaNodeLoadStatus::Failed)
+            (SagaNodeLoadStatus::Started, SagaNodeEventType::Failed(e)) => {
+                Ok(SagaNodeLoadStatus::Failed(e.clone()))
             }
             (
-                SagaNodeLoadStatus::Succeeded(_),
+                SagaNodeLoadStatus::Succeeded(out),
                 SagaNodeEventType::UndoStarted,
-            ) => Ok(SagaNodeLoadStatus::UndoStarted),
-            (SagaNodeLoadStatus::Failed, SagaNodeEventType::UndoStarted) => {
-                Ok(SagaNodeLoadStatus::UndoStarted)
-            }
+            ) => Ok(SagaNodeLoadStatus::UndoStarted(Arc::clone(out))),
             (
-                SagaNodeLoadStatus::UndoStarted,
+                SagaNodeLoadStatus::UndoStarted(_),
                 SagaNodeEventType::UndoFinished,
             ) => Ok(SagaNodeLoadStatus::UndoFinished),
-            _ => Err(anyhow!(
-                "saga node with status \"{:?}\": event \"{}\" is illegal",
-                self,
-                event_type
-            )),
+            _ => Err(SagaLogError::IllegalEventForState {
+                current_status: self.clone(),
+                event_type: event_type.clone(),
+            }),
         }
     }
 }
@@ -173,9 +183,9 @@ pub struct SagaLog {
 }
 
 impl SagaLog {
-    pub fn new(creator: &str, saga_id: SagaId) -> SagaLog {
+    pub fn new(creator: &str, saga_id: &SagaId) -> SagaLog {
         SagaLog {
-            saga_id,
+            saga_id: *saga_id,
             creator: creator.to_string(),
             events: Vec::new(),
             node_status: BTreeMap::new(),
@@ -206,13 +216,14 @@ impl SagaLog {
          */
         async move { Ok(result) }
     }
-    fn record(&mut self, event: SagaNodeEvent) -> Result<(), SagaError> {
+
+    fn record(&mut self, event: SagaNodeEvent) -> Result<(), SagaLogError> {
         let current_status = self.load_status_for_node(event.node_id);
         let next_status = current_status.next_status(&event.event_type)?;
 
         match next_status {
-            SagaNodeLoadStatus::Failed
-            | SagaNodeLoadStatus::UndoStarted
+            SagaNodeLoadStatus::Failed(_)
+            | SagaNodeLoadStatus::UndoStarted(_)
             | SagaNodeLoadStatus::UndoFinished => {
                 self.unwinding = true;
             }
@@ -266,7 +277,7 @@ impl SagaLog {
     ) -> Result<SagaLog, anyhow::Error> {
         let mut s: SagaLogSerialized = serde_json::from_reader(reader)
             .with_context(|| "deserializing saga log")?;
-        let mut sglog = SagaLog::new(&creator, s.saga_id);
+        let mut sglog = SagaLog::new(&creator, &s.saga_id);
 
         /*
          * Sort the events by the event type.  This ensures that if there's at
@@ -293,7 +304,7 @@ impl SagaLog {
              */
             SagaNodeEventType::Started => 1,
             SagaNodeEventType::Succeeded(_) => 2,
-            SagaNodeEventType::Failed => 3,
+            SagaNodeEventType::Failed(_) => 3,
             SagaNodeEventType::UndoStarted => 4,
             SagaNodeEventType::UndoFinished => 5,
         });
@@ -317,12 +328,13 @@ impl SagaLog {
     }
 }
 
+#[doc(hidden)]
 #[derive(Deserialize, Serialize)]
-struct SagaLogSerialized {
+pub struct SagaLogSerialized {
     /* TODO-robustness add version */
-    saga_id: SagaId,
-    creator: String,
-    events: Vec<SagaNodeEvent>,
+    pub saga_id: SagaId,
+    pub creator: String,
+    pub events: Vec<SagaNodeEvent>,
 }
 
 impl fmt::Debug for SagaLog {

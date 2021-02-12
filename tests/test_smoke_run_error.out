@@ -1,0 +1,19 @@
+will inject error at node "instance_boot"
+*** running saga ***
+*** finished saga ***
+
+*** final state ***
++ saga execution: sg-049b2522-308d-442e-bc65-9bfaef863597
++-- stage  1: undone: InstanceCreate (produces "instance_id")
++-- stage  2: + (actions in parallel)
+              +-- undone: VpcAllocIp (produces "instance_ip")
+              +-- undone: VolumeCreate (produces "volume_id")
+              +-+ undone: ServerAlloc (subsaga) (produces "server_id")
+                + saga execution: sg-bcf32552-2b54-485b-bf13-b316daa7d1d4
+                +-- stage  1: done: ServerPick (produces "server_id")
+                +-- stage  2: done: ServerReserve (produces "server_reserve")
++-- stage  3: undone: InstanceConfigure (produces "instance_configure")
++-- stage  4: undone: VolumeAttach (produces "volume_attach")
++-- stage  5: failed: InstanceBoot (produces "instance_boot")
++-- stage  6: abandoned: Print (produces "print")
+

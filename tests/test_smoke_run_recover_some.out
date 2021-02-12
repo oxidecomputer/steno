@@ -1,0 +1,29 @@
+recovering from log: /dev/stdin
+recovered state
++ saga execution: sg-049b2522-308d-442e-bc65-9bfaef863597
++-- stage  1: done: InstanceCreate (produces "instance_id")
++-- stage  2: + (actions in parallel)
+              +-- done: VpcAllocIp (produces "instance_ip")
+              +-- done: VolumeCreate (produces "volume_id")
+              +-- done: ServerAlloc (subsaga) (produces "server_id")
++-- stage  3: done: InstanceConfigure (produces "instance_configure")
++-- stage  4: done: VolumeAttach (produces "volume_attach")
++-- stage  5: queued-todo: InstanceBoot (produces "instance_boot")
++-- stage  6: blocked: Print (produces "print")
+
+
+*** running saga ***
+*** finished saga ***
+
+*** final state ***
++ saga execution: sg-049b2522-308d-442e-bc65-9bfaef863597
++-- stage  1: done: InstanceCreate (produces "instance_id")
++-- stage  2: + (actions in parallel)
+              +-- done: VpcAllocIp (produces "instance_ip")
+              +-- done: VolumeCreate (produces "volume_id")
+              +-- done: ServerAlloc (subsaga) (produces "server_id")
++-- stage  3: done: InstanceConfigure (produces "instance_configure")
++-- stage  4: done: VolumeAttach (produces "volume_attach")
++-- stage  5: done: InstanceBoot (produces "instance_boot")
++-- stage  6: done: Print (produces "print")
+

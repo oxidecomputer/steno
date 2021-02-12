@@ -3,13 +3,17 @@
  */
 
 use crate::new_action_noop_undo;
+use crate::SagaActionError;
 use crate::SagaContext;
 use crate::SagaFuncResult;
+use crate::SagaId;
 use crate::SagaTemplate;
 use crate::SagaTemplateBuilder;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
+use thiserror::Error;
+use uuid::Uuid;
 
 /*
  * Demo provision saga:
@@ -35,6 +39,21 @@ use std::sync::Arc;
  *              v
  *          boot instance
  */
+
+#[derive(Debug, Deserialize, Error, Serialize)]
+enum ExampleError {
+    #[error("example error")]
+    AnError,
+}
+
+type ExFuncResult<T> = SagaFuncResult<T, SagaActionError>;
+
+/* TODO-cleanup can we implement this generically? */
+impl From<ExampleError> for SagaActionError {
+    fn from(t: ExampleError) -> SagaActionError {
+        SagaActionError::action_failed(t)
+    }
+}
 
 /**
  * Returns a demo "VM provision" saga
@@ -88,14 +107,14 @@ pub fn make_provision_saga() -> Arc<SagaTemplate> {
     Arc::new(w.build())
 }
 
-async fn demo_prov_instance_create(sgctx: SagaContext) -> SagaFuncResult<u64> {
+async fn demo_prov_instance_create(sgctx: SagaContext) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
     /* make up an instance ID */
     let instance_id = 1211u64;
     Ok(instance_id)
 }
 
-async fn demo_prov_vpc_alloc_ip(sgctx: SagaContext) -> SagaFuncResult<String> {
+async fn demo_prov_vpc_alloc_ip(sgctx: SagaContext) -> ExFuncResult<String> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using some data from a previous node */
     let instance_id = sgctx.lookup::<u64>("instance_id");
@@ -108,7 +127,7 @@ async fn demo_prov_vpc_alloc_ip(sgctx: SagaContext) -> SagaFuncResult<String> {
 /*
  * The next two steps are in a subsaga!
  */
-async fn demo_prov_server_alloc(sgctx: SagaContext) -> SagaFuncResult<u64> {
+async fn demo_prov_server_alloc(sgctx: SagaContext) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
 
     let mut w = SagaTemplateBuilder::new();
@@ -124,12 +143,25 @@ async fn demo_prov_server_alloc(sgctx: SagaContext) -> SagaFuncResult<u64> {
     );
     let sg = Arc::new(w.build());
 
-    let e = sgctx.child_saga(sg).await;
+    /*
+     * The uuid here is deterministic solely for the smoke tests.  It would
+     * probably be better to have a way to get uuids from the SagaContext, and
+     * have a mode where those come from a seeded random number generator (or
+     * some other controlled source for testing).
+     */
+    let saga_id = SagaId(
+        Uuid::parse_str("bcf32552-2b54-485b-bf13-b316daa7d1d4").unwrap(),
+    );
+    let e = sgctx.child_saga(&saga_id, sg).await;
     e.run().await;
-    let result = e.result();
-    let server_allocated: Arc<ServerAllocResult> =
-        result.lookup_output("server_reserve")?;
-    Ok(server_allocated.server_id)
+    match e.result().kind {
+        Ok(success) => {
+            let server_allocated: Arc<ServerAllocResult> =
+                success.lookup_output("server_reserve");
+            Ok(server_allocated.server_id)
+        }
+        Err(failure) => Err(failure.error_source),
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -137,7 +169,7 @@ struct ServerAllocResult {
     server_id: u64,
 }
 
-async fn demo_prov_server_pick(sgctx: SagaContext) -> SagaFuncResult<u64> {
+async fn demo_prov_server_pick(sgctx: SagaContext) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
     /* make up ("allocate") a new server id */
     let server_id = 1212u64;
@@ -146,7 +178,7 @@ async fn demo_prov_server_pick(sgctx: SagaContext) -> SagaFuncResult<u64> {
 
 async fn demo_prov_server_reserve(
     sgctx: SagaContext,
-) -> SagaFuncResult<ServerAllocResult> {
+) -> ExFuncResult<ServerAllocResult> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     let server_id = sgctx.lookup::<u64>("server_id");
@@ -155,7 +187,7 @@ async fn demo_prov_server_reserve(
     Ok(ServerAllocResult { server_id })
 }
 
-async fn demo_prov_volume_create(sgctx: SagaContext) -> SagaFuncResult<u64> {
+async fn demo_prov_volume_create(sgctx: SagaContext) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id"), 1211);
@@ -163,9 +195,7 @@ async fn demo_prov_volume_create(sgctx: SagaContext) -> SagaFuncResult<u64> {
     let volume_id = 1213u64;
     Ok(volume_id)
 }
-async fn demo_prov_instance_configure(
-    sgctx: SagaContext,
-) -> SagaFuncResult<()> {
+async fn demo_prov_instance_configure(sgctx: SagaContext) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id"), 1211);
@@ -173,7 +203,7 @@ async fn demo_prov_instance_configure(
     assert_eq!(sgctx.lookup::<u64>("volume_id"), 1213);
     Ok(())
 }
-async fn demo_prov_volume_attach(sgctx: SagaContext) -> SagaFuncResult<()> {
+async fn demo_prov_volume_attach(sgctx: SagaContext) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id"), 1211);
@@ -181,7 +211,7 @@ async fn demo_prov_volume_attach(sgctx: SagaContext) -> SagaFuncResult<()> {
     assert_eq!(sgctx.lookup::<u64>("volume_id"), 1213);
     Ok(())
 }
-async fn demo_prov_instance_boot(sgctx: SagaContext) -> SagaFuncResult<()> {
+async fn demo_prov_instance_boot(sgctx: SagaContext) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id"), 1211);
@@ -190,7 +220,7 @@ async fn demo_prov_instance_boot(sgctx: SagaContext) -> SagaFuncResult<()> {
     Ok(())
 }
 
-async fn demo_prov_print(sgctx: SagaContext) -> SagaFuncResult<()> {
+async fn demo_prov_print(sgctx: SagaContext) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     eprintln!("printing final state:");
     let instance_id = sgctx.lookup::<u64>("instance_id");
