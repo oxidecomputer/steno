@@ -147,6 +147,12 @@ impl<T: Debug + DeserializeOwned + Serialize + Send + Sync> SagaActionOutput
 {
 }
 
+/**
+ * Synonym for `Send + Sync + 'static`
+ */
+pub trait ExecContext: Send + Sync + 'static {}
+impl<ExecContextType: Send + Sync + 'static> ExecContext for ExecContextType {}
+
 /*
  * Generic Action interface
  */
@@ -174,7 +180,10 @@ impl<T: Debug + DeserializeOwned + Serialize + Send + Sync> SagaActionOutput
  * sagas.
  */
 #[async_trait]
-pub trait SagaAction: Debug + Send + Sync {
+pub trait SagaAction<ExecContextType>: Debug + Send + Sync
+where
+    ExecContextType: ExecContext,
+{
     /**
      * Executes the action for this saga node, whatever that is.  Actions
      * function like requests in distributed sagas: critically, they must be
@@ -188,12 +197,18 @@ pub trait SagaAction: Debug + Send + Sync {
      * is the _only_ supported means of sharing state across actions within a
      * saga.
      */
-    async fn do_it(&self, sgctx: SagaContext) -> SagaActionResult;
+    async fn do_it(
+        &self,
+        sgctx: SagaContext<ExecContextType>,
+    ) -> SagaActionResult;
 
     /**
      * Executes the compensation action for this saga node, whatever that is.
      */
-    async fn undo_it(&self, sgctx: SagaContext) -> SagaUndoResult;
+    async fn undo_it(
+        &self,
+        sgctx: SagaContext<ExecContextType>,
+    ) -> SagaUndoResult;
 }
 
 /*
@@ -205,13 +220,15 @@ pub trait SagaAction: Debug + Send + Sync {
 pub struct SagaActionStartNode {}
 
 #[async_trait]
-impl SagaAction for SagaActionStartNode {
-    async fn do_it(&self, _: SagaContext) -> SagaActionResult {
+impl<ExecContextType: ExecContext> SagaAction<ExecContextType>
+    for SagaActionStartNode
+{
+    async fn do_it(&self, _: SagaContext<ExecContextType>) -> SagaActionResult {
         eprintln!("<action for \"start\" node>");
         Ok(Arc::new(JsonValue::Null))
     }
 
-    async fn undo_it(&self, _: SagaContext) -> SagaUndoResult {
+    async fn undo_it(&self, _: SagaContext<ExecContextType>) -> SagaUndoResult {
         eprintln!("<undo for \"start\" node (saga is nearly done unwinding)>");
         Ok(())
     }
@@ -222,13 +239,15 @@ impl SagaAction for SagaActionStartNode {
 pub struct SagaActionEndNode {}
 
 #[async_trait]
-impl SagaAction for SagaActionEndNode {
-    async fn do_it(&self, _: SagaContext) -> SagaActionResult {
+impl<ExecContextType: ExecContext> SagaAction<ExecContextType>
+    for SagaActionEndNode
+{
+    async fn do_it(&self, _: SagaContext<ExecContextType>) -> SagaActionResult {
         eprintln!("<action for \"end\" node: saga is nearly done>");
         Ok(Arc::new(JsonValue::Null))
     }
 
-    async fn undo_it(&self, _: SagaContext) -> SagaUndoResult {
+    async fn undo_it(&self, _: SagaContext<ExecContextType>) -> SagaUndoResult {
         /*
          * We should not run compensation actions for nodes that have not
          * started.  We should never start this node unless all other actions
@@ -244,12 +263,14 @@ impl SagaAction for SagaActionEndNode {
 pub struct SagaActionInjectError {}
 
 #[async_trait]
-impl SagaAction for SagaActionInjectError {
-    async fn do_it(&self, _: SagaContext) -> SagaActionResult {
+impl<ExecContextType: ExecContext> SagaAction<ExecContextType>
+    for SagaActionInjectError
+{
+    async fn do_it(&self, _: SagaContext<ExecContextType>) -> SagaActionResult {
         Err(SagaActionError::InjectedError)
     }
 
-    async fn undo_it(&self, _: SagaContext) -> SagaUndoResult {
+    async fn undo_it(&self, _: SagaContext<ExecContextType>) -> SagaUndoResult {
         /* We should never undo an action that failed. */
         unimplemented!();
     }
@@ -269,18 +290,24 @@ impl SagaAction for SagaActionInjectError {
  * bounds.
  */
 pub struct SagaActionFunc<
+    ExecContextType,
     ActionFutType,
     ActionFuncType,
     ActionFuncOutput,
     UndoFutType,
     UndoFuncType,
 > where
-    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
+    ExecContextType: ExecContext,
+    ActionFuncType: Fn(SagaContext<ExecContextType>) -> ActionFutType
+        + Send
+        + Sync
+        + 'static,
     ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput, SagaActionError>>
         + Send
         + 'static,
     ActionFuncOutput: SagaActionOutput + 'static,
-    UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFuncType:
+        Fn(SagaContext<ExecContextType>) -> UndoFutType + Send + Sync + 'static,
     UndoFutType: Future<Output = SagaUndoResult> + Send + 'static,
 {
     action_func: ActionFuncType,
@@ -307,10 +334,11 @@ pub struct SagaActionFunc<
      * UndoFutType)>` is Sync and also satisfies our need to reference these
      * type parameters in the struct's contents.
      */
-    phantom: PhantomData<fn() -> (ActionFutType, UndoFutType)>,
+    phantom: PhantomData<fn() -> (ExecContextType, ActionFutType, UndoFutType)>,
 }
 
 impl<
+        ExecContextType,
         ActionFutType,
         ActionFuncType,
         ActionFuncOutput,
@@ -318,6 +346,7 @@ impl<
         UndoFuncType,
     >
     SagaActionFunc<
+        ExecContextType,
         ActionFutType,
         ActionFuncType,
         ActionFuncOutput,
@@ -325,12 +354,17 @@ impl<
         UndoFuncType,
     >
 where
-    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
+    ExecContextType: ExecContext,
+    ActionFuncType: Fn(SagaContext<ExecContextType>) -> ActionFutType
+        + Send
+        + Sync
+        + 'static,
     ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput, SagaActionError>>
         + Send
         + 'static,
     ActionFuncOutput: SagaActionOutput + 'static,
-    UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFuncType:
+        Fn(SagaContext<ExecContextType>) -> UndoFutType + Send + Sync + 'static,
     UndoFutType: Future<Output = SagaUndoResult> + Send + 'static,
 {
     /**
@@ -345,7 +379,7 @@ where
     pub fn new_action(
         action_func: ActionFuncType,
         undo_func: UndoFuncType,
-    ) -> Arc<dyn SagaAction> {
+    ) -> Arc<dyn SagaAction<ExecContextType>> {
         Arc::new(SagaActionFunc {
             action_func,
             undo_func,
@@ -358,7 +392,9 @@ where
  * TODO-cleanup why can't new_action_noop_undo live in the SagaAction namespace?
  */
 
-async fn undo_noop(sgctx: SagaContext) -> SagaUndoResult {
+async fn undo_noop<ExecContextType: ExecContext>(
+    sgctx: SagaContext<ExecContextType>,
+) -> SagaUndoResult {
     eprintln!("<noop undo for node: \"{}\">", sgctx.node_label());
     Ok(())
 }
@@ -367,11 +403,20 @@ async fn undo_noop(sgctx: SagaContext) -> SagaUndoResult {
  * Given a function `f`, return a `SagaActionFunc` that uses `f` as the action
  * and provides a no-op undo function (which does nothing and always succeeds).
  */
-pub fn new_action_noop_undo<ActionFutType, ActionFuncType, ActionFuncOutput>(
+pub fn new_action_noop_undo<
+    ExecContextType,
+    ActionFutType,
+    ActionFuncType,
+    ActionFuncOutput,
+>(
     f: ActionFuncType,
-) -> Arc<dyn SagaAction>
+) -> Arc<dyn SagaAction<ExecContextType>>
 where
-    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
+    ExecContextType: ExecContext,
+    ActionFuncType: Fn(SagaContext<ExecContextType>) -> ActionFutType
+        + Send
+        + Sync
+        + 'static,
     ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput, SagaActionError>>
         + Send
         + 'static,
@@ -382,13 +427,15 @@ where
 
 #[async_trait]
 impl<
+        ExecContextType,
         ActionFutType,
         ActionFuncType,
         ActionFuncOutput,
         UndoFutType,
         UndoFuncType,
-    > SagaAction
+    > SagaAction<ExecContextType>
     for SagaActionFunc<
+        ExecContextType,
         ActionFutType,
         ActionFuncType,
         ActionFuncOutput,
@@ -396,15 +443,23 @@ impl<
         UndoFuncType,
     >
 where
-    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
+    ExecContextType: ExecContext,
+    ActionFuncType: Fn(SagaContext<ExecContextType>) -> ActionFutType
+        + Send
+        + Sync
+        + 'static,
     ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput, SagaActionError>>
         + Send
         + 'static,
     ActionFuncOutput: SagaActionOutput + 'static,
-    UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFuncType:
+        Fn(SagaContext<ExecContextType>) -> UndoFutType + Send + Sync + 'static,
     UndoFutType: Future<Output = SagaUndoResult> + Send + 'static,
 {
-    async fn do_it(&self, sgctx: SagaContext) -> SagaActionResult {
+    async fn do_it(
+        &self,
+        sgctx: SagaContext<ExecContextType>,
+    ) -> SagaActionResult {
         let fut = { (self.action_func)(sgctx) };
         /*
          * Execute the caller's function and translate its type into the generic
@@ -419,13 +474,17 @@ where
             .map(Arc::new)
     }
 
-    async fn undo_it(&self, sgctx: SagaContext) -> SagaUndoResult {
+    async fn undo_it(
+        &self,
+        sgctx: SagaContext<ExecContextType>,
+    ) -> SagaUndoResult {
         let fut = { (self.undo_func)(sgctx) };
         fut.await
     }
 }
 
 impl<
+        ExecContextType,
         ActionFutType,
         ActionFuncType,
         ActionFuncOutput,
@@ -433,6 +492,7 @@ impl<
         UndoFuncType,
     > Debug
     for SagaActionFunc<
+        ExecContextType,
         ActionFutType,
         ActionFuncType,
         ActionFuncOutput,
@@ -440,12 +500,17 @@ impl<
         UndoFuncType,
     >
 where
-    ActionFuncType: Fn(SagaContext) -> ActionFutType + Send + Sync + 'static,
+    ExecContextType: ExecContext,
+    ActionFuncType: Fn(SagaContext<ExecContextType>) -> ActionFutType
+        + Send
+        + Sync
+        + 'static,
     ActionFutType: Future<Output = SagaFuncResult<ActionFuncOutput, SagaActionError>>
         + Send
         + 'static,
     ActionFuncOutput: SagaActionOutput + 'static,
-    UndoFuncType: Fn(SagaContext) -> UndoFutType + Send + Sync + 'static,
+    UndoFuncType:
+        Fn(SagaContext<ExecContextType>) -> UndoFutType + Send + Sync + 'static,
     UndoFutType: Future<Output = SagaUndoResult> + Send + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

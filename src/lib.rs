@@ -36,7 +36,15 @@ mod saga_template;
  * execution of the saga to fail with a generic-type error.
  */
 
+/*
+ * TODO-cleanup The example_provision stuff should probably be in a separate
+ * crate that depends on "steno".  That would ensure it only uses public
+ * interfaces.  However, the "steno" crate wants to have an example that uses
+ * this crate, hence our problem.
+ */
 pub use example_provision::make_provision_saga;
+pub use example_provision::ExampleContext;
+
 pub use saga_action::new_action_noop_undo;
 pub use saga_action::SagaActionError;
 pub use saga_action::SagaActionFunc;

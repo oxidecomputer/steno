@@ -7,6 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use steno::make_provision_saga;
+use steno::ExampleContext;
 use steno::SagaExecutor;
 use steno::SagaId;
 use steno::SagaLog;
@@ -77,8 +78,12 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     println!("{}", saga_template.dot());
 
     println!("*** initial state ***");
-    let exec =
-        SagaExecutor::new(&make_saga_id(), saga_template, "provision-info");
+    let exec = SagaExecutor::new(
+        &make_saga_id(),
+        saga_template,
+        "provision-info",
+        Arc::new(ExampleContext::default()),
+    );
     println!("{}", exec.status().await);
     Ok(())
 }
@@ -149,6 +154,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             Arc::clone(&saga_template),
             sglog,
             &args.creator,
+            Arc::new(ExampleContext::default()),
         )
         .with_context(|| {
             format!("recover log \"{}\"", input_log_path.display())
@@ -165,6 +171,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             &make_saga_id(),
             Arc::clone(&saga_template),
             &args.creator,
+            Arc::new(ExampleContext::default()),
         )
     };
 

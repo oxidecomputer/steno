@@ -1,6 +1,7 @@
 //! Facilities for constructing saga graphs
 
 use crate::rust_features::ExpectNone;
+use crate::saga_action::ExecContext;
 use crate::saga_action::SagaAction;
 use crate::saga_action::SagaActionEndNode;
 use crate::saga_action::SagaActionStartNode;
@@ -55,11 +56,12 @@ impl fmt::Display for SagaId {
  * saga as many times as you want using [`crate::SagaExecutor`].
  */
 #[derive(Debug)]
-pub struct SagaTemplate {
+pub struct SagaTemplate<ExecContextType: ExecContext> {
     /** describes the nodes in the graph and their dependencies */
     pub(crate) graph: Graph<String, ()>,
     /** action associated with each node in the graph */
-    pub(crate) launchers: BTreeMap<NodeIndex, Arc<dyn SagaAction>>,
+    pub(crate) launchers:
+        BTreeMap<NodeIndex, Arc<dyn SagaAction<ExecContextType>>>,
     /** name associated with each node in the graph */
     pub(crate) node_names: BTreeMap<NodeIndex, String>,
     /** human-readable labels associated with each node in the graph */
@@ -70,7 +72,7 @@ pub struct SagaTemplate {
     pub(crate) end_node: NodeIndex,
 }
 
-impl SagaTemplate {
+impl<ExecContextType: ExecContext> SagaTemplate<ExecContextType> {
     /*
      * TODO-cleanup we may want to use a newtype for NodeIndex here.  It's
      * sketchy that this is exposed publicly but there's no way for callers to
@@ -124,11 +126,11 @@ impl<'a> fmt::Display for SagaTemplateDot<'a> {
  * [`SagaTemplateBuilder::append_parallel`].
  */
 #[derive(Debug)]
-pub struct SagaTemplateBuilder {
+pub struct SagaTemplateBuilder<ExecContextType: ExecContext> {
     /** DAG of saga nodes.  Weights for nodes are debug labels. */
     graph: Graph<String, ()>,
     /** For each node, the [`SagaAction`] executed at that node. */
-    launchers: BTreeMap<NodeIndex, Arc<dyn SagaAction>>,
+    launchers: BTreeMap<NodeIndex, Arc<dyn SagaAction<ExecContextType>>>,
     /**
      * For each node, the name of the node.  This is used for data stored by
      * that node.
@@ -142,13 +144,13 @@ pub struct SagaTemplateBuilder {
     last_added: Vec<NodeIndex>,
 }
 
-impl SagaTemplateBuilder {
-    pub fn new() -> SagaTemplateBuilder {
+impl<ExecContextType: ExecContext> SagaTemplateBuilder<ExecContextType> {
+    pub fn new() -> SagaTemplateBuilder<ExecContextType> {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
         let node_names = BTreeMap::new();
         let node_labels = BTreeMap::new();
-        let first: Arc<dyn SagaAction + 'static> =
+        let first: Arc<dyn SagaAction<ExecContextType> + 'static> =
             Arc::new(SagaActionStartNode {});
         let label = format!("{:?}", first);
         let root = graph.add_node(label);
@@ -181,7 +183,7 @@ impl SagaTemplateBuilder {
         &mut self,
         name: &str,
         label: &str,
-        action: Arc<dyn SagaAction>,
+        action: Arc<dyn SagaAction<ExecContextType>>,
     ) {
         let newnode = self.graph.add_node(label.to_string());
         self.launchers
@@ -211,7 +213,7 @@ impl SagaTemplateBuilder {
      */
     pub fn append_parallel(
         &mut self,
-        actions: Vec<(&str, &str, Arc<dyn SagaAction>)>,
+        actions: Vec<(&str, &str, Arc<dyn SagaAction<ExecContextType>>)>,
     ) {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
@@ -256,12 +258,12 @@ impl SagaTemplateBuilder {
     }
 
     /** Finishes building the saga template */
-    pub fn build(mut self) -> SagaTemplate {
+    pub fn build(mut self) -> SagaTemplate<ExecContextType> {
         /*
          * Append an "end" node so that we can easily tell when the saga has
          * completed.
          */
-        let last: Arc<dyn SagaAction + 'static> =
+        let last: Arc<dyn SagaAction<ExecContextType> + 'static> =
             Arc::new(SagaActionEndNode {});
         let label = format!("{:?}", last);
         let newnode = self.graph.add_node(label);
