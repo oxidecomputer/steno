@@ -6,8 +6,9 @@ use anyhow::Context;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use steno::make_provision_saga;
+use steno::make_example_provision_saga;
 use steno::ExampleContext;
+use steno::ExampleParams;
 use steno::SagaExecutor;
 use steno::SagaId;
 use steno::SagaLog;
@@ -62,8 +63,8 @@ fn make_saga_id() -> SagaId {
  */
 
 async fn cmd_dot() -> Result<(), anyhow::Error> {
-    let saga_template = make_provision_saga();
-    println!("{}", saga_template.dot());
+    let saga_template = make_example_provision_saga();
+    println!("{}", saga_template.metadata().dot());
     Ok(())
 }
 
@@ -72,10 +73,10 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
  */
 
 async fn cmd_info() -> Result<(), anyhow::Error> {
-    let saga_template = make_provision_saga();
+    let saga_template = make_example_provision_saga();
     println!("*** saga template definition ***");
     println!("saga template graph: ");
-    println!("{}", saga_template.dot());
+    println!("{}", saga_template.metadata().dot());
 
     println!("*** initial state ***");
     let exec = SagaExecutor::new(
@@ -83,7 +84,9 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
         saga_template,
         "provision-info",
         Arc::new(ExampleContext::default()),
-    );
+        ExampleParams { instance_name: "fake-o instance".to_string() },
+    )
+    .unwrap();
     println!("{}", exec.status().await);
     Ok(())
 }
@@ -138,7 +141,7 @@ struct RunArgs {
 }
 
 async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
-    let saga_template = make_provision_saga();
+    let saga_template = make_example_provision_saga();
     let exec = if let Some(input_log_path) = &args.recover_from {
         if !args.quiet {
             println!("recovering from log: {}", input_log_path.display());
@@ -172,14 +175,16 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             Arc::clone(&saga_template),
             &args.creator,
             Arc::new(ExampleContext::default()),
+            ExampleParams { instance_name: "fake-o instance".to_string() },
         )
+        .unwrap()
     };
 
     for node_name in &args.inject_error {
         let node_id =
-            saga_template.node_for_name(&node_name).with_context(|| {
-                format!("bad argument for --inject-error: {:?}", node_name)
-            })?;
+            saga_template.metadata().node_for_name(&node_name).with_context(
+                || format!("bad argument for --inject-error: {:?}", node_name),
+            )?;
         exec.inject_error(node_id).await;
         if !args.quiet {
             println!("will inject error at node \"{}\"", node_name);

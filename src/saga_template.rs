@@ -1,10 +1,10 @@
 //! Facilities for constructing saga graphs
 
 use crate::rust_features::ExpectNone;
-use crate::saga_action::ExecContext;
-use crate::saga_action::SagaAction;
-use crate::saga_action::SagaActionEndNode;
-use crate::saga_action::SagaActionStartNode;
+use crate::saga_action_generic::Action;
+use crate::saga_action_generic::ActionEndNode;
+use crate::saga_action_generic::ActionStartNode;
+use crate::SagaType;
 use anyhow::anyhow;
 use petgraph::dot;
 use petgraph::graph::NodeIndex;
@@ -17,27 +17,18 @@ use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/** Unique identifier for a Saga Template */
-/*
- * TODO-design We may want the display form to have a "st-" prefix or something
- * like that.  (Does that mean the type needs to be caller-provided?)
- */
-#[derive(
-    Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize,
-)]
-pub struct SagaTemplateId(pub Uuid);
-impl fmt::Display for SagaTemplateId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "sgt-{}", self.0)
-    }
-}
-
 /** Unique identifier for a Saga (an execution of a saga template) */
-/* TODO-design Same as for Saga Template */
 #[derive(
     Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize,
 )]
 pub struct SagaId(pub Uuid);
+/*
+ * TODO-design In the Oxide consumer, we probably want to have the serialized
+ * form of ids have a prefix describing the type.  This seems consumer-specific,
+ * though.  Is there a good way to do support that?  Maybe the best way to do
+ * this is to have the consumer have their own enum or trait that impls Display
+ * using the various ids provided by consumers.
+ */
 impl fmt::Display for SagaId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "sg-{}", self.0)
@@ -45,7 +36,7 @@ impl fmt::Display for SagaId {
 }
 
 /**
- * A directed acyclic graph (DAG) where each node implements `SagaAction`
+ * A directed acyclic graph (DAG) where each node implements `Action`
  *
  * With each node, there's an execution action and an undo action.  Execution of
  * the saga guarantees that eventually all saga nodes will complete successfully
@@ -56,23 +47,43 @@ impl fmt::Display for SagaId {
  * saga as many times as you want using [`crate::SagaExecutor`].
  */
 #[derive(Debug)]
-pub struct SagaTemplate<ExecContextType: ExecContext> {
+pub struct SagaTemplate<UserType: SagaType> {
+    /** action associated with each node in the graph */
+    pub(crate) launchers: BTreeMap<NodeIndex, Arc<dyn Action<UserType>>>,
+
+    /** the rest of the information about the saga template */
+    metadata: SagaTemplateMetadata,
+}
+
+impl<UserType: SagaType> SagaTemplate<UserType> {
+    pub fn metadata(&self) -> &SagaTemplateMetadata {
+        &self.metadata
+    }
+}
+
+/**
+ * Metadata for a saga template including graph structure, node names, labels,
+ * etc.
+ *
+ * This is everything about the saga template except the launchers.  It's
+ * separated because the launchers depend on a bunch of user-provided type
+ * parameters, but this metadata doesn't.
+ */
+#[derive(Debug, Clone)]
+pub struct SagaTemplateMetadata {
     /** describes the nodes in the graph and their dependencies */
     pub(crate) graph: Graph<String, ()>,
-    /** action associated with each node in the graph */
-    pub(crate) launchers:
-        BTreeMap<NodeIndex, Arc<dyn SagaAction<ExecContextType>>>,
     /** name associated with each node in the graph */
-    pub(crate) node_names: BTreeMap<NodeIndex, String>,
+    node_names: BTreeMap<NodeIndex, String>,
     /** human-readable labels associated with each node in the graph */
-    pub(crate) node_labels: BTreeMap<NodeIndex, String>,
+    node_labels: BTreeMap<NodeIndex, String>,
     /** start node */
     pub(crate) start_node: NodeIndex,
     /** end node */
     pub(crate) end_node: NodeIndex,
 }
 
-impl<ExecContextType: ExecContext> SagaTemplate<ExecContextType> {
+impl SagaTemplateMetadata {
     /*
      * TODO-cleanup we may want to use a newtype for NodeIndex here.  It's
      * sketchy that this is exposed publicly but there's no way for callers to
@@ -90,6 +101,24 @@ impl<ExecContextType: ExecContext> SagaTemplate<ExecContextType> {
 
         /* TODO-debug saga templates should have names, too */
         Err(anyhow!("saga template has no node named \"{}\"", target_name))
+    }
+
+    pub(crate) fn node_name(
+        &self,
+        node_index: &NodeIndex,
+    ) -> Result<&str, anyhow::Error> {
+        self.node_names.get(node_index).map(|n| n.as_str()).ok_or_else(|| {
+            anyhow!("saga template has no node \"{:?}\"", node_index)
+        })
+    }
+
+    pub(crate) fn node_label(
+        &self,
+        node_index: &NodeIndex,
+    ) -> Result<&str, anyhow::Error> {
+        self.node_labels.get(node_index).map(|n| n.as_str()).ok_or_else(|| {
+            anyhow!("saga template has no node \"{:?}\"", node_index)
+        })
     }
 
     /**
@@ -126,11 +155,11 @@ impl<'a> fmt::Display for SagaTemplateDot<'a> {
  * [`SagaTemplateBuilder::append_parallel`].
  */
 #[derive(Debug)]
-pub struct SagaTemplateBuilder<ExecContextType: ExecContext> {
+pub struct SagaTemplateBuilder<UserType: SagaType> {
     /** DAG of saga nodes.  Weights for nodes are debug labels. */
     graph: Graph<String, ()>,
-    /** For each node, the [`SagaAction`] executed at that node. */
-    launchers: BTreeMap<NodeIndex, Arc<dyn SagaAction<ExecContextType>>>,
+    /** For each node, the [`Action`] executed at that node. */
+    launchers: BTreeMap<NodeIndex, Arc<dyn Action<UserType>>>,
     /**
      * For each node, the name of the node.  This is used for data stored by
      * that node.
@@ -144,14 +173,14 @@ pub struct SagaTemplateBuilder<ExecContextType: ExecContext> {
     last_added: Vec<NodeIndex>,
 }
 
-impl<ExecContextType: ExecContext> SagaTemplateBuilder<ExecContextType> {
-    pub fn new() -> SagaTemplateBuilder<ExecContextType> {
+impl<UserType: SagaType> SagaTemplateBuilder<UserType> {
+    pub fn new() -> SagaTemplateBuilder<UserType> {
         let mut graph = Graph::new();
         let mut launchers = BTreeMap::new();
         let node_names = BTreeMap::new();
         let node_labels = BTreeMap::new();
-        let first: Arc<dyn SagaAction<ExecContextType> + 'static> =
-            Arc::new(SagaActionStartNode {});
+        let first: Arc<dyn Action<UserType> + 'static> =
+            Arc::new(ActionStartNode {});
         let label = format!("{:?}", first);
         let root = graph.add_node(label);
         launchers.insert(root, first).expect_none("empty map had an element");
@@ -177,13 +206,13 @@ impl<ExecContextType: ExecContext> SagaTemplateBuilder<ExecContextType> {
      *
      * The node is called `name`.  This name is used for storing the output of
      * the action so that descendant nodes can access it using
-     * [`crate::SagaContext::lookup`].
+     * [`crate::ActionContext::lookup`].
      */
     pub fn append(
         &mut self,
         name: &str,
         label: &str,
-        action: Arc<dyn SagaAction<ExecContextType>>,
+        action: Arc<dyn Action<UserType>>,
     ) {
         let newnode = self.graph.add_node(label.to_string());
         self.launchers
@@ -213,7 +242,7 @@ impl<ExecContextType: ExecContext> SagaTemplateBuilder<ExecContextType> {
      */
     pub fn append_parallel(
         &mut self,
-        actions: Vec<(&str, &str, Arc<dyn SagaAction<ExecContextType>>)>,
+        actions: Vec<(&str, &str, Arc<dyn Action<UserType>>)>,
     ) {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
@@ -258,13 +287,13 @@ impl<ExecContextType: ExecContext> SagaTemplateBuilder<ExecContextType> {
     }
 
     /** Finishes building the saga template */
-    pub fn build(mut self) -> SagaTemplate<ExecContextType> {
+    pub fn build(mut self) -> SagaTemplate<UserType> {
         /*
          * Append an "end" node so that we can easily tell when the saga has
          * completed.
          */
-        let last: Arc<dyn SagaAction<ExecContextType> + 'static> =
-            Arc::new(SagaActionEndNode {});
+        let last: Arc<dyn Action<UserType> + 'static> =
+            Arc::new(ActionEndNode {});
         let label = format!("{:?}", last);
         let newnode = self.graph.add_node(label);
         /*
@@ -278,12 +307,14 @@ impl<ExecContextType: ExecContext> SagaTemplateBuilder<ExecContextType> {
         }
 
         SagaTemplate {
-            graph: self.graph,
             launchers: self.launchers,
-            node_names: self.node_names,
-            node_labels: self.node_labels,
-            start_node: self.root,
-            end_node: newnode,
+            metadata: SagaTemplateMetadata {
+                graph: self.graph,
+                node_names: self.node_names,
+                node_labels: self.node_labels,
+                start_node: self.root,
+                end_node: newnode,
+            },
         }
     }
 }

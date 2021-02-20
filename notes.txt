@@ -10,10 +10,10 @@ version.
 
 Subsagas and recovery: this might "just work" if saga actions that
 create subsagas were idempotent.  But I don't think they are today.  Maybe
-if we first-class `SagaActionSaga`, the framework can ensure that this is
+if we first-class `ActionSaga`, the framework can ensure that this is
 done idempotently.  Relatedly, if we add policies around whether each node has
 an "undo" action, for this type of node, we might need that policy to differ
-depending on the SagaActionSaga (and not the Saga behind it).
+depending on the ActionSaga (and not the Saga behind it).
 
 Static typing in the construction and execution of the graph:
 

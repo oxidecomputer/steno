@@ -1,7 +1,7 @@
 *** saga template definition ***
 saga template graph: 
 digraph {
-    0 [ label = "\"SagaActionStartNode\"" ]
+    0 [ label = "\"ActionStartNode\"" ]
     1 [ label = "\"InstanceCreate\"" ]
     2 [ label = "\"VpcAllocIp\"" ]
     3 [ label = "\"VolumeCreate\"" ]
@@ -10,7 +10,7 @@ digraph {
     6 [ label = "\"VolumeAttach\"" ]
     7 [ label = "\"InstanceBoot\"" ]
     8 [ label = "\"Print\"" ]
-    9 [ label = "\"SagaActionEndNode\"" ]
+    9 [ label = "\"ActionEndNode\"" ]
     0 -> 1 [ ]
     1 -> 2 [ ]
     1 -> 3 [ ]

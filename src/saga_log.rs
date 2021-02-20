@@ -1,12 +1,14 @@
 //! Persistent state for sagas
 
-use crate::saga_action::SagaActionError;
+use crate::saga_action_error::ActionError;
 use crate::saga_template::SagaId;
 use anyhow::anyhow;
 use anyhow::Context;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 use chrono::Utc;
+use core::future::Future;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -32,15 +34,12 @@ pub enum SagaLogError {
     },
 }
 
-type SagaLogResult = Result<(), SagaLogError>;
-
 /**
  * Event types that may be found in the log for a particular action
  *
  * (This is not a general-purpose debug log, but more like an intent log for
- * recovering the action's state in the event of an executor crash.)
- * TODO We might still want to put more information here, like the failure
- * error details and other debugging state.
+ * recovering the action's state in the event of an executor crash.  That
+ * doesn't mean we can't put debugging information here, though.)
  */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,7 +49,7 @@ pub enum SagaNodeEventType {
     /** The action completed successfully (with output data) */
     Succeeded(Arc<JsonValue>),
     /** The action failed */
-    Failed(SagaActionError),
+    Failed(ActionError),
     /** The undo action has started running */
     UndoStarted,
     /** The undo action has finished */
@@ -90,7 +89,7 @@ pub enum SagaNodeLoadStatus {
     /** The action completed successfully (with output data) */
     Succeeded(Arc<JsonValue>),
     /** The action failed */
-    Failed(SagaActionError),
+    Failed(ActionError),
     /** The undo action has started running (with output data from success) */
     UndoStarted(Arc<JsonValue>),
     /** The undo action has finished */
@@ -178,16 +177,18 @@ pub struct SagaLog {
     pub saga_id: SagaId,
     pub unwinding: bool,
     creator: String,
+    params: JsonValue,
     events: Vec<SagaNodeEvent>,
     node_status: BTreeMap<SagaNodeId, SagaNodeLoadStatus>,
 }
 
 impl SagaLog {
-    pub fn new(creator: &str, saga_id: &SagaId) -> SagaLog {
+    pub fn new(creator: &str, saga_id: &SagaId, params: JsonValue) -> SagaLog {
         SagaLog {
             saga_id: *saga_id,
             creator: creator.to_string(),
             events: Vec::new(),
+            params,
             node_status: BTreeMap::new(),
             unwinding: false,
         }
@@ -197,7 +198,7 @@ impl SagaLog {
         &mut self,
         node_id: SagaNodeId,
         event_type: SagaNodeEventType,
-    ) -> impl core::future::Future<Output = SagaLogResult> {
+    ) -> impl Future<Output = Result<(), SagaLogError>> {
         let event = SagaNodeEvent {
             saga_id: self.saga_id,
             node_id,
@@ -249,6 +250,11 @@ impl SagaLog {
         &self.events
     }
 
+    pub fn params_as<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
+        serde_json::from_value(self.params.clone())
+            .context("deserializing initial saga parameters")
+    }
+
     // TODO-blocking
     pub fn dump<W: Write>(&self, writer: W) -> Result<(), anyhow::Error> {
         /* TODO-cleanup can we avoid these clones? */
@@ -256,6 +262,7 @@ impl SagaLog {
             saga_id: self.saga_id,
             creator: self.creator.clone(),
             events: self.events.clone(),
+            params: self.params.clone(),
         };
 
         serde_json::to_writer_pretty(writer, &s).with_context(|| {
@@ -277,7 +284,7 @@ impl SagaLog {
     ) -> Result<SagaLog, anyhow::Error> {
         let mut s: SagaLogSerialized = serde_json::from_reader(reader)
             .with_context(|| "deserializing saga log")?;
-        let mut sglog = SagaLog::new(&creator, &s.saga_id);
+        let mut sglog = SagaLog::new(&creator, &s.saga_id, s.params.clone());
 
         /*
          * Sort the events by the event type.  This ensures that if there's at
@@ -334,6 +341,7 @@ pub struct SagaLogSerialized {
     /* TODO-robustness add version */
     pub saga_id: SagaId,
     pub creator: String,
+    pub params: JsonValue,
     pub events: Vec<SagaNodeEvent>,
 }
 
@@ -342,6 +350,7 @@ impl fmt::Debug for SagaLog {
         write!(f, "SAGA LOG:\n")?;
         write!(f, "saga execution id: {}\n", self.saga_id)?;
         write!(f, "creator:           {}\n", self.creator)?;
+        write!(f, "params (generic):  {}\n", self.params)?;
         write!(
             f,
             "direction:         {}\n",

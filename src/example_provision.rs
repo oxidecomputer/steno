@@ -3,12 +3,13 @@
  */
 
 use crate::new_action_noop_undo;
-use crate::SagaActionError;
-use crate::SagaContext;
-use crate::SagaFuncResult;
+use crate::ActionContext;
+use crate::ActionError;
+use crate::ActionFuncResult;
 use crate::SagaId;
 use crate::SagaTemplate;
 use crate::SagaTemplateBuilder;
+use crate::SagaType;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -40,6 +41,17 @@ use uuid::Uuid;
  *          boot instance
  */
 
+pub struct ExampleSagaType {}
+impl SagaType for ExampleSagaType {
+    type ExecContextType = ExampleContext;
+    type SagaParamsType = ExampleParams;
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ExampleParams {
+    pub instance_name: String,
+}
+
 pub struct ExampleContext;
 impl Default for ExampleContext {
     fn default() -> ExampleContext {
@@ -47,7 +59,7 @@ impl Default for ExampleContext {
     }
 }
 
-type SagaExampleContext = SagaContext<ExampleContext>;
+type SagaExampleContext = ActionContext<ExampleSagaType>;
 
 #[derive(Debug, Deserialize, Error, Serialize)]
 enum ExampleError {
@@ -55,12 +67,12 @@ enum ExampleError {
     AnError,
 }
 
-type ExFuncResult<T> = SagaFuncResult<T, SagaActionError>;
+type ExFuncResult<T> = ActionFuncResult<T, ActionError>;
 
 /* TODO-cleanup can we implement this generically? */
-impl From<ExampleError> for SagaActionError {
-    fn from(t: ExampleError) -> SagaActionError {
-        SagaActionError::action_failed(t)
+impl From<ExampleError> for ActionError {
+    fn from(t: ExampleError) -> ActionError {
+        ActionError::action_failed(t)
     }
 }
 
@@ -72,7 +84,7 @@ impl From<ExampleError> for SagaActionError {
  * nodes.  The intent is just to exercise the API.  You can interact with this
  * using the `demo-provision` example.
  */
-pub fn make_provision_saga() -> Arc<SagaTemplate<ExampleContext>> {
+pub fn make_example_provision_saga() -> Arc<SagaTemplate<ExampleSagaType>> {
     let mut w = SagaTemplateBuilder::new();
 
     w.append(
@@ -119,7 +131,12 @@ pub fn make_provision_saga() -> Arc<SagaTemplate<ExampleContext>> {
 async fn demo_prov_instance_create(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<u64> {
-    eprintln!("running action: {}", sgctx.node_label());
+    eprintln!(
+        "running action: {} (instance name: {})",
+        sgctx.node_label(),
+        sgctx.saga_params().instance_name
+    );
+    /* exercise saga parameters */
     /* make up an instance ID */
     let instance_id = 1211u64;
     Ok(instance_id)
@@ -140,6 +157,19 @@ async fn demo_prov_vpc_alloc_ip(
 /*
  * The next two steps are in a subsaga!
  */
+struct ExampleSubsagaType {}
+impl SagaType for ExampleSubsagaType {
+    type ExecContextType = ExampleContext;
+    type SagaParamsType = ExampleSubsagaParams;
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ExampleSubsagaParams {
+    number_of_things: usize,
+}
+
+type SubsagaExampleContext = ActionContext<ExampleSubsagaType>;
+
 async fn demo_prov_server_alloc(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<u64> {
@@ -160,14 +190,20 @@ async fn demo_prov_server_alloc(
 
     /*
      * The uuid here is deterministic solely for the smoke tests.  It would
-     * probably be better to have a way to get uuids from the SagaContext, and
+     * probably be better to have a way to get uuids from the ActionContext, and
      * have a mode where those come from a seeded random number generator (or
      * some other controlled source for testing).
      */
     let saga_id = SagaId(
         Uuid::parse_str("bcf32552-2b54-485b-bf13-b316daa7d1d4").unwrap(),
     );
-    let e = sgctx.child_saga(&saga_id, sg).await;
+    let e = sgctx
+        .child_saga::<ExampleSubsagaType>(
+            &saga_id,
+            sg,
+            ExampleSubsagaParams { number_of_things: 1 },
+        )
+        .await?;
     e.run().await;
     match e.result().kind {
         Ok(success) => {
@@ -184,17 +220,23 @@ struct ServerAllocResult {
     server_id: u64,
 }
 
-async fn demo_prov_server_pick(sgctx: SagaExampleContext) -> ExFuncResult<u64> {
+async fn demo_prov_server_pick(
+    sgctx: SubsagaExampleContext,
+) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
+    /* exercise subsaga parameters */
+    assert_eq!(sgctx.saga_params().number_of_things, 1);
     /* make up ("allocate") a new server id */
     let server_id = 1212u64;
     Ok(server_id)
 }
 
 async fn demo_prov_server_reserve(
-    sgctx: SagaExampleContext,
+    sgctx: SubsagaExampleContext,
 ) -> ExFuncResult<ServerAllocResult> {
     eprintln!("running action: {}", sgctx.node_label());
+    /* exercise subsaga parameters */
+    assert_eq!(sgctx.saga_params().number_of_things, 1);
     /* exercise using data from previous nodes */
     let server_id = sgctx.lookup::<u64>("server_id");
     assert_eq!(server_id, 1212);

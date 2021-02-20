@@ -4,43 +4,36 @@
 
 = steno
 
-This repo contains an in-progress prototype interface for sagas based on distributed sagas.
+This repo contains an in-progress prototype interface for sagas based on
+https://www.youtube.com/watch?v=0UTOLRTwOX0[Distributed Sagas as described by
+Caitie McAffrey].  See the crate documentation for details.  You can build the
+docs yourself with:
 
-Our sagas comprise a directed acyclic graph of possibly-reversible actions, similar to distributed sagas.  There are two main functional pieces: an interface for constructing the graph and an execution engine for carrying out the actions described by the graph.  There are many subparts to this problem.
+```
+cargo doc
+```
 
-== What's this?
-
-"Workflow" is a general term for an abstraction that manages execution of complex, multi-step processes.  The implementation here is heavily based on https://www.youtube.com/watch?v=0UTOLRTwOX0[Distributed Sagas as described by Caitie McAffrey].
-
-Why is this useful?  See https://rfd.oxide.computer/107[RFD 107 "OXCP Workflows Engine"].  The basic idea here is to decompose the complex work of the control plane into:
-
-* comparatively simple actions provided by stateless services like the server agent, switch agent, etc.  ("Stateless" here refers to database state.  In fact, these services mostly exist to expose the very real state of the systems they run on!)
-* composition of these actions into sagas, which we hope will also be relatively simple because of the way the actions and undo actions are defined
-* execution of the saga (dealing with unwinding, etc.), which we implement in one place with good mechanisms for observing progress, controlling execution, etc.  That's what this crate provides.
-
-The hope is that with a strong foundation here, we can move quickly with future work and build a reliable, predictable, observable system.
+Sagas seek to decompose complex tasks into comparatively simple actions.  Execution of the saga (dealing with unwinding, etc.) is implemented in one place with good mechanisms for observing progress, controlling execution, etc.  That's what this crate provides.
 
 == Status
 
-Here's what exists so far:
+This crate has usable interfaces for defining and executing sagas.
 
-* an interface (`SagaActionFunc`) for consumers to define their own "actions" using regular functions to implement the action and the undo action
-* an interface (`SagaTemplateBuilder`) for building a saga (DAG) from these actions
-* an execution engine (`SagaExecutor`) that executes the action
-* features:
-** actions can share state using arbitrary serializable types (dynamically-checked, unfortunately)
-** persistence and recovery: execution state is serialized to a log that can be recovered to resume execution after a crash
-** unwinding: if an action fails, all nodes are unwound (basically, undo actions are executed for nodes whose actions completed; it's more complicated for nodes whose actions _may_ have run)
-** injecting errors into an arbitrary node
-** fine-grained status reporting (status of each action)
-* a demo program (`examples/demo-provision`) to exercise all of this with a toy saga that resembles Instance provisioning
+Features:
+
+* Execution is recorded to a saga log, but there's no built-in means to persist this as execution progresses yet.  Still, intermediate log states can be recovered, meaning that you can resume execution after a simulated crash.
+* Actions can share state using arbitrary serializable types (dynamically-checked, unfortunately).
+* Unwinding: if an action fails, all nodes are unwound (basically, undo actions are executed for nodes whose actions completed; it's more complicated for nodes whose actions _may_ have run)
+* Injecting errors into an arbitrary node
+* Fine-grained status reporting (status of each action)
+
+There's a demo program (`examples/demo-provision`) to exercise all of this with a toy saga that resembles VM provisioning.
 
 There are lots of caveats:
 
 * All experimentation and testing uses a toy saga that doesn't actually do anything.
 * The code is prototype-quality (i.e., mediocre).  There's tremendous room for cleanup and improvement.
 * There's virtually no automated testing yet.
-* There's no usage documentation yet.
 * There are many important considerations not yet addressed.  To start with:
 ** updates and versioning: how a saga's code gets packaged, updated, etc.; and how the code and state get versioned
 ** Subsagas: it's totally possible for saga actions to create other sagas, which is important because composeability is important for our use case.  However, doing so is not idempotent, and won't necessarily do the right thing in the event of failures.
@@ -51,11 +44,9 @@ Major risks and open questions:
 * Does this abstraction make sense?  Let's try prototyping it in oxide-api-prototype.
 * Failover (or "high availability execution")
 
-
 Future feature ideas include:
 
-* execution parameters
-* control: pause/unpause, abort, concurrencly limits, single-step, breakpoints
+* control: pause/unpause, abort, concurrency limits, single-step, breakpoints
 * canarying
 * other policies around nodes with no undo actions (e.g., pause and notify an operator, then resume the saga if directed; fail-forward only)
 * a notion of "scope" or "blast radius" for a saga so that a larger system can schedule sagas in a way that preserves overall availability
