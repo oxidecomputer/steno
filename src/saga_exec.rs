@@ -1434,19 +1434,18 @@ impl SagaResultOk {
      *
      * # Panics
      *
-     * If the saga has no node called `name`, or if the type produced by this
-     * node does not match `T`.
+     * If the saga has no node called `name`.
      */
-    pub fn lookup_output<T: ActionData + 'static>(&self, name: &str) -> T {
+    pub fn lookup_output<T: ActionData + 'static>(
+        &self,
+        name: &str,
+    ) -> Result<T, ActionError> {
         let output_json = self.node_outputs.get(name).unwrap_or_else(|| {
             panic!("node with name \"{}\": not part of this saga", name)
         });
         // TODO-cleanup double-asterisk seems odd?
-        serde_json::from_value((**output_json).clone()).unwrap_or_else(|_| {
-            panic!(
-                "node with name \"{}\": requested wrong type for output",
-                name,
-            )
+        serde_json::from_value((**output_json).clone()).map_err(|e| {
+            ActionError::DeserializeFailed { message: e.to_string() }
         })
     }
 }
@@ -1680,20 +1679,20 @@ impl<UserType: SagaType> ActionContext<UserType> {
      * # Panics
      *
      * This function panics if there was no data previously stored with name
-     * `name` or if the type of that data was not `T`.  The assumption here is
-     * that actions within a saga are tightly coupled, so the caller knows
-     * exactly what the previous action stored.  We would enforce this at
-     * compile time if we could.
+     * `name` (which means there was no ancestor node with that name).
      */
-    pub fn lookup<T: ActionData + 'static>(&self, name: &str) -> T {
+    pub fn lookup<T: ActionData + 'static>(
+        &self,
+        name: &str,
+    ) -> Result<T, ActionError> {
         let item = self
             .ancestor_tree
             .get(name)
             .expect(&format!("no ancestor called \"{}\"", name));
         // TODO-cleanup double-asterisk seems ridiculous
-        let specific_item = serde_json::from_value((**item).clone())
-            .expect(&format!("ancestor \"{}\" produced unexpected type", name));
-        specific_item
+        serde_json::from_value((**item).clone()).map_err(|e| {
+            ActionError::DeserializeFailed { message: e.to_string() }
+        })
     }
 
     /**

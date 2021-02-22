@@ -147,7 +147,7 @@ async fn demo_prov_vpc_alloc_ip(
 ) -> ExFuncResult<String> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using some data from a previous node */
-    let instance_id = sgctx.lookup::<u64>("instance_id");
+    let instance_id = sgctx.lookup::<u64>("instance_id")?;
     assert_eq!(instance_id, 1211);
     /* make up an IP (simulate allocation) */
     let ip = String::from("10.120.121.122");
@@ -208,7 +208,7 @@ async fn demo_prov_server_alloc(
     match e.result().kind {
         Ok(success) => {
             let server_allocated: Arc<ServerAllocResult> =
-                success.lookup_output("server_reserve");
+                success.lookup_output("server_reserve")?;
             Ok(server_allocated.server_id)
         }
         Err(failure) => Err(failure.error_source),
@@ -238,7 +238,7 @@ async fn demo_prov_server_reserve(
     /* exercise subsaga parameters */
     assert_eq!(sgctx.saga_params().number_of_things, 1);
     /* exercise using data from previous nodes */
-    let server_id = sgctx.lookup::<u64>("server_id");
+    let server_id = sgctx.lookup::<u64>("server_id")?;
     assert_eq!(server_id, 1212);
     /* package this up for downstream consumers */
     Ok(ServerAllocResult { server_id })
@@ -249,7 +249,7 @@ async fn demo_prov_volume_create(
 ) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
-    assert_eq!(sgctx.lookup::<u64>("instance_id"), 1211);
+    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
     /* make up ("allocate") a volume id */
     let volume_id = 1213u64;
     Ok(volume_id)
@@ -259,9 +259,9 @@ async fn demo_prov_instance_configure(
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
-    assert_eq!(sgctx.lookup::<u64>("instance_id"), 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id"), 1212);
-    assert_eq!(sgctx.lookup::<u64>("volume_id"), 1213);
+    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
+    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+    assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
     Ok(())
 }
 async fn demo_prov_volume_attach(
@@ -269,9 +269,9 @@ async fn demo_prov_volume_attach(
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
-    assert_eq!(sgctx.lookup::<u64>("instance_id"), 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id"), 1212);
-    assert_eq!(sgctx.lookup::<u64>("volume_id"), 1213);
+    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
+    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+    assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
     Ok(())
 }
 async fn demo_prov_instance_boot(
@@ -279,22 +279,22 @@ async fn demo_prov_instance_boot(
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
-    assert_eq!(sgctx.lookup::<u64>("instance_id"), 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id"), 1212);
-    assert_eq!(sgctx.lookup::<u64>("volume_id"), 1213);
+    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
+    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+    assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
     Ok(())
 }
 
 async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     eprintln!("printing final state:");
-    let instance_id = sgctx.lookup::<u64>("instance_id");
+    let instance_id = sgctx.lookup::<u64>("instance_id")?;
     eprintln!("  instance id: {}", instance_id);
-    let ip = sgctx.lookup::<String>("instance_ip");
+    let ip = sgctx.lookup::<String>("instance_ip")?;
     eprintln!("  IP address: {}", ip);
-    let volume_id = sgctx.lookup::<u64>("volume_id");
+    let volume_id = sgctx.lookup::<u64>("volume_id")?;
     eprintln!("  volume id: {}", volume_id);
-    let server_id = sgctx.lookup::<u64>("server_id");
+    let server_id = sgctx.lookup::<u64>("server_id")?;
     eprintln!("  server id: {}", server_id);
     Ok(())
 }

@@ -233,7 +233,7 @@ async fn saga_refund_card(
     // so we fetch our own action's output by looking up the data for "payment".
     //
     let trip_context = action_context.context();
-    let p: PaymentConfirmation = action_context.lookup("payment");
+    let p: PaymentConfirmation = action_context.lookup("payment")?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
@@ -253,7 +253,7 @@ async fn saga_cancel_hotel(
 ) -> Result<(), anyhow::Error> {
     /* ... */
     let trip_context = action_context.context();
-    let confirmation: HotelReservation = action_context.lookup("hotel");
+    let confirmation: HotelReservation = action_context.lookup("hotel")?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
@@ -273,7 +273,7 @@ async fn saga_cancel_flight(
 ) -> Result<(), anyhow::Error> {
     /* ... */
     let trip_context = action_context.context();
-    let confirmation: FlightReservation = action_context.lookup("flight");
+    let confirmation: FlightReservation = action_context.lookup("flight")?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
@@ -293,7 +293,7 @@ async fn saga_cancel_car(
 ) -> Result<(), anyhow::Error> {
     /* ... */
     let trip_context = action_context.context();
-    let confirmation: CarReservation = action_context.lookup("car");
+    let confirmation: CarReservation = action_context.lookup("car")?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }

@@ -36,15 +36,6 @@ mod saga_log;
 mod saga_template;
 
 /*
- * TODO-design TODO-correctness TODO-robustness In a lot of places, we've
- * assumed that the caller should always know what type a node output or error
- * is, and that's fine -- except for the fact that this might be coming in off
- * the wire and something else may have corrupted it.  Maybe we should treat
- * these as explicit operational errors that always bubble up and cause
- * execution of the saga to fail with a generic-type error.
- */
-
-/*
  * TODO-cleanup The example_provision stuff should probably be in a separate
  * crate that depends on "steno".  That would ensure it only uses public
  * interfaces.  However, the "steno" crate wants to have an example that uses
