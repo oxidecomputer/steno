@@ -1757,7 +1757,7 @@ impl<UserType: SagaType> ActionContext<UserType> {
     /**
      * Returns the consumer-provided context for the current saga
      */
-    pub fn context(&self) -> &UserType::ExecContextType {
+    pub fn user_data(&self) -> &UserType::ExecContextType {
         &self.user_context
     }
 

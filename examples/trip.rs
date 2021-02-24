@@ -218,7 +218,7 @@ struct PaymentConfirmation(String);
 async fn saga_charge_card(
     action_context: ActionContext<TripSaga>,
 ) -> Result<PaymentConfirmation, ActionError> {
-    let trip_context = action_context.context();
+    let trip_context = action_context.user_data();
     let charge_details = &action_context.saga_params().charge_details;
     // ... (make request to another service)
     Ok(PaymentConfirmation(String::from("123")))
@@ -232,7 +232,7 @@ async fn saga_refund_card(
     // after the action function has succeeded.  This node is called "payment",
     // so we fetch our own action's output by looking up the data for "payment".
     //
-    let trip_context = action_context.context();
+    let trip_context = action_context.user_data();
     let p: PaymentConfirmation = action_context.lookup("payment")?;
     // ... (make request to another service -- must not fail)
     Ok(())
@@ -242,7 +242,7 @@ async fn saga_book_hotel(
     action_context: ActionContext<TripSaga>,
 ) -> Result<HotelReservation, ActionError> {
     /* ... */
-    let trip_context = action_context.context();
+    let trip_context = action_context.user_data();
     let hotel_name = &action_context.saga_params().hotel_name;
     // ... (make request to another service)
     Ok(HotelReservation(String::from("123")))
@@ -252,7 +252,7 @@ async fn saga_cancel_hotel(
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
     /* ... */
-    let trip_context = action_context.context();
+    let trip_context = action_context.user_data();
     let confirmation: HotelReservation = action_context.lookup("hotel")?;
     // ... (make request to another service -- must not fail)
     Ok(())
@@ -262,7 +262,7 @@ async fn saga_book_flight(
     action_context: ActionContext<TripSaga>,
 ) -> Result<FlightReservation, ActionError> {
     /* ... */
-    let trip_context = action_context.context();
+    let trip_context = action_context.user_data();
     let flight_info = &action_context.saga_params().flight_info;
     // ... (make request to another service)
     Ok(FlightReservation(String::from("123")))
@@ -272,7 +272,7 @@ async fn saga_cancel_flight(
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
     /* ... */
-    let trip_context = action_context.context();
+    let trip_context = action_context.user_data();
     let confirmation: FlightReservation = action_context.lookup("flight")?;
     // ... (make request to another service -- must not fail)
     Ok(())
@@ -282,7 +282,7 @@ async fn saga_book_car(
     action_context: ActionContext<TripSaga>,
 ) -> Result<CarReservation, ActionError> {
     /* ... */
-    let trip_context = action_context.context();
+    let trip_context = action_context.user_data();
     let car_info = &action_context.saga_params().car_info;
     // ... (make request to another service)
     Ok(CarReservation(String::from("123")))
@@ -292,7 +292,7 @@ async fn saga_cancel_car(
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
     /* ... */
-    let trip_context = action_context.context();
+    let trip_context = action_context.user_data();
     let confirmation: CarReservation = action_context.lookup("car")?;
     // ... (make request to another service -- must not fail)
     Ok(())
