@@ -14,7 +14,8 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
 /**
- * Collection of consumer-provided types
+ * Collection of consumer-provided types, effectively defining the type
+ * signature of a saga
  *
  * This trait bundles a bunch of consumer-provided types that are used
  * throughout Steno to avoid a sprawl of type parameters and duplicated trait

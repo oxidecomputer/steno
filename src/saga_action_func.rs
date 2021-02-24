@@ -214,9 +214,8 @@ where
          */
         fut.await
             .and_then(|func_output| {
-                serde_json::to_value(func_output).map_err(|e| {
-                    ActionError::SerializeFailed { message: e.to_string() }
-                })
+                serde_json::to_value(func_output)
+                    .map_err(ActionError::new_serialize)
             })
             .map(Arc::new)
     }

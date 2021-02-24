@@ -384,9 +384,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         user_saga_params: UserType::SagaParamsType,
     ) -> Result<SagaExecutor<UserType>, ActionError> {
         let serialized_params = serde_json::to_value(&user_saga_params)
-            .map_err(|e| ActionError::SerializeFailed {
-                message: e.to_string(),
-            })?;
+            .map_err(ActionError::new_serialize)?;
         let sglog = SagaLog::new(creator, saga_id, serialized_params);
 
         /*
@@ -1444,9 +1442,8 @@ impl SagaResultOk {
             panic!("node with name \"{}\": not part of this saga", name)
         });
         // TODO-cleanup double-asterisk seems odd?
-        serde_json::from_value((**output_json).clone()).map_err(|e| {
-            ActionError::DeserializeFailed { message: e.to_string() }
-        })
+        serde_json::from_value((**output_json).clone())
+            .map_err(ActionError::new_deserialize)
     }
 }
 
@@ -1690,9 +1687,8 @@ impl<UserType: SagaType> ActionContext<UserType> {
             .get(name)
             .expect(&format!("no ancestor called \"{}\"", name));
         // TODO-cleanup double-asterisk seems ridiculous
-        serde_json::from_value((**item).clone()).map_err(|e| {
-            ActionError::DeserializeFailed { message: e.to_string() }
-        })
+        serde_json::from_value((**item).clone())
+            .map_err(ActionError::new_deserialize)
     }
 
     /**

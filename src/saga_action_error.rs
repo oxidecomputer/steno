@@ -3,6 +3,7 @@
 use crate::saga_action_generic::ActionData;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Error as SerdeError;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -95,9 +96,7 @@ impl ActionError {
     pub fn action_failed<E: ActionData>(user_error: E) -> ActionError {
         match serde_json::to_value(user_error) {
             Ok(source_error) => ActionError::ActionFailed { source_error },
-            Err(serialize_error) => ActionError::SerializeFailed {
-                message: serialize_error.to_string(),
-            },
+            Err(serialize_error) => ActionError::new_serialize(serialize_error),
         }
     }
 
@@ -126,11 +125,18 @@ impl ActionError {
     pub fn convert<E: ActionData>(self) -> Result<E, ActionError> {
         match self {
             ActionError::ActionFailed { source_error } => {
-                serde_json::from_value(source_error).map_err(|e| {
-                    ActionError::DeserializeFailed { message: e.to_string() }
-                })
+                serde_json::from_value(source_error)
+                    .map_err(ActionError::new_deserialize)
             }
             _ => Err(self),
         }
+    }
+
+    pub fn new_serialize(source: SerdeError) -> ActionError {
+        ActionError::SerializeFailed { message: source.to_string() }
+    }
+
+    pub fn new_deserialize(source: SerdeError) -> ActionError {
+        ActionError::DeserializeFailed { message: source.to_string() }
     }
 }
