@@ -94,6 +94,7 @@ pub struct ActionFunc<
      * UndoFutType)>` is Sync and also satisfies our need to reference these
      * type parameters in the struct's contents.
      */
+    #[allow(clippy::type_complexity)]
     phantom: PhantomData<fn() -> (UserType, ActionFutType, UndoFutType)>,
 }
 

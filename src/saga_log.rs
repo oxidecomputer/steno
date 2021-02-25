@@ -207,15 +207,14 @@ impl SagaLog {
             creator: self.creator.clone(),
         };
 
-        let result = self
-            .record(event)
-            .expect(&format!("illegal event for node {}", node_id));
+        self.record(event)
+            .unwrap_or_else(|_| panic!("illegal event for node {}", node_id));
 
         /*
          * Although this implementation is synchronous, we want callers to
          * behave as though it were async.
          */
-        async move { Ok(result) }
+        async move { Ok(()) }
     }
 
     fn record(&mut self, event: SagaNodeEvent) -> Result<(), SagaLogError> {
