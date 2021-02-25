@@ -36,7 +36,7 @@ jobs:
       # Clippy overrides should go into src/lib.rs so that developers running
       # `cargo clippy` see the same behavior as we see here in the GitHub
       # Action.  In some cases, the overrides also need to appear here because
-      # clippy does not always honor the crate-wide overrides due to
+      # clippy does not always honor the crate-wide overrides.  See
       # rust-lang/rust-clippy#6610.
       #
       run: cargo clippy -- -A clippy::style -D warnings
