@@ -1,4 +1,4 @@
-recovering from log: /dev/stdin
+recovering from log: -
 recovered state
 + saga execution: sg-049b2522-308d-442e-bc65-9bfaef863597
 +-- stage  1: undone: InstanceCreate (produces "instance_id")

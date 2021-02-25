@@ -4,6 +4,8 @@
 
 use anyhow::Context;
 use std::fs;
+use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use steno::make_example_provision_saga;
@@ -58,6 +60,18 @@ fn make_saga_id() -> SagaId {
     SagaId(Uuid::parse_str("049b2522-308d-442e-bc65-9bfaef863597").unwrap())
 }
 
+fn reader_for_log_input(
+    path: &Path,
+) -> Result<Box<dyn io::Read>, anyhow::Error> {
+    if *path == PathBuf::from("-") {
+        Ok(Box::new(io::stdin()))
+    } else {
+        Ok(Box::new(fs::File::open(&path).with_context(|| {
+            format!("open recovery log \"{}\"", path.display())
+        })?))
+    }
+}
+
 /*
  * "dot" subcommand
  */
@@ -103,9 +117,7 @@ struct PrintLogArgs {
 
 async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
     let input_log_path = &args.input_log_path;
-    let file = fs::File::open(input_log_path).with_context(|| {
-        format!("open recovery log \"{}\"", input_log_path.display())
-    })?;
+    let file = reader_for_log_input(&input_log_path)?;
     let sglog = SagaLog::load("unused", file).with_context(|| {
         format!("load log \"{}\"", input_log_path.display())
     })?;
@@ -147,9 +159,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             println!("recovering from log: {}", input_log_path.display());
         }
 
-        let file = fs::File::open(&input_log_path).with_context(|| {
-            format!("open recovery log \"{}\"", input_log_path.display())
-        })?;
+        let file = reader_for_log_input(input_log_path)?;
         let sglog = SagaLog::load(&args.creator, file).with_context(|| {
             format!("load log \"{}\"", input_log_path.display())
         })?;
@@ -204,17 +214,24 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     if let Some(output_log_path) = &args.dump_to {
         let result = exec.result();
         let log = result.saga_log;
-        let out = fs::OpenOptions::new()
-            .write(true)
-            .open(output_log_path)
-            .with_context(|| {
-                format!("open output log \"{}\"", output_log_path.display())
-            })?;
-        log.dump(out).with_context(|| {
-            format!("save output log \"{}\"", output_log_path.display())
-        })?;
+        let (mut stdout_holder, mut file_holder);
+        let (label, out): (String, &mut dyn io::Write) = if *output_log_path
+            == PathBuf::from("-")
+        {
+            stdout_holder = io::stdout();
+            (String::from("stdout"), &mut stdout_holder)
+        } else {
+            file_holder = fs::OpenOptions::new()
+                .write(true)
+                .open(output_log_path)
+                .with_context(|| {
+                    format!("open output log \"{}\"", output_log_path.display())
+                })?;
+            (format!("\"{}\"", output_log_path.display()), &mut file_holder)
+        };
+        log.dump(out).with_context(|| format!("save output log {}", label))?;
         if !args.quiet {
-            println!("dumped log to \"{}\"", output_log_path.display());
+            println!("dumped log to {}", label);
         }
     }
 
