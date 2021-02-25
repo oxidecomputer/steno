@@ -1208,7 +1208,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 let depth = max_parent_depth.unwrap() + 1;
                 max_depth_of_node.insert(node, depth);
 
-                nodes_at_depth.entry(depth).or_insert(Vec::new()).push(node);
+                nodes_at_depth.entry(depth).or_insert_with(Vec::new).push(node);
             }
 
             SagaExecStatus {
@@ -1685,7 +1685,7 @@ impl<UserType: SagaType> ActionContext<UserType> {
         let item = self
             .ancestor_tree
             .get(name)
-            .expect(&format!("no ancestor called \"{}\"", name));
+            .unwrap_or_else(|| panic!("no ancestor called \"{}\"", name));
         // TODO-cleanup double-asterisk seems ridiculous
         serde_json::from_value((**item).clone())
             .map_err(ActionError::new_deserialize)
@@ -1742,7 +1742,7 @@ impl<UserType: SagaType> ActionContext<UserType> {
             .await
             .child_sagas
             .entry(self.node_id)
-            .or_insert(Vec::new())
+            .or_insert_with(Vec::new)
             .push(Arc::clone(&e) as Arc<dyn SagaExecChild>);
         Ok(e)
     }

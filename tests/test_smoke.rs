@@ -79,12 +79,12 @@ fn cmd_run_error() {
 fn cmd_run_recover() {
     /* Do a normal run and save the log so we can try recovering from it. */
     let log = run_example("recover1", |exec| {
-        exec.arg("run").arg("--dump-to=/dev/stdout").arg("--quiet")
+        exec.arg("run").arg("--dump-to=-").arg("--quiet")
     });
 
     /* First, try recovery without having changed anything. */
     let recovery_done = run_example("recover2", |exec| {
-        exec.arg("run").arg("--recover-from=/dev/stdin").stdin(log.as_str())
+        exec.arg("run").arg("--recover-from=-").stdin(log.as_str())
     });
     assert_contents("tests/test_smoke_run_recover_done.out", &recovery_done);
 
@@ -99,7 +99,7 @@ fn cmd_run_recover() {
         "tests/test_smoke_run_recover_some.out",
         &run_example("recover3", |exec| {
             exec.arg("run")
-                .arg("--recover-from=/dev/stdin")
+                .arg("--recover-from=-")
                 .stdin(log_shortened.as_str())
         }),
     );
@@ -110,14 +110,14 @@ fn cmd_run_recover_unwind() {
     /* Do a failed run and save the log so we can try recovering from it. */
     let log = run_example("recover_fail1", |exec| {
         exec.arg("run")
-            .arg("--dump-to=/dev/stdout")
+            .arg("--dump-to=-")
             .arg("--quiet")
             .arg("--inject-error=instance_boot")
     });
 
     /* First, try recovery without having changed anything. */
     let recovery_done = run_example("recover_fail2", |exec| {
-        exec.arg("run").arg("--recover-from=/dev/stdin").stdin(log.as_str())
+        exec.arg("run").arg("--recover-from=-").stdin(log.as_str())
     });
     assert_contents(
         "tests/test_smoke_run_recover_fail_done.out",
@@ -135,7 +135,7 @@ fn cmd_run_recover_unwind() {
         "tests/test_smoke_run_recover_fail_some.out",
         &run_example("recover_fail3", |exec| {
             exec.arg("run")
-                .arg("--recover-from=/dev/stdin")
+                .arg("--recover-from=-")
                 .stdin(log_shortened.as_str())
         }),
     );
