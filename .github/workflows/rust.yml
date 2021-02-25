@@ -54,9 +54,9 @@ jobs:
     - name: Report cargo version
       run: cargo --version
     - name: Build
-      run: cargo build --tests --verbose
+      run: cargo build --all-targets --verbose
     - name: Run tests
-      run: cargo test --verbose --test=test_smoke -- --test-threads=1 cmd_run_recover
+      run: cargo test --verbose -- --test-threads=1 cmd_run_recover
 
   build-and-test:
     runs-on: ${{ matrix.os }}
