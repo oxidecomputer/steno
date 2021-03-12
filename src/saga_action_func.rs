@@ -10,12 +10,12 @@ use crate::saga_action_generic::ActionResult;
 use crate::saga_action_generic::SagaType;
 use crate::saga_action_generic::UndoResult;
 use crate::saga_exec::ActionContext;
-use async_trait::async_trait;
 use core::any::type_name;
 use core::fmt;
 use core::fmt::Debug;
 use core::future::Future;
 use core::marker::PhantomData;
+use futures::future::BoxFuture;
 use std::sync::Arc;
 
 /**
@@ -178,7 +178,6 @@ where
     ActionFunc::new_action(f, undo_noop)
 }
 
-#[async_trait]
 impl<
         UserType,
         ActionFutType,
@@ -207,23 +206,30 @@ where
         Fn(ActionContext<UserType>) -> UndoFutType + Send + Sync + 'static,
     UndoFutType: Future<Output = UndoResult> + Send + 'static,
 {
-    async fn do_it(&self, sgctx: ActionContext<UserType>) -> ActionResult {
-        let fut = { (self.action_func)(sgctx) };
-        /*
-         * Execute the caller's function and translate its type into the generic
-         * JsonValue that the framework uses to store action outputs.
-         */
-        fut.await
-            .and_then(|func_output| {
-                serde_json::to_value(func_output)
-                    .map_err(ActionError::new_serialize)
-            })
-            .map(Arc::new)
+    fn do_it<'f>(
+        &'f self,
+        sgctx: ActionContext<UserType>,
+    ) -> BoxFuture<'f, ActionResult> {
+        Box::pin(async move {
+            let fut = (self.action_func)(sgctx);
+            /*
+             * Execute the caller's function and translate its type into the generic
+             * JsonValue that the framework uses to store action outputs.
+             */
+            fut.await
+                .and_then(|func_output| {
+                    serde_json::to_value(func_output)
+                        .map_err(ActionError::new_serialize)
+                })
+                .map(Arc::new)
+        })
     }
 
-    async fn undo_it(&self, sgctx: ActionContext<UserType>) -> UndoResult {
-        let fut = { (self.undo_func)(sgctx) };
-        fut.await
+    fn undo_it<'f>(
+        &'f self,
+        sgctx: ActionContext<UserType>,
+    ) -> BoxFuture<'f, UndoResult> {
+        Box::pin((self.undo_func)(sgctx))
     }
 }
 

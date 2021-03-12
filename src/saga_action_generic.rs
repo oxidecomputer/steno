@@ -6,8 +6,8 @@
 
 use crate::saga_action_error::ActionError;
 use crate::saga_exec::ActionContext;
-use async_trait::async_trait;
 use core::fmt::Debug;
+use futures::future::BoxFuture;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -103,7 +103,6 @@ pub type UndoResult = Result<(), anyhow::Error>;
  * Action in multiple threads -- as might happen if the same action appeared
  * multiple times in the saga or in different sagas.
  */
-#[async_trait]
 pub trait Action<UserType: SagaType>: Debug + Send + Sync {
     /**
      * Executes the action for this saga node, whatever that is.  Actions
@@ -118,12 +117,18 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
      * This is the _only_ supported means of sharing state across actions within
      * a saga.
      */
-    async fn do_it(&self, sgctx: ActionContext<UserType>) -> ActionResult;
+    fn do_it<'f>(
+        &'f self,
+        sgctx: ActionContext<UserType>,
+    ) -> BoxFuture<'f, ActionResult>;
 
     /**
      * Executes the undo action for this saga node, whatever that is.
      */
-    async fn undo_it(&self, sgctx: ActionContext<UserType>) -> UndoResult;
+    fn undo_it<'f>(
+        &'f self,
+        sgctx: ActionContext<UserType>,
+    ) -> BoxFuture<'f, UndoResult>;
 }
 
 /*
@@ -134,19 +139,24 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
 #[derive(Debug)]
 pub struct ActionStartNode {}
 
-#[async_trait]
 impl<UserType> Action<UserType> for ActionStartNode
 where
     UserType: SagaType,
 {
-    async fn do_it(&self, _: ActionContext<UserType>) -> ActionResult {
+    fn do_it<'f>(
+        &'f self,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'f, ActionResult> {
         // TODO-log
-        Ok(Arc::new(JsonValue::Null))
+        Box::pin(futures::future::ok(Arc::new(JsonValue::Null)))
     }
 
-    async fn undo_it(&self, _: ActionContext<UserType>) -> UndoResult {
+    fn undo_it<'f>(
+        &'f self,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'f, UndoResult> {
         // TODO-log
-        Ok(())
+        Box::pin(futures::future::ok(()))
     }
 }
 
@@ -154,14 +164,19 @@ where
 #[derive(Debug)]
 pub struct ActionEndNode {}
 
-#[async_trait]
 impl<UserType: SagaType> Action<UserType> for ActionEndNode {
-    async fn do_it(&self, _: ActionContext<UserType>) -> ActionResult {
+    fn do_it<'f>(
+        &'f self,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'f, ActionResult> {
         // TODO-log
-        Ok(Arc::new(JsonValue::Null))
+        Box::pin(futures::future::ok(Arc::new(JsonValue::Null)))
     }
 
-    async fn undo_it(&self, _: ActionContext<UserType>) -> UndoResult {
+    fn undo_it<'f>(
+        &'f self,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'f, UndoResult> {
         /*
          * We should not run compensation actions for nodes that have not
          * started.  We should never start this node unless all other actions
@@ -176,14 +191,19 @@ impl<UserType: SagaType> Action<UserType> for ActionEndNode {
 #[derive(Debug)]
 pub struct ActionInjectError {}
 
-#[async_trait]
 impl<UserType: SagaType> Action<UserType> for ActionInjectError {
-    async fn do_it(&self, _: ActionContext<UserType>) -> ActionResult {
+    fn do_it<'f>(
+        &'f self,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'f, ActionResult> {
         // TODO-log
-        Err(ActionError::InjectedError)
+        Box::pin(futures::future::err(ActionError::InjectedError))
     }
 
-    async fn undo_it(&self, _: ActionContext<UserType>) -> UndoResult {
+    fn undo_it<'f>(
+        &'f self,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'f, UndoResult> {
         /* We should never undo an action that failed. */
         unimplemented!();
     }
