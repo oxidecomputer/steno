@@ -45,7 +45,7 @@ pub trait SagaType: 'static {
      * actions.  For example, this could include HTTP clients that will be used
      * by the action to make requests to dependent services.
      * This object is made available to actions via
-     * [`crate::ActionContext::context()`].  There's one context for the life of
+     * [`crate::ActionContext::user_data()`].  There's one context for the life of
      * the `SagaExecutor`.
      */
     type ExecContextType: Send + Sync + 'static;
