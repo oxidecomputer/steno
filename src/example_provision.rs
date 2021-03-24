@@ -85,47 +85,47 @@ impl From<ExampleError> for ActionError {
  * using the `demo-provision` example.
  */
 pub fn make_example_provision_saga() -> Arc<SagaTemplate<ExampleSagaType>> {
-    let mut w = SagaTemplateBuilder::new();
-
-    w.append(
-        "instance_id",
-        "InstanceCreate",
-        new_action_noop_undo(demo_prov_instance_create),
-    );
-    w.append_parallel(vec![
-        (
-            "instance_ip",
-            "VpcAllocIp",
-            new_action_noop_undo(demo_prov_vpc_alloc_ip),
-        ),
-        (
-            "volume_id",
-            "VolumeCreate",
-            new_action_noop_undo(demo_prov_volume_create),
-        ),
-        (
-            "server_id",
-            "ServerAlloc (subsaga)",
-            new_action_noop_undo(demo_prov_server_alloc),
-        ),
-    ]);
-    w.append(
-        "instance_configure",
-        "InstanceConfigure",
-        new_action_noop_undo(demo_prov_instance_configure),
-    );
-    w.append(
-        "volume_attach",
-        "VolumeAttach",
-        new_action_noop_undo(demo_prov_volume_attach),
-    );
-    w.append(
-        "instance_boot",
-        "InstanceBoot",
-        new_action_noop_undo(demo_prov_instance_boot),
-    );
-    w.append("print", "Print", new_action_noop_undo(demo_prov_print));
-    Arc::new(w.build())
+    let saga = SagaTemplateBuilder::new()
+        .append(
+            "instance_id",
+            "InstanceCreate",
+            new_action_noop_undo(demo_prov_instance_create),
+        )
+        .append_parallel(vec![
+            (
+                "instance_ip",
+                "VpcAllocIp",
+                new_action_noop_undo(demo_prov_vpc_alloc_ip),
+            ),
+            (
+                "volume_id",
+                "VolumeCreate",
+                new_action_noop_undo(demo_prov_volume_create),
+            ),
+            (
+                "server_id",
+                "ServerAlloc (subsaga)",
+                new_action_noop_undo(demo_prov_server_alloc),
+            ),
+        ])
+        .append(
+            "instance_configure",
+            "InstanceConfigure",
+            new_action_noop_undo(demo_prov_instance_configure),
+        )
+        .append(
+            "volume_attach",
+            "VolumeAttach",
+            new_action_noop_undo(demo_prov_volume_attach),
+        )
+        .append(
+            "instance_boot",
+            "InstanceBoot",
+            new_action_noop_undo(demo_prov_instance_boot),
+        )
+        .append("print", "Print", new_action_noop_undo(demo_prov_print))
+        .build();
+    Arc::new(saga)
 }
 
 async fn demo_prov_instance_create(
@@ -175,18 +175,19 @@ async fn demo_prov_server_alloc(
 ) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
 
-    let mut w = SagaTemplateBuilder::new();
-    w.append(
-        "server_id",
-        "ServerPick",
-        new_action_noop_undo(demo_prov_server_pick),
-    );
-    w.append(
-        "server_reserve",
-        "ServerReserve",
-        new_action_noop_undo(demo_prov_server_reserve),
-    );
-    let sg = Arc::new(w.build());
+    let saga = SagaTemplateBuilder::new()
+        .append(
+            "server_id",
+            "ServerPick",
+            new_action_noop_undo(demo_prov_server_pick),
+        )
+        .append(
+            "server_reserve",
+            "ServerReserve",
+            new_action_noop_undo(demo_prov_server_reserve),
+        )
+        .build();
+    let sg = Arc::new(saga);
 
     /*
      * The uuid here is deterministic solely for the smoke tests.  It would
