@@ -121,6 +121,7 @@ where
     >,
     ActionFuncOutput: ActionData,
 {
+    // TODO-log
     ActionFunc::new_action(f, |_| async { Ok(()) })
 }
 
@@ -136,10 +137,10 @@ where
     ActionFuncOutput: ActionData,
     for<'c> UndoFuncType: ActionFn<'c, UserType, Output = UndoResult>,
 {
-    fn do_it<'f>(
-        &'f self,
+    fn do_it(
+        &self,
         sgctx: ActionContext<UserType>,
-    ) -> BoxFuture<'f, ActionResult> {
+    ) -> BoxFuture<'_, ActionResult> {
         Box::pin(async move {
             let fut = self.action_func.act(sgctx);
             /*
@@ -155,10 +156,10 @@ where
         })
     }
 
-    fn undo_it<'f>(
-        &'f self,
+    fn undo_it(
+        &self,
         sgctx: ActionContext<UserType>,
-    ) -> BoxFuture<'f, UndoResult> {
+    ) -> BoxFuture<'_, UndoResult> {
         Box::pin(self.undo_func.act(sgctx))
     }
 }

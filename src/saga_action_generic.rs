@@ -117,18 +117,18 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
      * This is the _only_ supported means of sharing state across actions within
      * a saga.
      */
-    fn do_it<'f>(
-        &'f self,
+    fn do_it(
+        &self,
         sgctx: ActionContext<UserType>,
-    ) -> BoxFuture<'f, ActionResult>;
+    ) -> BoxFuture<'_, ActionResult>;
 
     /**
      * Executes the undo action for this saga node, whatever that is.
      */
-    fn undo_it<'f>(
-        &'f self,
+    fn undo_it(
+        &self,
         sgctx: ActionContext<UserType>,
-    ) -> BoxFuture<'f, UndoResult>;
+    ) -> BoxFuture<'_, UndoResult>;
 }
 
 /*
@@ -143,18 +143,18 @@ impl<UserType> Action<UserType> for ActionStartNode
 where
     UserType: SagaType,
 {
-    fn do_it<'f>(
-        &'f self,
+    fn do_it(
+        &self,
         _: ActionContext<UserType>,
-    ) -> BoxFuture<'f, ActionResult> {
+    ) -> BoxFuture<'_, ActionResult> {
         // TODO-log
         Box::pin(futures::future::ok(Arc::new(JsonValue::Null)))
     }
 
-    fn undo_it<'f>(
-        &'f self,
+    fn undo_it(
+        &self,
         _: ActionContext<UserType>,
-    ) -> BoxFuture<'f, UndoResult> {
+    ) -> BoxFuture<'_, UndoResult> {
         // TODO-log
         Box::pin(futures::future::ok(()))
     }
@@ -165,18 +165,18 @@ where
 pub struct ActionEndNode {}
 
 impl<UserType: SagaType> Action<UserType> for ActionEndNode {
-    fn do_it<'f>(
-        &'f self,
+    fn do_it(
+        &self,
         _: ActionContext<UserType>,
-    ) -> BoxFuture<'f, ActionResult> {
+    ) -> BoxFuture<'_, ActionResult> {
         // TODO-log
         Box::pin(futures::future::ok(Arc::new(JsonValue::Null)))
     }
 
-    fn undo_it<'f>(
-        &'f self,
+    fn undo_it(
+        &self,
         _: ActionContext<UserType>,
-    ) -> BoxFuture<'f, UndoResult> {
+    ) -> BoxFuture<'_, UndoResult> {
         /*
          * We should not run compensation actions for nodes that have not
          * started.  We should never start this node unless all other actions
@@ -192,18 +192,18 @@ impl<UserType: SagaType> Action<UserType> for ActionEndNode {
 pub struct ActionInjectError {}
 
 impl<UserType: SagaType> Action<UserType> for ActionInjectError {
-    fn do_it<'f>(
-        &'f self,
+    fn do_it(
+        &self,
         _: ActionContext<UserType>,
-    ) -> BoxFuture<'f, ActionResult> {
+    ) -> BoxFuture<'_, ActionResult> {
         // TODO-log
         Box::pin(futures::future::err(ActionError::InjectedError))
     }
 
-    fn undo_it<'f>(
-        &'f self,
+    fn undo_it(
+        &self,
         _: ActionContext<UserType>,
-    ) -> BoxFuture<'f, UndoResult> {
+    ) -> BoxFuture<'_, UndoResult> {
         /* We should never undo an action that failed. */
         unimplemented!();
     }
