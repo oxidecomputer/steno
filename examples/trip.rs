@@ -115,7 +115,7 @@ async fn book_trip(trip_context: Arc<TripContext>, params: TripParams) {
 /// that are part of the saga (including the functions to be invoked to do each
 /// of the steps) and how they depend on each other.
 fn make_trip_saga() -> SagaTemplate<TripSaga> {
-    let mut builder = SagaTemplateBuilder::new();
+    let builder = SagaTemplateBuilder::new();
 
     //
     // Somewhat arbitrarily, we're choosing to charge the credit card first,
@@ -124,38 +124,37 @@ fn make_trip_saga() -> SagaTemplate<TripSaga> {
     // Steno guarantees that eventually either all actions will succeed or all
     // executed actions will be undone.
     //
-    builder.append(
-        // name of this action's output (can be used in subsequent actions)
-        "payment",
-        // human-readable label for the action
-        "ChargeCreditCard",
-        ActionFunc::new_action(
-            // action function
-            saga_charge_card,
-            // undo function
-            saga_refund_card,
-        ),
-    );
-
-    builder.append_parallel(vec![
-        (
-            "hotel",
-            "BookHotel",
-            ActionFunc::new_action(saga_book_hotel, saga_cancel_hotel),
-        ),
-        (
-            "flight",
-            "BookFlight",
-            ActionFunc::new_action(saga_book_flight, saga_cancel_flight),
-        ),
-        (
-            "car",
-            "BookCar",
-            ActionFunc::new_action(saga_book_car, saga_cancel_car),
-        ),
-    ]);
-
-    builder.build()
+    builder
+        .append(
+            // name of this action's output (can be used in subsequent actions)
+            "payment",
+            // human-readable label for the action
+            "ChargeCreditCard",
+            ActionFunc::new_action(
+                // action function
+                saga_charge_card,
+                // undo function
+                saga_refund_card,
+            ),
+        )
+        .append_parallel(vec![
+            (
+                "hotel",
+                "BookHotel",
+                ActionFunc::new_action(saga_book_hotel, saga_cancel_hotel),
+            ),
+            (
+                "flight",
+                "BookFlight",
+                ActionFunc::new_action(saga_book_flight, saga_cancel_flight),
+            ),
+            (
+                "car",
+                "BookCar",
+                ActionFunc::new_action(saga_book_car, saga_cancel_car),
+            ),
+        ])
+        .build()
 }
 
 //
