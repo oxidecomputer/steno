@@ -22,6 +22,7 @@ use steno::SagaId;
 use steno::SagaTemplate;
 use steno::SagaTemplateBuilder;
 use steno::SagaType;
+use steno::NullSink;
 use uuid::Uuid;
 
 //
@@ -73,6 +74,7 @@ async fn book_trip(trip_context: Arc<TripContext>, params: TripParams) {
         creator,
         Arc::new(trip_context),
         params,
+        Arc::new(NullSink),
     )
     .expect("failed to serialize saga parameters");
 

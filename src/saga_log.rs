@@ -20,7 +20,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /* TODO-cleanup newtype for this? */
-type SagaNodeId = u64;
+type SagaNodeId = u64; // XXX this should become u32 so it fits in i64
 
 #[derive(Debug, Error)]
 pub enum SagaLogError {
@@ -65,6 +65,18 @@ impl fmt::Display for SagaNodeEventType {
             SagaNodeEventType::UndoStarted => "undo started",
             SagaNodeEventType::UndoFinished => "undo finished",
         })
+    }
+}
+
+impl SagaNodeEventType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SagaNodeEventType::Started => "started",
+            SagaNodeEventType::Succeeded(_) => "succeeded",
+            SagaNodeEventType::Failed(_) => "failed",
+            SagaNodeEventType::UndoStarted => "undo_started",
+            SagaNodeEventType::UndoFinished => "undo_finished",
+        }
     }
 }
 
@@ -386,10 +398,11 @@ impl fmt::Debug for SagaLog {
  * - do we want to first-class the saga persistence part too?
  */
 #[async_trait]
-pub trait SagaLogSink: Send + Sync {
+pub trait SagaLogSink: fmt::Debug + Send + Sync {
     async fn record(&self, event: &SagaNodeEvent);
 }
 
+#[derive(Debug)]
 pub struct NullSink;
 #[async_trait]
 impl SagaLogSink for NullSink {

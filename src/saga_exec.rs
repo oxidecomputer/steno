@@ -5,7 +5,7 @@ use crate::saga_action_error::ActionError;
 use crate::saga_action_generic::Action;
 use crate::saga_action_generic::ActionData;
 use crate::saga_action_generic::ActionInjectError;
-use crate::saga_log::NullSink;
+use crate::saga_log::SagaLogSink;
 use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
 use crate::saga_template::SagaId;
@@ -312,6 +312,7 @@ struct TaskParams<UserType: SagaType> {
 
     // TODO-cleanup should not need a copy here.
     creator: String,
+    sink: Arc<dyn SagaLogSink>,
 
     /** id of the graph node whose action we're running */
     node_id: NodeIndex,
@@ -357,6 +358,7 @@ pub struct SagaExecutor<UserType: SagaType> {
     saga_metadata: Arc<SagaTemplateMetadata>,
 
     creator: String,
+    sink: Arc<dyn SagaLogSink>,
 
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
@@ -383,15 +385,11 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         creator: &str,
         user_context: Arc<UserType::ExecContextType>,
         user_saga_params: UserType::SagaParamsType,
+        sink: Arc<dyn SagaLogSink>,
     ) -> Result<SagaExecutor<UserType>, ActionError> {
         let serialized_params = serde_json::to_value(&user_saga_params)
             .map_err(ActionError::new_serialize)?;
-        let sglog = SagaLog::new(
-            creator,
-            saga_id,
-            serialized_params,
-            Arc::new(NullSink),
-        );
+        let sglog = SagaLog::new(creator, saga_id, serialized_params, Arc::clone(&sink));
 
         /*
          * It would seem simpler to propagate the result from `new_recover()`,
@@ -403,6 +401,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             sglog,
             creator,
             user_context,
+            sink,
         )
         .unwrap())
     }
@@ -416,6 +415,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         sglog: SagaLog,
         creator: &str,
         user_context: Arc<UserType::ExecContextType>,
+        sink: Arc<dyn SagaLogSink>,
     ) -> Result<SagaExecutor<UserType>, anyhow::Error> {
         /*
          * During recovery, there's a fine line between operational errors and
@@ -650,6 +650,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             user_context,
             user_saga_params,
             creator: creator.to_owned(),
+            sink,
             saga_id,
             finish_tx,
             live_state: Arc::new(Mutex::new(live_state)),
@@ -853,6 +854,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: sgaction,
                 creator: self.creator.clone(),
+                sink: Arc::clone(&self.sink),
                 user_context: Arc::clone(&self.user_context),
                 user_saga_params: Arc::clone(&self.user_saga_params),
             };
@@ -897,6 +899,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: Arc::clone(sgaction),
                 creator: self.creator.clone(),
+                sink: Arc::clone(&self.sink),
                 user_context: Arc::clone(&self.user_context),
                 user_saga_params: Arc::clone(&self.user_saga_params),
             };
@@ -950,6 +953,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             creator: task_params.creator.clone(),
             user_context: Arc::clone(&task_params.user_context),
             user_saga_params: Arc::clone(&task_params.user_saga_params),
+            sink: Arc::clone(&task_params.sink),
         });
         let result = exec_future.await;
         let node: Box<dyn SagaNodeRest<UserType>> = match result {
@@ -1006,6 +1010,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             creator: task_params.creator.clone(),
             user_context: Arc::clone(&task_params.user_context),
             user_saga_params: Arc::clone(&task_params.user_saga_params),
+            sink: Arc::clone(&task_params.sink),
         });
         /*
          * TODO-robustness We have to figure out what it means to fail here and
@@ -1671,6 +1676,7 @@ pub struct ActionContext<UserType: SagaType> {
     creator: String,
     user_context: Arc<UserType::ExecContextType>,
     user_saga_params: Arc<UserType::SagaParamsType>,
+    sink: Arc<dyn SagaLogSink>,
 }
 
 impl<UserType: SagaType> ActionContext<UserType> {
@@ -1741,6 +1747,7 @@ impl<UserType: SagaType> ActionContext<UserType> {
             &self.creator,
             Arc::clone(&self.user_context),
             initial_params,
+            Arc::clone(&self.sink),
         )?);
         /* TODO-correctness Prove the lock ordering is okay here .*/
         self.live_state

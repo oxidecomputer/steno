@@ -12,6 +12,7 @@ use steno::make_example_provision_saga;
 use steno::ExampleContext;
 use steno::ExampleParams;
 use steno::SagaExecutor;
+use steno::NullSink;
 use steno::SagaId;
 use steno::SagaLog;
 use structopt::StructOpt;
@@ -99,6 +100,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
         "provision-info",
         Arc::new(ExampleContext::default()),
         ExampleParams { instance_name: "fake-o instance".to_string() },
+        Arc::new(NullSink),
     )
     .unwrap();
     println!("{}", exec.status().await);
@@ -168,6 +170,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             sglog,
             &args.creator,
             Arc::new(ExampleContext::default()),
+            Arc::new(NullSink),
         )
         .with_context(|| {
             format!("recover log \"{}\"", input_log_path.display())
@@ -186,6 +189,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             &args.creator,
             Arc::new(ExampleContext::default()),
             ExampleParams { instance_name: "fake-o instance".to_string() },
+            Arc::new(NullSink),
         )
         .unwrap()
     };
