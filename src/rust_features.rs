@@ -11,7 +11,7 @@ pub trait ExpectNone {
 
 impl<T> ExpectNone for Option<T> {
     fn expect_none(self, message: &'static str) {
-        assert!(self.is_none(), message);
+        assert!(self.is_none(), "{}", message);
     }
 }
 

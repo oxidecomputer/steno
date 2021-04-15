@@ -4,10 +4,10 @@ use crate::saga_action_error::ActionError;
 use crate::saga_template::SagaId;
 use anyhow::anyhow;
 use anyhow::Context;
+use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::SecondsFormat;
 use chrono::Utc;
-use core::future::Future;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -135,17 +135,17 @@ impl SagaNodeLoadStatus {
 #[derive(Clone, Deserialize, Serialize)]
 pub struct SagaNodeEvent {
     /** id of the saga */
-    saga_id: SagaId,
+    pub saga_id: SagaId,
     /** id of the saga node */
-    node_id: SagaNodeId,
+    pub node_id: SagaNodeId,
     /** what's indicated by this event */
-    event_type: SagaNodeEventType,
+    pub event_type: SagaNodeEventType,
 
-    /* The following debugging fields are not used in the code. */
+    /* The following debugging fields are not used by the executor. */
     /** when this event was recorded (for debugging) */
-    event_time: DateTime<Utc>,
+    pub event_time: DateTime<Utc>,
     /** creator of this event (e.g., a hostname, for debugging) */
-    creator: String,
+    pub creator: String,
 }
 
 impl fmt::Debug for SagaNodeEvent {
@@ -180,10 +180,16 @@ pub struct SagaLog {
     params: JsonValue,
     events: Vec<SagaNodeEvent>,
     node_status: BTreeMap<SagaNodeId, SagaNodeLoadStatus>,
+    sink: Arc<dyn SagaLogSink>,
 }
 
 impl SagaLog {
-    pub fn new(creator: &str, saga_id: &SagaId, params: JsonValue) -> SagaLog {
+    pub fn new(
+        creator: &str,
+        saga_id: &SagaId,
+        params: JsonValue,
+        sink: Arc<dyn SagaLogSink>,
+    ) -> SagaLog {
         SagaLog {
             saga_id: *saga_id,
             creator: creator.to_string(),
@@ -191,14 +197,15 @@ impl SagaLog {
             params,
             node_status: BTreeMap::new(),
             unwinding: false,
+            sink,
         }
     }
 
-    pub fn record_now(
+    pub async fn record_now(
         &mut self,
         node_id: SagaNodeId,
         event_type: SagaNodeEventType,
-    ) -> impl Future<Output = Result<(), SagaLogError>> {
+    ) -> Result<(), SagaLogError> {
         let event = SagaNodeEvent {
             saga_id: self.saga_id,
             node_id,
@@ -207,17 +214,16 @@ impl SagaLog {
             creator: self.creator.clone(),
         };
 
-        self.record(event)
-            .unwrap_or_else(|_| panic!("illegal event for node {}", node_id));
-
-        /*
-         * Although this implementation is synchronous, we want callers to
-         * behave as though it were async.
-         */
-        async move { Ok(()) }
+        Ok(self
+            .record(event)
+            .await
+            .unwrap_or_else(|_| panic!("illegal event for node {}", node_id)))
     }
 
-    fn record(&mut self, event: SagaNodeEvent) -> Result<(), SagaLogError> {
+    async fn record(
+        &mut self,
+        event: SagaNodeEvent,
+    ) -> Result<(), SagaLogError> {
         let current_status = self.load_status_for_node(event.node_id);
         let next_status = current_status.next_status(&event.event_type)?;
 
@@ -231,8 +237,8 @@ impl SagaLog {
         };
 
         self.node_status.insert(event.node_id, next_status);
+        self.sink.record(&event).await;
         self.events.push(event);
-
         Ok(())
     }
 
@@ -283,7 +289,12 @@ impl SagaLog {
     ) -> Result<SagaLog, anyhow::Error> {
         let mut s: SagaLogSerialized = serde_json::from_reader(reader)
             .with_context(|| "deserializing saga log")?;
-        let mut sglog = SagaLog::new(&creator, &s.saga_id, s.params.clone());
+        let mut sglog = SagaLog::new(
+            &creator,
+            &s.saga_id,
+            s.params.clone(),
+            Arc::new(NullSink),
+        );
 
         /*
          * Sort the events by the event type.  This ensures that if there's at
@@ -328,7 +339,8 @@ impl SagaLog {
                 ));
             }
 
-            sglog.record(event).with_context(|| "recovering saga log")?;
+            todo!("need to fix this call to record");
+            // sglog.record(event).with_context(|| "recovering saga log")?;
         }
         Ok(sglog)
     }
@@ -364,6 +376,24 @@ impl fmt::Debug for SagaLog {
 
         Ok(())
     }
+}
+
+/*
+ * XXX TODO here:
+ * - what if record() fails?
+ * - need a way to load, too
+ * - need to fix the call to record() in load() above
+ * - do we want to first-class the saga persistence part too?
+ */
+#[async_trait]
+pub trait SagaLogSink: Send + Sync {
+    async fn record(&self, event: &SagaNodeEvent);
+}
+
+pub struct NullSink;
+#[async_trait]
+impl SagaLogSink for NullSink {
+    async fn record(&self, _: &SagaNodeEvent) {}
 }
 
 //

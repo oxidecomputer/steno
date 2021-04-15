@@ -62,6 +62,7 @@ pub use saga_exec::SagaResultErr;
 pub use saga_exec::SagaResultOk;
 pub use saga_log::SagaLog;
 pub use saga_log::SagaLogSerialized;
+pub use saga_log::SagaLogSink;
 pub use saga_template::SagaId;
 pub use saga_template::SagaTemplate;
 pub use saga_template::SagaTemplateBuilder;

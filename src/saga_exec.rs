@@ -5,6 +5,7 @@ use crate::saga_action_error::ActionError;
 use crate::saga_action_generic::Action;
 use crate::saga_action_generic::ActionData;
 use crate::saga_action_generic::ActionInjectError;
+use crate::saga_log::NullSink;
 use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
 use crate::saga_template::SagaId;
@@ -385,7 +386,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     ) -> Result<SagaExecutor<UserType>, ActionError> {
         let serialized_params = serde_json::to_value(&user_saga_params)
             .map_err(ActionError::new_serialize)?;
-        let sglog = SagaLog::new(creator, saga_id, serialized_params);
+        let sglog = SagaLog::new(
+            creator,
+            saga_id,
+            serialized_params,
+            Arc::new(NullSink),
+        );
 
         /*
          * It would seem simpler to propagate the result from `new_recover()`,
