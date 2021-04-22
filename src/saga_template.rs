@@ -61,6 +61,41 @@ impl<UserType: SagaType> SagaTemplate<UserType> {
     }
 }
 
+/* XXX TODO-cleanup cleanup, doc, better name */
+pub trait SagaTemplateGeneric<T>: Send + Sync {
+    fn recover(
+        self: Arc<Self>,
+        sglog: crate::SagaLog,
+        creator: &str,
+        user_context: Arc<T>,
+        sink: Arc<dyn crate::SagaLogSink>,
+    ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>;
+}
+
+impl<ST> SagaTemplateGeneric<ST::ExecContextType> for SagaTemplate<ST>
+where
+    ST: SagaType,
+{
+    fn recover(
+        self: Arc<Self>,
+        sglog: crate::SagaLog,
+        creator: &str,
+        user_context: Arc<ST::ExecContextType>,
+        sink: Arc<dyn crate::SagaLogSink>,
+    ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>
+    where
+        ST: SagaType,
+    {
+        Ok(Arc::new(crate::SagaExecutor::new_recover(
+            self,
+            sglog,
+            creator,
+            user_context,
+            sink,
+        )?))
+    }
+}
+
 /**
  * Metadata for a saga template including graph structure, node names, labels,
  * etc.

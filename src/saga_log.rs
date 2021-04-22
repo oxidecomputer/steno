@@ -296,13 +296,21 @@ impl SagaLog {
     // has one "creator", but we really want it to have two: the one in the
     // recorded log, and the one that's used for new entries.
     pub fn load<R: Read>(
-        creator: &str,
+        _creator: &str,
         reader: R,
     ) -> Result<SagaLog, anyhow::Error> {
-        let mut s: SagaLogSerialized = serde_json::from_reader(reader)
+        let s: SagaLogSerialized = serde_json::from_reader(reader)
             .with_context(|| "deserializing saga log")?;
+        SagaLog::load_raw(s)
+    }
+
+    // XXX janky
+    pub fn load_raw(
+        mut s: SagaLogSerialized,
+    ) -> Result<SagaLog, anyhow::Error>
+    {
         let mut sglog = SagaLog::new(
-            &creator,
+            &s.creator,
             &s.saga_id,
             s.params.clone(),
             Arc::new(NullSink),

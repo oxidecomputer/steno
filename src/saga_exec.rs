@@ -1802,3 +1802,27 @@ async fn record_now(
      */
     sglog.record_now(node_id, event_type).await.unwrap();
 }
+
+/* XXX TODO-cleanup */
+pub trait SagaExecManager: Send + Sync {
+    fn run(&self) -> BoxFuture<'_, ()>;
+    fn result(&self) -> SagaResult;
+    fn status(&self) -> BoxFuture<'_, SagaExecStatus>;
+}
+
+impl<T> SagaExecManager for SagaExecutor<T>
+where
+    T: SagaType
+{
+    fn run(&self) -> BoxFuture<'_, ()> {
+        self.run().boxed()
+    }
+
+    fn result(&self) -> SagaResult {
+        self.result()
+    }
+
+    fn status(&self) -> BoxFuture<'_, SagaExecStatus> {
+        self.status()
+    }
+}
