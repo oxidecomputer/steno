@@ -236,6 +236,15 @@ impl SagaLog {
         &mut self,
         event: SagaNodeEvent,
     ) -> Result<(), SagaLogError> {
+        self.record_raw(event.clone())?;
+        self.sink.record(&event).await;
+        Ok(())
+    }
+
+    fn record_raw(
+        &mut self,
+        event: SagaNodeEvent,
+    ) -> Result<(), SagaLogError> {
         let current_status = self.load_status_for_node(event.node_id);
         let next_status = current_status.next_status(&event.event_type)?;
 
@@ -249,7 +258,6 @@ impl SagaLog {
         };
 
         self.node_status.insert(event.node_id, next_status);
-        self.sink.record(&event).await;
         self.events.push(event);
         Ok(())
     }
@@ -359,8 +367,7 @@ impl SagaLog {
                 ));
             }
 
-            todo!("need to fix this call to record");
-            // sglog.record(event).with_context(|| "recovering saga log")?;
+            sglog.record_raw(event).with_context(|| "recovering saga log")?;
         }
         Ok(sglog)
     }
