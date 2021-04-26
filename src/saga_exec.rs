@@ -410,6 +410,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
      * Create an executor to run the given saga that may have already
      * started, using the given log events.
      */
+    // XXX sink argument seems redundant with sglog
     pub fn new_recover(
         saga_template: Arc<SagaTemplate<UserType>>,
         sglog: SagaLog,
@@ -1424,6 +1425,7 @@ impl<UserType: SagaType> SagaExecLiveState<UserType> {
 /**
  * Summarizes the final state of a saga execution
  */
+#[derive(Debug)]
 pub struct SagaResult {
     pub saga_id: SagaId,
     pub saga_log: SagaLog,
@@ -1433,6 +1435,7 @@ pub struct SagaResult {
 /**
  * Provides access to outputs from a saga that completed successfully
  */
+#[derive(Debug)]
 pub struct SagaResultOk {
     node_outputs: BTreeMap<String, Arc<JsonValue>>,
 }
@@ -1482,6 +1485,7 @@ impl SagaResultOk {
  * the saga to complete.  It's silly to let you get this id while the saga is
  * running, but not after it's failed.)
  */
+#[derive(Debug)]
 pub struct SagaResultErr {
     pub error_node_name: String,
     pub error_source: ActionError,

@@ -309,19 +309,20 @@ impl SagaLog {
     ) -> Result<SagaLog, anyhow::Error> {
         let s: SagaLogSerialized = serde_json::from_reader(reader)
             .with_context(|| "deserializing saga log")?;
-        SagaLog::load_raw(s)
+        SagaLog::load_raw(s, Arc::new(NullSink))
     }
 
     // XXX janky
     pub fn load_raw(
         mut s: SagaLogSerialized,
+        sink: Arc<dyn SagaLogSink>,
     ) -> Result<SagaLog, anyhow::Error>
     {
         let mut sglog = SagaLog::new(
             &s.creator,
             &s.saga_id,
             s.params.clone(),
-            Arc::new(NullSink),
+            Arc::clone(&sink),
         );
 
         /*
