@@ -1,6 +1,7 @@
 //! Error types produced by saga actions
 
 use crate::saga_action_generic::ActionData;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Error as SerdeError;
@@ -58,7 +59,7 @@ use thiserror::Error;
  * }
  * ```
  */
-#[derive(Clone, Debug, Deserialize, Error, Serialize)]
+#[derive(Clone, Debug, Deserialize, Error, JsonSchema, Serialize)]
 pub enum ActionError {
     /// Action failed due to a consumer-specific error
     #[error("action failed")]
