@@ -34,6 +34,7 @@ mod saga_action_generic;
 mod saga_exec;
 mod saga_log;
 mod saga_template;
+mod store;
 
 /*
  * TODO-cleanup The example_provision stuff should probably be in a separate
@@ -57,19 +58,32 @@ pub use saga_action_generic::UndoResult;
 pub use saga_exec::ActionContext;
 pub use saga_exec::SagaExecManager;
 pub use saga_exec::SagaExecStatus;
-pub use saga_exec::SagaExecutor;
 pub use saga_exec::SagaResult;
 pub use saga_exec::SagaResultErr;
 pub use saga_exec::SagaResultOk;
-pub use saga_log::NullSink;
 pub use saga_log::SagaLog;
-pub use saga_log::SagaLogSerialized;
-pub use saga_log::SagaLogSink;
 pub use saga_log::SagaNodeEvent;
 pub use saga_log::SagaNodeEventType;
 pub use saga_template::SagaId;
 pub use saga_template::SagaTemplate;
-pub use saga_template::SagaTemplateGeneric;
 pub use saga_template::SagaTemplateBuilder;
 pub use saga_template::SagaTemplateDot;
+pub use saga_template::SagaTemplateGeneric;
 pub use saga_template::SagaTemplateMetadata;
+pub use store::InMemoryStoreBackend;
+pub use store::SagaStateView;
+pub use store::Store;
+pub use store::StoreBackend;
+
+/*
+ * XXX TODO-cleanup This ought not to be exposed.  It's here because we expose
+ * SagaTemplateGeneric, which is important, and it has a function that uses this
+ * type.  This ought to be a sealed trait where this function is private or
+ * something.
+ */
+pub use store::StoreInternal;
+
+#[macro_use]
+extern crate slog;
+#[macro_use]
+extern crate newtype_derive;

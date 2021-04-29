@@ -6,10 +6,12 @@ use crate::saga_action_generic::ActionEndNode;
 use crate::saga_action_generic::ActionStartNode;
 use crate::SagaType;
 use anyhow::anyhow;
+use anyhow::Context;
 use petgraph::dot;
 use petgraph::graph::NodeIndex;
 use petgraph::Directed;
 use petgraph::Graph;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -19,7 +21,16 @@ use uuid::Uuid;
 
 /** Unique identifier for a Saga (an execution of a saga template) */
 #[derive(
-    Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Eq,
+    JsonSchema,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
 )]
 pub struct SagaId(pub Uuid);
 /*
@@ -65,10 +76,12 @@ impl<UserType: SagaType> SagaTemplate<UserType> {
 pub trait SagaTemplateGeneric<T>: Send + Sync {
     fn recover(
         self: Arc<Self>,
-        sglog: crate::SagaLog,
-        creator: &str,
+        log: slog::Logger,
+        saga_id: SagaId,
         user_context: Arc<T>,
-        sink: Arc<dyn crate::SagaLogSink>,
+        params: serde_json::Value,
+        store: crate::store::StoreInternal,
+        sglog: crate::SagaLog,
     ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>;
 }
 
@@ -78,20 +91,27 @@ where
 {
     fn recover(
         self: Arc<Self>,
-        sglog: crate::SagaLog,
-        creator: &str,
+        log: slog::Logger,
+        saga_id: SagaId,
         user_context: Arc<ST::ExecContextType>,
-        sink: Arc<dyn crate::SagaLogSink>,
+        params: serde_json::Value,
+        store: crate::store::StoreInternal,
+        sglog: crate::SagaLog,
     ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>
     where
         ST: SagaType,
     {
-        Ok(Arc::new(crate::SagaExecutor::new_recover(
+        let params_deserialized =
+            serde_json::from_value::<ST::SagaParamsType>(params)
+                .context("deserializing saga parameters")?;
+        Ok(Arc::new(crate::saga_exec::SagaExecutor::new_recover(
+            log,
+            saga_id,
             self,
-            sglog,
-            creator,
             user_context,
-            sink,
+            params_deserialized,
+            store,
+            sglog,
         )?))
     }
 }
