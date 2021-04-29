@@ -15,9 +15,9 @@ use steno::ExampleContext;
 use steno::ExampleParams;
 use steno::SagaId;
 use steno::SagaLog;
+use steno::SagaStateView;
 use structopt::StructOpt;
 use uuid::Uuid;
-use steno::SagaStateView;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -25,9 +25,10 @@ async fn main() -> Result<(), anyhow::Error> {
     match subcmd {
         Demo::Dot => cmd_dot().await,
         Demo::Info => cmd_info().await,
-        //        Demo::PrintLog { ref print_log_args } => {
-        //            cmd_print_log(print_log_args).await
-        //        }
+        // XXX need to test print log but I can't do that until I fix Run
+        Demo::PrintLog { ref print_log_args } => {
+            cmd_print_log(print_log_args).await
+        }
         //        Demo::Run { ref run_args } => cmd_run(run_args).await,
     }
 }
@@ -40,12 +41,12 @@ enum Demo {
 
     /// Dump information about the saga graph (not an execution)
     Info,
-    //    /// Pretty-print the log from a previous execution
-    //    PrintLog {
-    //        #[structopt(flatten)]
-    //        print_log_args: PrintLogArgs,
-    //    },
-    //
+
+    /// Pretty-print the log from a previous execution
+    PrintLog {
+        #[structopt(flatten)]
+        print_log_args: PrintLogArgs,
+    },
     //    /// Execute the saga
     //    Run {
     //        #[structopt(flatten)]
@@ -133,25 +134,25 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-// /*
-//  * "print-log" subcommand
-//  */
-//
-// #[derive(Debug, StructOpt)]
-// struct PrintLogArgs {
-//     /// path to the saga log to pretty-print
-//     input_log_path: PathBuf,
-// }
-//
-// async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
-//     let input_log_path = &args.input_log_path;
-//     let file = reader_for_log_input(&input_log_path)?;
-//     let sglog = SagaLog::load("unused", file).with_context(|| {
-//         format!("load log \"{}\"", input_log_path.display())
-//     })?;
-//     println!("{:?}", sglog);
-//     Ok(())
-// }
+/*
+ * "print-log" subcommand
+ */
+
+#[derive(Debug, StructOpt)]
+struct PrintLogArgs {
+    /// path to the saga log to pretty-print
+    input_log_path: PathBuf,
+}
+
+async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
+    let input_log_path = &args.input_log_path;
+    let file = reader_for_log_input(&input_log_path)?;
+    let sglog = steno::read_log(file).with_context(|| {
+        format!("load log \"{}\"", input_log_path.display())
+    })?;
+    println!("{:?}", sglog);
+    Ok(())
+}
 //
 // /*
 //  * "run" subcommand

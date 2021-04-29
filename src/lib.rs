@@ -74,6 +74,7 @@ pub use store::InMemoryStoreBackend;
 pub use store::SagaStateView;
 pub use store::Store;
 pub use store::StoreBackend;
+pub use store::read_log;
 
 /*
  * XXX TODO-cleanup This ought not to be exposed.  It's here because we expose

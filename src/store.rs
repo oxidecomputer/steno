@@ -238,10 +238,7 @@ impl Store {
         // XXX Is the initial value really Running?
         let (update_tx, update_rx) = watch::channel(SagaStoredState::Running);
         // XXX Need to actually listen on these channels at some point!
-        StoreInternal {
-            log_channel: log_tx,
-            update_channel: update_tx,
-        }
+        StoreInternal { log_channel: log_tx, update_channel: update_tx }
     }
 }
 
@@ -268,4 +265,20 @@ impl StoreInternal {
     pub async fn saga_update(&self, update: SagaStoredState) {
         self.update_channel.send(update).unwrap();
     }
+}
+
+/*
+ * File-based serialization and deserialization
+ */
+#[derive(Deserialize, Serialize)]
+struct SagaSerialized {
+    saga_id: SagaId,
+    params: JsonValue,
+    events: Vec<SagaNodeEvent>,
+}
+
+pub fn read_log<R: std::io::Read>(reader: R) -> Result<SagaLog, anyhow::Error> {
+    let s: SagaSerialized = serde_json::from_reader(reader)
+        .with_context(|| "deserializing saga")?;
+    Ok(SagaLog::new_recover(s.saga_id, s.events)?)
 }
