@@ -264,6 +264,10 @@ impl SagaLog {
             .get(&node_id)
             .unwrap_or(&SagaNodeLoadStatus::NeverStarted)
     }
+
+    pub fn events(&self) -> &[SagaNodeEvent] {
+        &self.events
+    }
 }
 
 //

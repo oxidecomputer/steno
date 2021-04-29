@@ -5,6 +5,7 @@
 use crate::saga_exec::SagaExecutor;
 use crate::ActionError;
 use crate::SagaExecManager;
+use crate::SagaExecStatus;
 use crate::SagaId;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
@@ -15,12 +16,12 @@ use crate::SagaType;
 use anyhow::anyhow;
 use anyhow::Context;
 use async_trait::async_trait;
+use petgraph::graph::NodeIndex;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -109,6 +110,7 @@ pub struct Store {
 
 pub struct Saga {
     log: slog::Logger,
+    params: JsonValue,
     run_state: SagaRunState,
 }
 
@@ -118,14 +120,43 @@ pub enum SagaRunState {
         // future: Box<dyn Future<Output = ()>>, // XXX
     },
     Done {
+        status: SagaExecStatus,
         result: SagaResult,
     },
 }
 
 #[derive(Debug)]
+pub struct SagaView {
+    pub id: SagaId,
+    pub state: SagaStateView,
+
+    params: JsonValue,
+}
+
+impl SagaView {
+    pub fn serialized(&self) -> SagaSerialized {
+        let status = self.state.status();
+        SagaSerialized {
+            saga_id: self.id,
+            params: self.params.clone(),
+            events: status.log().events().to_vec(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum SagaStateView {
-    Running { status: crate::SagaExecStatus },
-    Done,
+    Running { status: SagaExecStatus },
+    Done { status: SagaExecStatus, result: SagaResult },
+}
+
+impl SagaStateView {
+    pub fn status(&self) -> &SagaExecStatus {
+        match self {
+            SagaStateView::Running { status } => &status,
+            SagaStateView::Done { status, .. } => &status,
+        }
+    }
 }
 
 impl Store {
@@ -159,7 +190,7 @@ impl Store {
         let saga_create = SagaCreateParams {
             id: saga_id,
             template_name,
-            saga_params: serialized_params,
+            saga_params: serialized_params.clone(),
         };
         self.backend
             .saga_create(&saga_create)
@@ -180,6 +211,7 @@ impl Store {
         );
         let run_state = Saga {
             log,
+            params: serialized_params,
             run_state: SagaRunState::Running { exec: Arc::new(exec) },
         };
         assert!(self.sagas.insert(saga_id, run_state).is_none());
@@ -206,30 +238,56 @@ impl Store {
             log.new(o!()),
             saga_id,
             uctx,
-            params,
+            params.clone(),
             internal,
             saga_log,
         )?;
         // XXX Run these futures
-        let run_state = Saga { log, run_state: SagaRunState::Running { exec } };
+        let run_state =
+            Saga { log, params, run_state: SagaRunState::Running { exec } };
         assert!(self.sagas.insert(saga_id, run_state).is_none());
         Ok(())
+    }
+
+    pub async fn saga_inject_error(
+        &mut self,
+        saga_id: SagaId,
+        node_id: NodeIndex,
+    ) -> Result<(), anyhow::Error> {
+        let saga = self
+            .sagas
+            .get(&saga_id)
+            .ok_or_else(|| anyhow!("no saga with id \"{}\"", saga_id))?;
+        match &saga.run_state {
+            SagaRunState::Running { exec } => {
+                exec.inject_error(node_id).await;
+                Ok(())
+            }
+            SagaRunState::Done { .. } => Err(anyhow!("saga is already done")),
+        }
     }
 
     pub async fn saga_get_state(
         &self,
         saga_id: SagaId,
-    ) -> Result<SagaStateView, anyhow::Error> {
-        let run_state = &self
+    ) -> Result<SagaView, anyhow::Error> {
+        let saga = &self
             .sagas
             .get(&saga_id)
-            .ok_or_else(|| anyhow!("no saga with id \"{}\"", saga_id))?
-            .run_state;
-        Ok(match run_state {
+            .ok_or_else(|| anyhow!("no saga with id \"{}\"", saga_id))?;
+        let state_view = match &saga.run_state {
             SagaRunState::Running { exec } => {
                 SagaStateView::Running { status: exec.status().await }
             }
-            SagaRunState::Done { .. } => SagaStateView::Done,
+            SagaRunState::Done { status, result } => SagaStateView::Done {
+                status: status.clone(),
+                result: result.clone(),
+            },
+        };
+        Ok(SagaView {
+            id: saga_id,
+            state: state_view,
+            params: saga.params.clone(),
         })
     }
 
@@ -268,17 +326,36 @@ impl StoreInternal {
 }
 
 /*
- * File-based serialization and deserialization
+ * Very simple file-based serialization and deserialization, intended only for
+ * testing and debugging
  */
 #[derive(Deserialize, Serialize)]
-struct SagaSerialized {
+pub struct SagaSerialized {
     saga_id: SagaId,
     params: JsonValue,
     events: Vec<SagaNodeEvent>,
 }
 
-pub fn read_log<R: std::io::Read>(reader: R) -> Result<SagaLog, anyhow::Error> {
-    let s: SagaSerialized = serde_json::from_reader(reader)
-        .with_context(|| "deserializing saga")?;
-    Ok(SagaLog::new_recover(s.saga_id, s.events)?)
+// XXX Should we combine these by having SagaLog impl Serialize/Deserialize?
+// XXX Maybe this is what saga_resume() should take, too?
+#[derive(Debug, Clone)]
+pub struct SagaRecovered {
+    pub saga_id: SagaId,
+    pub params: JsonValue,
+    pub log: SagaLog,
+}
+
+impl SagaRecovered {
+    /* XXX weirdly asymmetric with the way we write this out. */
+    pub fn read<R: std::io::Read>(
+        reader: R,
+    ) -> Result<SagaRecovered, anyhow::Error> {
+        let s: SagaSerialized = serde_json::from_reader(reader)
+            .with_context(|| "deserializing saga")?;
+        Ok(SagaRecovered {
+            saga_id: s.saga_id,
+            params: s.params,
+            log: SagaLog::new_recover(s.saga_id, s.events)?,
+        })
+    }
 }

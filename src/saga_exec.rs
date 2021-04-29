@@ -1222,6 +1222,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 nodes_at_depth,
                 node_exec_states,
                 child_sagas,
+                sglog: live_state.sglog.clone(),
             }
         }
         .boxed()
@@ -1310,7 +1311,7 @@ struct SagaExecLiveState<UserType: SagaType> {
     injected_errors: BTreeSet<NodeIndex>,
 }
 
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum NodeExecState {
     Blocked,
     QueuedToRun,
@@ -1321,7 +1322,7 @@ enum NodeExecState {
     Undone(UndoMode),
 }
 
-#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum UndoMode {
     ActionNeverRan,
     ActionUndone,
@@ -1423,7 +1424,7 @@ impl<UserType: SagaType> SagaExecLiveState<UserType> {
 /**
  * Summarizes the final state of a saga execution
  */
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SagaResult {
     pub saga_id: SagaId,
     pub saga_log: SagaLog,
@@ -1433,7 +1434,7 @@ pub struct SagaResult {
 /**
  * Provides access to outputs from a saga that completed successfully
  */
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SagaResultOk {
     node_outputs: BTreeMap<String, Arc<JsonValue>>,
 }
@@ -1483,7 +1484,7 @@ impl SagaResultOk {
  * the saga to complete.  It's silly to let you get this id while the saga is
  * running, but not after it's failed.)
  */
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SagaResultErr {
     pub error_node_name: String,
     pub error_source: ActionError,
@@ -1491,16 +1492,15 @@ pub struct SagaResultErr {
 
 /**
  * Summarizes in-progress execution state of a saga
- *
- * The only thing you can do with this currently is print it using `Display`.
  */
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SagaExecStatus {
     saga_id: SagaId,
     nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>>,
     node_exec_states: BTreeMap<NodeIndex, NodeExecState>,
     child_sagas: BTreeMap<NodeIndex, Vec<SagaExecStatus>>,
     saga_metadata: Arc<SagaTemplateMetadata>,
+    sglog: SagaLog,
 }
 
 impl fmt::Display for SagaExecStatus {
@@ -1510,6 +1510,10 @@ impl fmt::Display for SagaExecStatus {
 }
 
 impl SagaExecStatus {
+    pub fn log(&self) -> &SagaLog {
+        &self.sglog
+    }
+
     fn print(
         &self,
         out: &mut fmt::Formatter<'_>,
@@ -1796,6 +1800,7 @@ pub trait SagaExecManager: Send + Sync {
     fn run(&self) -> BoxFuture<'_, ()>;
     fn result(&self) -> SagaResult;
     fn status(&self) -> BoxFuture<'_, SagaExecStatus>;
+    fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()>;
 }
 
 impl<T> SagaExecManager for SagaExecutor<T>
@@ -1812,5 +1817,9 @@ where
 
     fn status(&self) -> BoxFuture<'_, SagaExecStatus> {
         self.status()
+    }
+
+    fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()> {
+        self.inject_error(node_id).boxed()
     }
 }

@@ -2,6 +2,7 @@
  * Command-line tool for demo'ing saga interfaces
  */
 
+use anyhow::bail;
 use anyhow::Context;
 use slog::Drain;
 use slog::Logger;
@@ -14,8 +15,8 @@ use steno::make_example_provision_saga;
 use steno::ExampleContext;
 use steno::ExampleParams;
 use steno::SagaId;
-use steno::SagaLog;
 use steno::SagaStateView;
+use steno::SagaTemplateGeneric;
 use structopt::StructOpt;
 use uuid::Uuid;
 
@@ -29,7 +30,7 @@ async fn main() -> Result<(), anyhow::Error> {
         Demo::PrintLog { ref print_log_args } => {
             cmd_print_log(print_log_args).await
         }
-        //        Demo::Run { ref run_args } => cmd_run(run_args).await,
+        Demo::Run { ref run_args } => cmd_run(run_args).await,
     }
 }
 
@@ -47,11 +48,12 @@ enum Demo {
         #[structopt(flatten)]
         print_log_args: PrintLogArgs,
     },
-    //    /// Execute the saga
-    //    Run {
-    //        #[structopt(flatten)]
-    //        run_args: RunArgs,
-    //    },
+
+    /// Execute the saga
+    Run {
+        #[structopt(flatten)]
+        run_args: RunArgs,
+    },
 }
 
 /*
@@ -125,12 +127,9 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
         .await
         .unwrap();
 
-    let status = store.saga_get_state(saga_id).await.unwrap();
-    if let SagaStateView::Running { status } = status {
-        println!("{}", status);
-    } else {
-        panic!("saga already done!");
-    }
+    let saga = store.saga_get_state(saga_id).await.unwrap();
+    let status = saga.state.status();
+    println!("{}", status);
     Ok(())
 }
 
@@ -147,126 +146,142 @@ struct PrintLogArgs {
 async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
     let input_log_path = &args.input_log_path;
     let file = reader_for_log_input(&input_log_path)?;
-    let sglog = steno::read_log(file).with_context(|| {
-        format!("load log \"{}\"", input_log_path.display())
-    })?;
-    println!("{:?}", sglog);
+    let saga_recovered =
+        steno::SagaRecovered::read(file).context("reading log")?;
+    println!("{:?}", saga_recovered.log);
     Ok(())
 }
-//
-// /*
-//  * "run" subcommand
-//  */
-//
-// #[derive(Debug, StructOpt)]
-// struct RunArgs {
-//     /// simulate an error at the named saga node
-//     #[structopt(long)]
-//     inject_error: Vec<String>,
-//
-//     /// do not print to stdout
-//     #[structopt(long)]
-//     quiet: bool,
-//
-//     /// upon completion, dump the workflog log to the named file
-//     #[structopt(long)]
-//     dump_to: Option<PathBuf>,
-//
-//     /// recover the saga log from the named file and resume execution
-//     #[structopt(long)]
-//     recover_from: Option<PathBuf>,
-//
-//     /// "creator" attribute used when creating new log entries
-//     #[structopt(long, default_value = "demo-provision")]
-//     creator: String,
-// }
-//
-// async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
-//     let log = make_log();
-//     let store = make_store(&log);
-//     let saga_template = make_example_provision_saga();
-//     let exec = if let Some(input_log_path) = &args.recover_from {
-//         if !args.quiet {
-//             println!("recovering from log: {}", input_log_path.display());
-//         }
-//
-//         let file = reader_for_log_input(input_log_path)?;
-//         let sglog = SagaLog::load(&args.creator, file).with_context(|| {
-//             format!("load log \"{}\"", input_log_path.display())
-//         })?;
-//         let exec = SagaExecutor::new_recover(
-//             Arc::clone(&saga_template),
-//             sglog,
-//             &args.creator,
-//             Arc::new(ExampleContext::default()),
-//             Arc::new(NullSink),
-//         )
-//         .with_context(|| {
-//             format!("recover log \"{}\"", input_log_path.display())
-//         })?;
-//
-//         if !args.quiet {
-//             print!("recovered state\n");
-//             println!("{}", exec.status().await);
-//             println!("");
-//         }
-//         exec
-//     } else {
-//         SagaExecutor::new(
-//             &make_saga_id(),
-//             Arc::clone(&saga_template),
-//             &args.creator,
-//             Arc::new(ExampleContext::default()),
-//             ExampleParams { instance_name: "fake-o instance".to_string() },
-//             Arc::new(NullSink),
-//         )
-//         .unwrap()
-//     };
-//
-//     for node_name in &args.inject_error {
-//         let node_id =
-//             saga_template.metadata().node_for_name(&node_name).with_context(
-//                 || format!("bad argument for --inject-error: {:?}", node_name),
-//             )?;
-//         exec.inject_error(node_id).await;
-//         if !args.quiet {
-//             println!("will inject error at node \"{}\"", node_name);
-//         }
-//     }
-//
-//     if !args.quiet {
-//         println!("*** running saga ***");
-//     }
-//     exec.run().await;
-//     if !args.quiet {
-//         println!("*** finished saga ***");
-//         println!("\n*** final state ***");
-//         println!("{}", exec.status().await);
-//     }
-//
-//     if let Some(output_log_path) = &args.dump_to {
-//         let result = exec.result();
-//         let log = result.saga_log;
-//         let (mut stdout_holder, mut file_holder);
-//         let (label, out): (String, &mut dyn io::Write) = if *output_log_path
-//             == PathBuf::from("-")
-//         {
-//             stdout_holder = io::stdout();
-//             (String::from("stdout"), &mut stdout_holder)
-//         } else {
-//             file_holder = fs::OpenOptions::new()
-//                 .write(true)
-//                 .open(output_log_path)
-//                 .with_context(|| {
-//                     format!("open output log \"{}\"", output_log_path.display())
-//                 })?;
-//             (format!("\"{}\"", output_log_path.display()), &mut file_holder)
-//         };
-//         log.dump(out).with_context(|| format!("save output log {}", label))?;
-//         if !args.quiet {
-//             println!("dumped log to {}", label);
-//         }
-//     }
-//
-//     Ok(())
-// }
+
+/*
+ * "run" subcommand
+ */
+
+#[derive(Debug, StructOpt)]
+struct RunArgs {
+    /// simulate an error at the named saga node
+    #[structopt(long)]
+    inject_error: Vec<String>,
+
+    /// do not print to stdout
+    #[structopt(long)]
+    quiet: bool,
+
+    /// upon completion, dump the workflog log to the named file
+    #[structopt(long)]
+    dump_to: Option<PathBuf>,
+
+    /// recover the saga log from the named file and resume execution
+    #[structopt(long)]
+    recover_from: Option<PathBuf>,
+}
+
+async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
+    let log = make_log();
+    let mut store = make_store(&log);
+    let saga_template = make_example_provision_saga();
+    let template_name = "example-template".to_string();
+    let uctx = Arc::new(ExampleContext::default());
+    let saga_id = if let Some(input_log_path) = &args.recover_from {
+        if !args.quiet {
+            println!("recovering from log: {}", input_log_path.display());
+        }
+
+        let file = reader_for_log_input(input_log_path)?;
+        let saga_recovered =
+            steno::SagaRecovered::read(file).context("reading saga state")?;
+        let saga_id = saga_recovered.saga_id;
+        store
+            .saga_resume(
+                uctx,
+                saga_id,
+                saga_template.clone() as Arc<dyn SagaTemplateGeneric<_>>,
+                saga_recovered.params,
+                saga_recovered.log,
+            )
+            .context("resuming saga");
+        let saga = store
+            .saga_get_state(saga_id)
+            .await
+            .context("fetching newly-created saga")?;
+        if !args.quiet {
+            print!("recovered state\n");
+            println!("{}", saga.state.status());
+        }
+        saga_id
+    } else {
+        let saga_id = make_saga_id();
+        store
+            .saga_create(
+                uctx,
+                saga_id,
+                saga_template.clone(),
+                template_name,
+                ExampleParams { instance_name: "fake-o instance".to_string() },
+            )
+            .await?;
+        saga_id
+    };
+
+    for node_name in &args.inject_error {
+        let node_id =
+            saga_template.metadata().node_for_name(&node_name).with_context(
+                || format!("bad argument for --inject-error: {:?}", node_name),
+            )?;
+        store
+            .saga_inject_error(saga_id, node_id)
+            .await
+            .context("injecting error");
+        if !args.quiet {
+            println!("will inject error at node \"{}\"", node_name);
+        }
+    }
+
+    if !args.quiet {
+        println!("*** running saga ***");
+    }
+    // XXX what's the equivalent here?  await on the store?  Do we need to
+    // "close" it first or something?
+    // exec.run().await;
+
+    let saga = store
+        .saga_get_state(saga_id)
+        .await
+        .context("fetching saga after running it")?;
+    if !args.quiet {
+        println!("*** finished saga ***");
+        println!("\n*** final state ***");
+        println!("{}", saga.state.status());
+    }
+
+    match &saga.state {
+        SagaStateView::Done { result, .. } => &result,
+        _ => bail!("saga's final state was not finished"),
+    };
+
+    // XXX use a file-based store instead?
+    if let Some(output_log_path) = &args.dump_to {
+        let serialized = saga.serialized();
+        let (mut stdout_holder, mut file_holder);
+        let (label, out): (String, &mut dyn io::Write) = if *output_log_path
+            == PathBuf::from("-")
+        {
+            stdout_holder = io::stdout();
+            (String::from("stdout"), &mut stdout_holder)
+        } else {
+            file_holder = fs::OpenOptions::new()
+                .write(true)
+                .open(output_log_path)
+                .with_context(|| {
+                    format!("open output log \"{}\"", output_log_path.display())
+                })?;
+            (format!("\"{}\"", output_log_path.display()), &mut file_holder)
+        };
+        serde_json::to_writer_pretty(out, &serialized)
+            .with_context(|| format!("save output log {}", label))?;
+        if !args.quiet {
+            println!("dumped log to {}", label);
+        }
+    }
+
+    Ok(())
+}
