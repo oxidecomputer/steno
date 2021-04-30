@@ -9,7 +9,7 @@ use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
 use crate::saga_template::SagaId;
 use crate::saga_template::SagaTemplateMetadata;
-use crate::store::StoreInternal;
+use crate::sec::SecSagaHdl;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
 use crate::SagaTemplate;
@@ -341,8 +341,8 @@ struct TaskParams<UserType: SagaType> {
  * the constructor accepted "E" and stored that, since "E" is already Send +
  * Sync + 'static.  There are two challenges here: (1) There are a bunch of
  * other types that store a reference to E, including TaskParams and
- * ActionContext, the latter of which is exposed to the user.  These would have to
- * store &E, which would be okay, but they'd need to have annoying lifetime
+ * ActionContext, the latter of which is exposed to the user.  These would have
+ * to store &E, which would be okay, but they'd need to have annoying lifetime
  * parameters.  (2) child sagas (and so child saga executors) are a thing.
  * Since there's only one "E", the child would have to reference &E, which means
  * it would need a lifetime parameter on it _and_ that might mean it would have
@@ -382,7 +382,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         saga_template: Arc<SagaTemplate<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
         user_saga_params: UserType::SagaParamsType,
-        store_internal: StoreInternal,
+        sec_hdl: SecSagaHdl,
     ) -> SagaExecutor<UserType> {
         let sglog = SagaLog::new_empty(saga_id);
 
@@ -396,7 +396,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             saga_template,
             user_context,
             user_saga_params,
-            store_internal,
+            sec_hdl,
             sglog,
         )
         .unwrap()
@@ -412,7 +412,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         saga_template: Arc<SagaTemplate<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
         user_saga_params: UserType::SagaParamsType,
-        store_internal: StoreInternal,
+        sec_hdl: SecSagaHdl,
         sglog: SagaLog,
     ) -> Result<SagaExecutor<UserType>, anyhow::Error> {
         /*
@@ -444,7 +444,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             child_sagas: BTreeMap::new(),
             sglog,
             injected_errors: BTreeSet::new(),
-            store_internal,
+            sec_hdl,
             saga_id,
         };
         let mut loaded = BTreeSet::new();
@@ -1281,7 +1281,7 @@ struct SagaExecLiveState<UserType: SagaType> {
     /** Unique identifier for this saga (an execution of a saga template) */
     saga_id: SagaId,
 
-    store_internal: StoreInternal,
+    sec_hdl: SecSagaHdl,
 
     /** Overall execution state */
     exec_state: SagaState,
@@ -1792,7 +1792,7 @@ async fn record_now<T>(
      */
     let event = SagaNodeEvent { saga_id, node_id, event_type };
     live_state.sglog.record(&event).unwrap();
-    live_state.store_internal.record(event).await;
+    live_state.sec_hdl.record(event).await;
 }
 
 /* XXX TODO-cleanup */

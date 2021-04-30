@@ -41,6 +41,7 @@ use uuid::Uuid;
  *          boot instance
  */
 
+#[derive(Debug)]
 pub struct ExampleSagaType {}
 impl SagaType for ExampleSagaType {
     type ExecContextType = ExampleContext;
@@ -52,6 +53,7 @@ pub struct ExampleParams {
     pub instance_name: String,
 }
 
+#[derive(Debug)]
 pub struct ExampleContext;
 impl Default for ExampleContext {
     fn default() -> ExampleContext {

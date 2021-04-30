@@ -1,77 +1,102 @@
 /*!
- * Interfaces for persistence of saga records and saga logs
+ * [`SecStore`] trait, related types, and built-in implementations
  */
 
-use crate::saga_exec::SagaExecutor;
-use crate::ActionError;
-use crate::SagaExecManager;
-use crate::SagaExecStatus;
 use crate::SagaId;
-use crate::SagaLog;
 use crate::SagaNodeEvent;
-use crate::SagaResult;
-use crate::SagaTemplate;
-use crate::SagaTemplateGeneric;
-use crate::SagaType;
-use anyhow::anyhow;
-use anyhow::Context;
 use async_trait::async_trait;
-use petgraph::graph::NodeIndex;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
-use tokio::sync::watch;
+use std::fmt;
 
-/* XXX TODO-doc This whole file */
-
-#[derive(Clone, Debug)]
-pub struct SagaCreateParams {
-    pub id: SagaId,
-    pub template_name: String,
-    pub saga_params: JsonValue,
-}
-
-#[derive(
-    Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum SagaStoredState {
-    Running,
-    Unwinding,
-    Done,
-}
-
+/**
+ * Interfaces implemented by the Steno consumer to storing saga state and saga
+ * log state persistently
+ *
+ * Correct implementation of these interfaces is critical for crash recovery.
+ */
 #[async_trait]
-pub trait StoreBackend {
+pub trait SecStore: fmt::Debug {
+    /**
+     * Create a record for a newly created saga
+     *
+     * Once this step has completed, the saga will be discovered and recovered
+     * upon startup.  Until this step has completed, the saga has not finished
+     * being created (since it won't be recovered on startup).
+     */
     async fn saga_create(
         &self,
         create_params: &SagaCreateParams,
     ) -> Result<(), anyhow::Error>;
 
-    async fn record_event(&self, id: &SagaId, event: &SagaNodeEvent);
+    /**
+     * Write a record to a saga's persistent log
+     */
+    async fn record_event(&self, id: SagaId, event: &SagaNodeEvent);
 
+    /**
+     * Update the cached runtime state of the saga
+     *
+     * Steno invokes this function when the saga has reached one of the states
+     * described by [`SagaCachedState`] (like "Done").  This allows consumers to
+     * persistently record this information for easy access.  This step is not
+     * strictly required for correctness, since the saga log contains all the
+     * information needed to determine this state.  But by recording when a saga
+     * has finished, for example, the consumer can avoid having to read the
+     * saga's log altogether when it next starts up since there's no need to
+     * recover the saga.
+     */
     async fn saga_update(
         &self,
-        id: &SagaId,
-        update: &SagaStoredState,
+        id: SagaId,
+        update: &SagaCachedState,
     ) -> Result<(), anyhow::Error>;
 }
 
-pub struct InMemoryStoreBackend {}
+/**
+ * Describes what the SecStore needs to store for a persistent saga record.
+ */
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SagaCreateParams {
+    pub id: SagaId,
+    pub template_name: String,
+    pub saga_params: serde_json::Value,
+    /* XXX SagaCachedState must go here */
+}
 
-impl InMemoryStoreBackend {
-    pub fn new() -> InMemoryStoreBackend {
-        InMemoryStoreBackend {}
+/**
+ * Describes the cacheable state of the saga
+ *
+ * See [`SecStore::saga_update`].
+ */
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SagaCachedState {
+    Running,
+    Unwinding,
+    Done,
+}
+
+/**
+ * Implementation of [`SecStore`] that doesn't store any state persistently
+ *
+ * Sagas created using this store will not be recovered after the program
+ * crashes.
+ */
+#[derive(Debug)]
+pub struct InMemorySecStore {}
+
+impl InMemorySecStore {
+    pub fn new() -> InMemorySecStore {
+        InMemorySecStore {}
     }
 }
 
 #[async_trait]
-impl StoreBackend for InMemoryStoreBackend {
+impl SecStore for InMemorySecStore {
     async fn saga_create(
         &self,
         _create_params: &SagaCreateParams,
@@ -80,282 +105,16 @@ impl StoreBackend for InMemoryStoreBackend {
         Ok(())
     }
 
-    async fn record_event(&self, _id: &SagaId, _event: &SagaNodeEvent) {
+    async fn record_event(&self, _id: SagaId, _event: &SagaNodeEvent) {
         /* Nothing to do. */
     }
 
     async fn saga_update(
         &self,
-        _id: &SagaId,
-        _update: &SagaStoredState,
+        _id: SagaId,
+        _update: &SagaCachedState,
     ) -> Result<(), anyhow::Error> {
         /* Nothing to do. */
         Ok(())
-    }
-}
-
-/*
- * XXX TODO-doc
- * owned by the consumer; any references from internal must be synchronized.
- * When we get to creating child sagas, we may want to use a channel for this.
- * Until then, we can potentially get away with handing out the "backend" Arc to
- * each Exec?  Or for future-proofing: wrap that in a struct that we hand to
- * each Exec.
- */
-pub struct Store {
-    log: slog::Logger,
-    sagas: BTreeMap<SagaId, Saga>,
-    backend: Arc<dyn StoreBackend>,
-}
-
-pub struct Saga {
-    log: slog::Logger,
-    params: JsonValue,
-    run_state: SagaRunState,
-}
-
-pub enum SagaRunState {
-    Running {
-        exec: Arc<dyn SagaExecManager>,
-        // future: Box<dyn Future<Output = ()>>, // XXX
-    },
-    Done {
-        status: SagaExecStatus,
-        result: SagaResult,
-    },
-}
-
-#[derive(Debug)]
-pub struct SagaView {
-    pub id: SagaId,
-    pub state: SagaStateView,
-
-    params: JsonValue,
-}
-
-impl SagaView {
-    pub fn serialized(&self) -> SagaSerialized {
-        let status = self.state.status();
-        SagaSerialized {
-            saga_id: self.id,
-            params: self.params.clone(),
-            events: status.log().events().to_vec(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum SagaStateView {
-    Running { status: SagaExecStatus },
-    Done { status: SagaExecStatus, result: SagaResult },
-}
-
-impl SagaStateView {
-    pub fn status(&self) -> &SagaExecStatus {
-        match self {
-            SagaStateView::Running { status } => &status,
-            SagaStateView::Done { status, .. } => &status,
-        }
-    }
-}
-
-impl Store {
-    pub fn new(log: slog::Logger, backend: Arc<dyn StoreBackend>) -> Store {
-        Store { log, sagas: BTreeMap::new(), backend }
-    }
-
-    // XXX Should this return a Future that waits on this saga?
-    pub async fn saga_create<UserType>(
-        &mut self,
-        uctx: Arc<UserType::ExecContextType>,
-        saga_id: SagaId,
-        template: Arc<SagaTemplate<UserType>>,
-        template_name: String, // XXX
-        params: UserType::SagaParamsType,
-    ) -> Result<(), anyhow::Error>
-    where
-        UserType: SagaType,
-    {
-        /* TODO-log would like template name, maybe parameters in the log */
-        // XXX Run these futures
-        let log = self.log.new(o!("id" => saga_id.to_string()));
-        info!(&log, "saga create");
-
-        /*
-         * Before doing anything else, create a persistent record for this saga.
-         */
-        let serialized_params = serde_json::to_value(&params)
-            .map_err(ActionError::new_serialize)
-            .context("serializing initial saga params")?;
-        let saga_create = SagaCreateParams {
-            id: saga_id,
-            template_name,
-            saga_params: serialized_params.clone(),
-        };
-        self.backend
-            .saga_create(&saga_create)
-            .await
-            .context("creating saga record")?;
-
-        /*
-         * Now create an executor to run this saga.
-         */
-        let internal = self.store_internal(saga_id);
-        let exec = SagaExecutor::new(
-            log.new(o!()),
-            saga_id,
-            template,
-            uctx,
-            params,
-            internal,
-        );
-        let run_state = Saga {
-            log,
-            params: serialized_params,
-            run_state: SagaRunState::Running { exec: Arc::new(exec) },
-        };
-        assert!(self.sagas.insert(saga_id, run_state).is_none());
-        Ok(())
-    }
-
-    pub fn saga_resume<T>(
-        &mut self,
-        uctx: Arc<T>,
-        saga_id: SagaId,
-        template: Arc<dyn SagaTemplateGeneric<T>>,
-        params: JsonValue,
-        saga_log: SagaLog,
-    ) -> Result<(), anyhow::Error>
-    where
-        T: Send + Sync,
-    {
-        let log = self.log.new(o!("id" => saga_id.to_string()));
-        /* TODO-log would like template name, maybe parameters in the log */
-        info!(&self.log, "saga resume"; "id" => %saga_id);
-
-        let internal = self.store_internal(saga_id);
-        let exec = template.recover(
-            log.new(o!()),
-            saga_id,
-            uctx,
-            params.clone(),
-            internal,
-            saga_log,
-        )?;
-        // XXX Run these futures
-        let run_state =
-            Saga { log, params, run_state: SagaRunState::Running { exec } };
-        assert!(self.sagas.insert(saga_id, run_state).is_none());
-        Ok(())
-    }
-
-    pub async fn saga_inject_error(
-        &mut self,
-        saga_id: SagaId,
-        node_id: NodeIndex,
-    ) -> Result<(), anyhow::Error> {
-        let saga = self
-            .sagas
-            .get(&saga_id)
-            .ok_or_else(|| anyhow!("no saga with id \"{}\"", saga_id))?;
-        match &saga.run_state {
-            SagaRunState::Running { exec } => {
-                exec.inject_error(node_id).await;
-                Ok(())
-            }
-            SagaRunState::Done { .. } => Err(anyhow!("saga is already done")),
-        }
-    }
-
-    pub async fn saga_get_state(
-        &self,
-        saga_id: SagaId,
-    ) -> Result<SagaView, anyhow::Error> {
-        let saga = &self
-            .sagas
-            .get(&saga_id)
-            .ok_or_else(|| anyhow!("no saga with id \"{}\"", saga_id))?;
-        let state_view = match &saga.run_state {
-            SagaRunState::Running { exec } => {
-                SagaStateView::Running { status: exec.status().await }
-            }
-            SagaRunState::Done { status, result } => SagaStateView::Done {
-                status: status.clone(),
-                result: result.clone(),
-            },
-        };
-        Ok(SagaView {
-            id: saga_id,
-            state: state_view,
-            params: saga.params.clone(),
-        })
-    }
-
-    fn store_internal(&self, saga_id: SagaId) -> StoreInternal {
-        let (log_tx, log_rx) = mpsc::channel(1);
-        // XXX Is the initial value really Running?
-        let (update_tx, update_rx) = watch::channel(SagaStoredState::Running);
-        // XXX Need to actually listen on these channels at some point!
-        StoreInternal { log_channel: log_tx, update_channel: update_tx }
-    }
-}
-
-#[derive(Debug)]
-struct StoreLog {
-    event: SagaNodeEvent,
-    ack_tx: oneshot::Sender<()>,
-}
-
-/* XXX TODO-cleanup This should be pub(crate).  See lib.rs. */
-#[derive(Debug)]
-pub struct StoreInternal {
-    log_channel: mpsc::Sender<StoreLog>,
-    update_channel: watch::Sender<SagaStoredState>,
-}
-
-impl StoreInternal {
-    pub async fn record(&self, event: SagaNodeEvent) {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.log_channel.send(StoreLog { event, ack_tx }).await.unwrap();
-        ack_rx.await.unwrap()
-    }
-
-    pub async fn saga_update(&self, update: SagaStoredState) {
-        self.update_channel.send(update).unwrap();
-    }
-}
-
-/*
- * Very simple file-based serialization and deserialization, intended only for
- * testing and debugging
- */
-#[derive(Deserialize, Serialize)]
-pub struct SagaSerialized {
-    saga_id: SagaId,
-    params: JsonValue,
-    events: Vec<SagaNodeEvent>,
-}
-
-// XXX Should we combine these by having SagaLog impl Serialize/Deserialize?
-// XXX Maybe this is what saga_resume() should take, too?
-#[derive(Debug, Clone)]
-pub struct SagaRecovered {
-    pub saga_id: SagaId,
-    pub params: JsonValue,
-    pub log: SagaLog,
-}
-
-impl SagaRecovered {
-    /* XXX weirdly asymmetric with the way we write this out. */
-    pub fn read<R: std::io::Read>(
-        reader: R,
-    ) -> Result<SagaRecovered, anyhow::Error> {
-        let s: SagaSerialized = serde_json::from_reader(reader)
-            .with_context(|| "deserializing saga")?;
-        Ok(SagaRecovered {
-            saga_id: s.saga_id,
-            params: s.params,
-            log: SagaLog::new_recover(s.saga_id, s.events)?,
-        })
     }
 }

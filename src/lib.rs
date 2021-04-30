@@ -34,6 +34,7 @@ mod saga_action_generic;
 mod saga_exec;
 mod saga_log;
 mod saga_template;
+mod sec;
 mod store;
 
 /*
@@ -70,11 +71,11 @@ pub use saga_template::SagaTemplateBuilder;
 pub use saga_template::SagaTemplateDot;
 pub use saga_template::SagaTemplateGeneric;
 pub use saga_template::SagaTemplateMetadata;
-pub use store::InMemoryStoreBackend;
-pub use store::SagaRecovered;
-pub use store::SagaStateView;
-pub use store::Store;
-pub use store::StoreBackend;
+//pub use sec::SagaRecovered;
+pub use sec::SagaStateView;
+//pub use sec::Sec;
+pub use store::InMemorySecStore;
+pub use store::SecStore;
 
 /*
  * XXX TODO-cleanup This ought not to be exposed.  It's here because we expose
@@ -82,7 +83,7 @@ pub use store::StoreBackend;
  * type.  This ought to be a sealed trait where this function is private or
  * something.
  */
-pub use store::StoreInternal;
+pub use sec::SecSagaHdl;
 
 #[macro_use]
 extern crate slog;

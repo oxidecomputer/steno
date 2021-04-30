@@ -72,10 +72,10 @@ fn make_log() -> slog::Logger {
     slog::Logger::root(drain, slog::o!())
 }
 
-fn make_store(log: &slog::Logger) -> steno::Store {
-    steno::Store::new(
+fn make_sec(log: &slog::Logger) -> steno::Sec {
+    steno::Sec::new(
         log.new(slog::o!()),
-        Arc::new(steno::InMemoryStoreBackend::new()),
+        Arc::new(steno::InMemorySecStore::new()),
     )
 }
 
@@ -107,7 +107,7 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
 
 async fn cmd_info() -> Result<(), anyhow::Error> {
     let log = make_log();
-    let mut store = make_store(&log);
+    let mut sec = make_sec(&log);
 
     let saga_template = make_example_provision_saga();
     println!("*** saga template definition ***");
@@ -116,7 +116,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
 
     println!("*** initial state ***");
     let saga_id = make_saga_id();
-    store
+    sec
         .saga_create(
             Arc::new(ExampleContext::default()),
             saga_id,
@@ -127,7 +127,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
         .await
         .unwrap();
 
-    let saga = store.saga_get_state(saga_id).await.unwrap();
+    let saga = sec.saga_get_state(saga_id).await.unwrap();
     let status = saga.state.status();
     println!("{}", status);
     Ok(())
@@ -177,7 +177,7 @@ struct RunArgs {
 
 async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let log = make_log();
-    let mut store = make_store(&log);
+    let mut sec = make_sec(&log);
     let saga_template = make_example_provision_saga();
     let template_name = "example-template".to_string();
     let uctx = Arc::new(ExampleContext::default());
@@ -190,7 +190,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         let saga_recovered =
             steno::SagaRecovered::read(file).context("reading saga state")?;
         let saga_id = saga_recovered.saga_id;
-        store
+        sec
             .saga_resume(
                 uctx,
                 saga_id,
@@ -199,7 +199,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
                 saga_recovered.log,
             )
             .context("resuming saga");
-        let saga = store
+        let saga = sec
             .saga_get_state(saga_id)
             .await
             .context("fetching newly-created saga")?;
@@ -210,7 +210,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         saga_id
     } else {
         let saga_id = make_saga_id();
-        store
+        sec
             .saga_create(
                 uctx,
                 saga_id,
@@ -227,7 +227,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             saga_template.metadata().node_for_name(&node_name).with_context(
                 || format!("bad argument for --inject-error: {:?}", node_name),
             )?;
-        store
+        sec
             .saga_inject_error(saga_id, node_id)
             .await
             .context("injecting error");
@@ -239,11 +239,11 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     if !args.quiet {
         println!("*** running saga ***");
     }
-    // XXX what's the equivalent here?  await on the store?  Do we need to
+    // XXX what's the equivalent here?  await on the sec?  Do we need to
     // "close" it first or something?
     // exec.run().await;
 
-    let saga = store
+    let saga = sec
         .saga_get_state(saga_id)
         .await
         .context("fetching saga after running it")?;

@@ -73,21 +73,21 @@ impl<UserType: SagaType> SagaTemplate<UserType> {
 }
 
 /* XXX TODO-cleanup cleanup, doc, better name */
-pub trait SagaTemplateGeneric<T>: Send + Sync {
+pub trait SagaTemplateGeneric<T>: fmt::Debug + Send + Sync {
     fn recover(
         self: Arc<Self>,
         log: slog::Logger,
         saga_id: SagaId,
         user_context: Arc<T>,
         params: serde_json::Value,
-        store: crate::store::StoreInternal,
+        sec: crate::sec::SecSagaHdl,
         sglog: crate::SagaLog,
     ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>;
 }
 
 impl<ST> SagaTemplateGeneric<ST::ExecContextType> for SagaTemplate<ST>
 where
-    ST: SagaType,
+    ST: SagaType + fmt::Debug,
 {
     fn recover(
         self: Arc<Self>,
@@ -95,7 +95,7 @@ where
         saga_id: SagaId,
         user_context: Arc<ST::ExecContextType>,
         params: serde_json::Value,
-        store: crate::store::StoreInternal,
+        sec: crate::sec::SecSagaHdl,
         sglog: crate::SagaLog,
     ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>
     where
@@ -110,7 +110,7 @@ where
             self,
             user_context,
             params_deserialized,
-            store,
+            sec,
             sglog,
         )?))
     }
