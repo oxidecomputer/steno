@@ -17,7 +17,7 @@ use std::fmt;
  * Correct implementation of these interfaces is critical for crash recovery.
  */
 #[async_trait]
-pub trait SecStore: fmt::Debug {
+pub trait SecStore: fmt::Debug + Send + Sync {
     /**
      * Create a record for a newly created saga
      *

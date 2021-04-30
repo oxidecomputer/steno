@@ -42,20 +42,23 @@ use tokio::sync::watch;
 /**
  * Creates a new Saga Execution Coordinator
  */
-pub fn sec(
-    log: slog::Logger,
-    sec_store: Arc<dyn SecStore>,
-) -> (SecClient, impl Future<Output = ()>) {
+pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
     let (cmd_tx, cmd_rx) = mpsc::channel(8); // XXX buffer size
-    let client = SecClient { cmd_tx, shutdown: false };
     let sec = Sec {
         log,
         sagas: BTreeMap::new(),
         sec_store,
         saga_futures: FuturesUnordered::new(),
     };
-    let future = sec.run();
-    (client, future)
+
+    /*
+     * We spawn a new task rather than return a `Future` for the caller to
+     * poll because we want to make sure the Sec can't be dropped unless
+     * shutdown() has been invoked on the client.
+     */
+    let task = tokio::spawn(sec.run());
+    let client = SecClient { cmd_tx, task: Some(task), shutdown: false };
+    client
 }
 
 /**
@@ -67,6 +70,7 @@ pub fn sec(
 #[derive(Debug)]
 pub struct SecClient {
     cmd_tx: mpsc::Sender<SecClientMsg>,
+    task: Option<tokio::task::JoinHandle<()>>,
     shutdown: bool,
 }
 
@@ -162,9 +166,14 @@ impl SecClient {
      */
     pub async fn shutdown(mut self) {
         self.shutdown = true;
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.sec_cmd(ack_rx, SecClientMsg::Shutdown { ack_tx: Some(ack_tx) })
+        self.cmd_tx.send(SecClientMsg::Shutdown).await.unwrap_or_else(
+            |error| panic!("failed to send message to SEC: {:#}", error),
+        );
+        self.task
+            .take()
+            .expect("missing task")
             .await
+            .expect("failed to join on SEC task");
     }
 
     /**
@@ -198,11 +207,9 @@ impl Drop for SecClient {
              * because the other side is closed either.  See shutdown() for
              * details.
              */
-            self.cmd_tx
-                .try_send(SecClientMsg::Shutdown { ack_tx: None })
-                .unwrap_or_else(|error| {
-                    panic!("failed to send message to SEC: {:#}", error)
-                });
+            self.cmd_tx.try_send(SecClientMsg::Shutdown).unwrap_or_else(
+                |error| panic!("failed to send message to SEC: {:#}", error),
+            );
         }
     }
 }
@@ -289,19 +296,16 @@ enum SecClientMsg {
         ack_tx: oneshot::Sender<Vec<SagaView>>,
     },
 
-    /** Fetch information about one saga. */
+    /** Fetch information about one saga */
     SagaGet {
         /** response channel */
         ack_tx: oneshot::Sender<Result<SagaView, ()>>,
-        /** id of saga to fetch informationa bout */
+        /** id of saga to fetch information about */
         saga_id: SagaId,
     },
 
-    /** Shut down the SEC and wait for it to come to rest. */
-    Shutdown {
-        /** response channel */
-        ack_tx: Option<oneshot::Sender<()>>,
-    },
+    /** Shut down the SEC */
+    Shutdown,
 }
 
 impl fmt::Debug for SecClientMsg {
