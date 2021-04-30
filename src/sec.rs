@@ -29,94 +29,33 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 
-/**
- * This trait erases the type parameters on a [`SagaTemplate`], user context,
- * and user parameters so that we can more easily pass it through a channel.
+/*
+ * SEC client side (handle used by Steno consumers)
  */
-trait TemplateParams: fmt::Debug {
-    fn into_exec(
-        self,
-        log: slog::Logger,
-        saga_id: SagaId,
-        sec_hdl: SecSagaHdl,
-    ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error>;
-}
 
 /**
- * Stores a template, saga parameters, and user context in a way where the
- * user-defined types can be erased with [`TemplateParams`]
- *
- * This version is for the "create" case, where we know the specific
- * [`SagaType`] for these values.  See [`SecClient::saga_create`].
+ * Creates a new Saga Execution Coordinator
  */
-#[derive(Debug)]
-struct TemplateParamsForCreate<UserType: SagaType + fmt::Debug> {
-    template: Arc<SagaTemplate<UserType>>,
-    params: UserType::SagaParamsType,
-    uctx: Arc<UserType::ExecContextType>,
-}
-
-impl<UserType> TemplateParams for TemplateParamsForCreate<UserType>
-where
-    UserType: SagaType + fmt::Debug,
-{
-    fn into_exec(
-        self,
-        log: slog::Logger,
-        saga_id: SagaId,
-        sec_hdl: SecSagaHdl,
-    ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
-        Ok(Arc::new(SagaExecutor::new(
-            log,
-            saga_id,
-            self.template,
-            self.uctx,
-            self.params,
-            sec_hdl,
-        )))
-    }
-}
-
-/**
- * Stores a template, saga parameters, and user context in a way where the
- * user-defined types can be erased with [`TemplateParams]
- *
- * This version is for the "resume" case, where we know the specific context
- * type, but not the parameters or template type.  We also have a saga log in
- * this case.  See [`SecClient::saga_resume()`].
- */
-#[derive(Debug)]
-struct TemplateParamsForRecover<T: Send + Sync + fmt::Debug> {
-    template: Arc<dyn SagaTemplateGeneric<T>>,
-    params: JsonValue,
-    uctx: Arc<T>,
-    saga_log: SagaLog,
-}
-
-impl<T> TemplateParams for TemplateParamsForRecover<T>
-where
-    T: Send + Sync + fmt::Debug,
-{
-    fn into_exec(
-        self,
-        log: slog::Logger,
-        saga_id: SagaId,
-        sec_hdl: SecSagaHdl,
-    ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
-        Ok(self.template.recover(
-            log,
-            saga_id,
-            self.uctx,
-            self.params,
-            sec_hdl,
-            self.saga_log,
-        )?)
-    }
+pub fn sec(
+    log: slog::Logger,
+    sec_store: Arc<dyn SecStore>,
+) -> (SecClient, impl Future<Output = ()>) {
+    let (cmd_tx, cmd_rx) = mpsc::channel(8); // XXX buffer size
+    let client = SecClient { cmd_tx, shutdown: false };
+    let sec = Sec {
+        log,
+        sagas: BTreeMap::new(),
+        sec_store,
+        saga_futures: FuturesUnordered::new(),
+    };
+    let future = sec.run();
+    (client, future)
 }
 
 /**
@@ -127,7 +66,7 @@ where
  */
 #[derive(Debug)]
 pub struct SecClient {
-    tx: mpsc::Sender<SecClientMsg>,
+    cmd_tx: mpsc::Sender<SecClientMsg>,
     shutdown: bool,
 }
 
@@ -221,7 +160,7 @@ impl SecClient {
     /**
      * Shut down the SEC and wait for it to do so.
      */
-    pub async fn shudown(mut self) {
+    pub async fn shutdown(mut self) {
         self.shutdown = true;
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sec_cmd(ack_rx, SecClientMsg::Shutdown { ack_tx: Some(ack_tx) })
@@ -241,7 +180,7 @@ impl SecClient {
         ack_rx: oneshot::Receiver<R>,
         msg: SecClientMsg,
     ) -> R {
-        self.tx.send(msg).await.unwrap_or_else(|error| {
+        self.cmd_tx.send(msg).await.unwrap_or_else(|error| {
             panic!("failed to send message to SEC: {:#}", error)
         });
         ack_rx.await.expect("failed to read SEC response")
@@ -259,7 +198,7 @@ impl Drop for SecClient {
              * because the other side is closed either.  See shutdown() for
              * details.
              */
-            self.tx
+            self.cmd_tx
                 .try_send(SecClientMsg::Shutdown { ack_tx: None })
                 .unwrap_or_else(|error| {
                     panic!("failed to send message to SEC: {:#}", error)
@@ -267,6 +206,46 @@ impl Drop for SecClient {
         }
     }
 }
+
+/** External consumer's view of a saga */
+#[derive(Debug, Clone)]
+pub struct SagaView {
+    pub id: SagaId,
+    pub state: SagaStateView,
+
+    params: JsonValue,
+}
+
+/** State-specific parts of a consumer's view of a saga */
+#[derive(Debug, Clone)]
+pub enum SagaStateView {
+    /** The saga is still running */
+    Running {
+        /** current execution status */
+        status: SagaExecStatus,
+    },
+    /** The saga has finished running */
+    Done {
+        /** final execution status */
+        status: SagaExecStatus,
+        /** final result */
+        result: SagaResult,
+    },
+}
+
+impl SagaStateView {
+    /** Returns the status summary for this saga */
+    pub fn status(&self) -> &SagaExecStatus {
+        match self {
+            SagaStateView::Running { status } => &status,
+            SagaStateView::Done { status, .. } => &status,
+        }
+    }
+}
+
+/*
+ * SEC Client/Server interface
+ */
 
 /**
  * Message passed from the SecClient to the Sec
@@ -354,68 +333,120 @@ impl fmt::Debug for SecClientMsg {
     }
 }
 
-/** External consumer's view of a saga */
-#[derive(Debug, Clone)]
-pub struct SagaView {
-    pub id: SagaId,
-    pub state: SagaStateView,
+/**
+ * This trait erases the type parameters on a [`SagaTemplate`], user context,
+ * and user parameters so that we can more easily pass it through a channel.
+ */
+trait TemplateParams: fmt::Debug {
+    fn into_exec(
+        self,
+        log: slog::Logger,
+        saga_id: SagaId,
+        sec_hdl: SecSagaHdl,
+    ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error>;
+}
 
+/**
+ * Stores a template, saga parameters, and user context in a way where the
+ * user-defined types can be erased with [`TemplateParams`]
+ *
+ * This version is for the "create" case, where we know the specific
+ * [`SagaType`] for these values.  See [`SecClient::saga_create`].
+ */
+#[derive(Debug)]
+struct TemplateParamsForCreate<UserType: SagaType + fmt::Debug> {
+    template: Arc<SagaTemplate<UserType>>,
+    params: UserType::SagaParamsType,
+    uctx: Arc<UserType::ExecContextType>,
+}
+
+impl<UserType> TemplateParams for TemplateParamsForCreate<UserType>
+where
+    UserType: SagaType + fmt::Debug,
+{
+    fn into_exec(
+        self,
+        log: slog::Logger,
+        saga_id: SagaId,
+        sec_hdl: SecSagaHdl,
+    ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
+        Ok(Arc::new(SagaExecutor::new(
+            log,
+            saga_id,
+            self.template,
+            self.uctx,
+            self.params,
+            sec_hdl,
+        )))
+    }
+}
+
+/**
+ * Stores a template, saga parameters, and user context in a way where the
+ * user-defined types can be erased with [`TemplateParams]
+ *
+ * This version is for the "resume" case, where we know the specific context
+ * type, but not the parameters or template type.  We also have a saga log in
+ * this case.  See [`SecClient::saga_resume()`].
+ */
+#[derive(Debug)]
+struct TemplateParamsForRecover<T: Send + Sync + fmt::Debug> {
+    template: Arc<dyn SagaTemplateGeneric<T>>,
     params: JsonValue,
+    uctx: Arc<T>,
+    saga_log: SagaLog,
 }
 
-/** State-specific parts of a consumer's view of a saga */
-#[derive(Debug, Clone)]
-pub enum SagaStateView {
-    /** The saga is still running */
-    Running {
-        /** current execution status */
-        status: SagaExecStatus,
-    },
-    /** The saga has finished running */
-    Done {
-        /** final execution status */
-        status: SagaExecStatus,
-        /** final result */
-        result: SagaResult,
-    },
-}
-
-impl SagaStateView {
-    /** Returns the status summary for this saga */
-    pub fn status(&self) -> &SagaExecStatus {
-        match self {
-            SagaStateView::Running { status } => &status,
-            SagaStateView::Done { status, .. } => &status,
-        }
+impl<T> TemplateParams for TemplateParamsForRecover<T>
+where
+    T: Send + Sync + fmt::Debug,
+{
+    fn into_exec(
+        self,
+        log: slog::Logger,
+        saga_id: SagaId,
+        sec_hdl: SecSagaHdl,
+    ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
+        Ok(self.template.recover(
+            log,
+            saga_id,
+            self.uctx,
+            self.params,
+            sec_hdl,
+            self.saga_log,
+        )?)
     }
 }
 
 /*
- * XXX TODO-doc
- * owned by the consumer; any references from internal must be synchronized.
- * When we get to creating child sagas, we may want to use a channel for this.
- * Until then, we can potentially get away with handing out the "backend" Arc to
- * each Exec?  Or for future-proofing: wrap that in a struct that we hand to
- * each Exec.
+ * SEC server side (background task)
  */
-// pub struct Sec {
-//     log: slog::Logger,
-//     sagas: BTreeMap<SagaId, Saga>,
-//     sec_store: Arc<dyn SecStore>,
-//     saga_futures: futures::FuturesUnordered<BoxFuture<'static, SagaId>>,
-// }
-//
-// pub struct Saga {
-//     log: slog::Logger,
-//     params: JsonValue,
-//     run_state: SagaRunState,
-// }
-//
-// pub enum SagaRunState {
-//     Running { exec: Arc<dyn SagaExecManager> },
-//     Done { status: SagaExecStatus, result: SagaResult },
-// }
-//
+
+/**
+ * The `Sec` (Saga Execution Coordinator) is responsible for tracking and
+ * running sagas
+ *
+ * Steno consumers create this via [`sec()`].
+ */
+struct Sec {
+    log: slog::Logger,
+    sagas: BTreeMap<SagaId, Saga>,
+    sec_store: Arc<dyn SecStore>,
+    saga_futures: FuturesUnordered<BoxFuture<'static, SagaId>>,
+}
+
+pub struct Saga {
+    log: slog::Logger,
+    params: JsonValue,
+    run_state: SagaRunState,
+}
+
+pub enum SagaRunState {
+    Running { exec: Arc<dyn SagaExecManager> },
+    Done { status: SagaExecStatus, result: SagaResult },
+}
+
+// XXX
 // impl SagaView {
 //     pub fn serialized(&self) -> SagaSerialized {
 //         let status = self.state.status();
@@ -426,32 +457,13 @@ impl SagaStateView {
 //         }
 //     }
 // }
-//
-// #[derive(Debug)]
-// pub enum SagaStateView {
-//     Running { status: SagaExecStatus },
-//     Done { status: SagaExecStatus, result: SagaResult },
-// }
-//
-// impl SagaStateView {
-//     pub fn status(&self) -> &SagaExecStatus {
-//         match self {
-//             SagaStateView::Running { status } => &status,
-//             SagaStateView::Done { status, .. } => &status,
-//         }
-//     }
-// }
-//
-// impl Sec {
-//     pub fn new(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> Sec {
-//         Sec {
-//             log,
-//             sagas: BTreeMap::new(),
-//             sec_store,
-//             saga_futures: FuturesUnordered::new(),
-//         }
-//     }
-//
+
+impl Sec {
+    async fn run(self) {
+        // XXX
+        futures::future::pending().await
+    }
+}
 //     // XXX Should this return a Future that waits on this saga?
 //     pub async fn saga_create<UserType>(
 //         &mut self,

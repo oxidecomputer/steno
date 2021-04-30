@@ -72,8 +72,9 @@ pub use saga_template::SagaTemplateDot;
 pub use saga_template::SagaTemplateGeneric;
 pub use saga_template::SagaTemplateMetadata;
 //pub use sec::SagaRecovered;
+pub use sec::sec;
 pub use sec::SagaStateView;
-//pub use sec::Sec;
+pub use sec::SecClient;
 pub use store::InMemorySecStore;
 pub use store::SecStore;
 
