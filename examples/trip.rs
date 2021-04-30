@@ -17,12 +17,12 @@ use std::sync::Arc;
 use steno::ActionContext;
 use steno::ActionError;
 use steno::ActionFunc;
+use steno::NullSink;
 use steno::SagaExecutor;
 use steno::SagaId;
 use steno::SagaTemplate;
 use steno::SagaTemplateBuilder;
 use steno::SagaType;
-use steno::NullSink;
 use uuid::Uuid;
 
 //

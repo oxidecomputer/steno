@@ -116,16 +116,15 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
 
     println!("*** initial state ***");
     let saga_id = make_saga_id();
-    sec
-        .saga_create(
-            Arc::new(ExampleContext::default()),
-            saga_id,
-            saga_template,
-            "demo-provision".to_string(),
-            ExampleParams { instance_name: "fake-o instance".to_string() },
-        )
-        .await
-        .unwrap();
+    sec.saga_create(
+        Arc::new(ExampleContext::default()),
+        saga_id,
+        saga_template,
+        "demo-provision".to_string(),
+        ExampleParams { instance_name: "fake-o instance".to_string() },
+    )
+    .await
+    .unwrap();
 
     let saga = sec.saga_get_state(saga_id).await.unwrap();
     let status = saga.state.status();
@@ -190,15 +189,14 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         let saga_recovered =
             steno::SagaRecovered::read(file).context("reading saga state")?;
         let saga_id = saga_recovered.saga_id;
-        sec
-            .saga_resume(
-                uctx,
-                saga_id,
-                saga_template.clone() as Arc<dyn SagaTemplateGeneric<_>>,
-                saga_recovered.params,
-                saga_recovered.log,
-            )
-            .context("resuming saga");
+        sec.saga_resume(
+            uctx,
+            saga_id,
+            saga_template.clone() as Arc<dyn SagaTemplateGeneric<_>>,
+            saga_recovered.params,
+            saga_recovered.log,
+        )
+        .context("resuming saga");
         let saga = sec
             .saga_get_state(saga_id)
             .await
@@ -210,15 +208,14 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         saga_id
     } else {
         let saga_id = make_saga_id();
-        sec
-            .saga_create(
-                uctx,
-                saga_id,
-                saga_template.clone(),
-                template_name,
-                ExampleParams { instance_name: "fake-o instance".to_string() },
-            )
-            .await?;
+        sec.saga_create(
+            uctx,
+            saga_id,
+            saga_template.clone(),
+            template_name,
+            ExampleParams { instance_name: "fake-o instance".to_string() },
+        )
+        .await?;
         saga_id
     };
 
@@ -227,8 +224,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             saga_template.metadata().node_for_name(&node_name).with_context(
                 || format!("bad argument for --inject-error: {:?}", node_name),
             )?;
-        sec
-            .saga_inject_error(saga_id, node_id)
+        sec.saga_inject_error(saga_id, node_id)
             .await
             .context("injecting error");
         if !args.quiet {

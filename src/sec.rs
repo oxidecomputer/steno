@@ -1,6 +1,7 @@
 /*!
  * Interfaces for persistence of saga records and saga logs
  */
+/* XXX TODO-doc This whole file */
 
 use crate::saga_exec::SagaExecutor;
 use crate::store::SagaCachedState;
@@ -380,6 +381,7 @@ pub enum SagaStateView {
 }
 
 impl SagaStateView {
+    /** Returns the status summary for this saga */
     pub fn status(&self) -> &SagaExecStatus {
         match self {
             SagaStateView::Running { status } => &status,
@@ -387,8 +389,6 @@ impl SagaStateView {
         }
     }
 }
-
-/* XXX TODO-doc This whole file */
 
 /*
  * XXX TODO-doc
@@ -636,24 +636,12 @@ impl SagaStateView {
 //
 
 /**
- * Message from [`SagaExecutor`] to [`Sec`] (via [`SecSagaHdl`]) to record
- * an event to the saga log.
- */
-#[derive(Debug)]
-struct SecMsgLog {
-    /** event to be recorded to the saga log */
-    event: SagaNodeEvent,
-    /** response channel */
-    ack_tx: oneshot::Sender<()>,
-}
-
-/**
  * Handle used by [`SagaExecutor`] for sending messages back to the SEC
  */
 /* XXX TODO-cleanup This should be pub(crate).  See lib.rs. */
 #[derive(Debug)]
 pub struct SecSagaHdl {
-    log_channel: mpsc::Sender<SecMsgLog>,
+    log_channel: mpsc::Sender<SecSagaHdlMsgLog>,
     update_channel: watch::Sender<SagaCachedState>,
 }
 
@@ -661,7 +649,10 @@ impl SecSagaHdl {
     /** Write `event` to the saga log. */
     pub async fn record(&self, event: SagaNodeEvent) {
         let (ack_tx, ack_rx) = oneshot::channel();
-        self.log_channel.send(SecMsgLog { event, ack_tx }).await.unwrap();
+        self.log_channel
+            .send(SecSagaHdlMsgLog { event, ack_tx })
+            .await
+            .unwrap();
         ack_rx.await.unwrap()
     }
 
@@ -673,6 +664,18 @@ impl SecSagaHdl {
     pub async fn saga_update(&self, update: SagaCachedState) {
         self.update_channel.send(update).unwrap();
     }
+}
+
+/**
+ * Message from [`SagaExecutor`] to [`Sec`] (via [`SecSagaHdl`]) to record
+ * an event to the saga log.
+ */
+#[derive(Debug)]
+struct SecSagaHdlMsgLog {
+    /** event to be recorded to the saga log */
+    event: SagaNodeEvent,
+    /** response channel */
+    ack_tx: oneshot::Sender<()>,
 }
 
 // /*
