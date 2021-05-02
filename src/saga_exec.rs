@@ -1796,7 +1796,7 @@ async fn record_now<T>(
 }
 
 /* XXX TODO-cleanup */
-pub trait SagaExecManager: Send + Sync {
+pub trait SagaExecManager: fmt::Debug + Send + Sync {
     fn run(&self) -> BoxFuture<'_, ()>;
     fn result(&self) -> SagaResult;
     fn status(&self) -> BoxFuture<'_, SagaExecStatus>;
@@ -1805,7 +1805,7 @@ pub trait SagaExecManager: Send + Sync {
 
 impl<T> SagaExecManager for SagaExecutor<T>
 where
-    T: SagaType,
+    T: SagaType + fmt::Debug,
 {
     fn run(&self) -> BoxFuture<'_, ()> {
         self.run().boxed()

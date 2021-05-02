@@ -21,7 +21,10 @@ use anyhow::anyhow;
 use anyhow::Context;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
+use futures::select;
 use futures::stream::FuturesUnordered;
+use futures::FutureExt;
+use futures::StreamExt;
 use petgraph::graph::NodeIndex;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -44,19 +47,24 @@ use tokio::sync::watch;
  */
 pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
     let (cmd_tx, cmd_rx) = mpsc::channel(8); // XXX buffer size
-    let sec = Sec {
-        log,
-        sagas: BTreeMap::new(),
-        sec_store,
-        saga_futures: FuturesUnordered::new(),
-    };
 
     /*
      * We spawn a new task rather than return a `Future` for the caller to
      * poll because we want to make sure the Sec can't be dropped unless
      * shutdown() has been invoked on the client.
      */
-    let task = tokio::spawn(sec.run());
+    let task = tokio::spawn(async move {
+        let sec = Sec {
+            log,
+            sagas: BTreeMap::new(),
+            sec_store,
+            saga_futures: FuturesUnordered::new(),
+            cmd_rx,
+            shutdown: false,
+        };
+
+        sec.run().await
+    });
     let client = SecClient { cmd_tx, task: Some(task), shutdown: false };
     client
 }
@@ -93,6 +101,9 @@ impl SecClient {
         UserType: SagaType + fmt::Debug,
     {
         let (ack_tx, ack_rx) = oneshot::channel();
+        let serialized_params = serde_json::to_value(&params)
+            .map_err(ActionError::new_serialize)
+            .context("serializing new saga parameters")?;
         let template_params =
             Box::new(TemplateParamsForCreate { template, params, uctx })
                 as Box<dyn TemplateParams>;
@@ -103,6 +114,7 @@ impl SecClient {
                 saga_id,
                 template_params,
                 template_name,
+                serialized_params,
             },
         )
         .await
@@ -134,13 +146,18 @@ impl SecClient {
         let (ack_tx, ack_rx) = oneshot::channel();
         let template_params = Box::new(TemplateParamsForRecover {
             template,
-            params,
+            params: params.clone(),
             uctx,
             saga_log,
         }) as Box<dyn TemplateParams>;
         self.sec_cmd(
             ack_rx,
-            SecClientMsg::SagaResume { ack_tx, saga_id, template_params },
+            SecClientMsg::SagaResume {
+                ack_tx,
+                saga_id,
+                template_params,
+                serialized_params: params,
+            },
         )
         .await
     }
@@ -223,6 +240,26 @@ pub struct SagaView {
     params: JsonValue,
 }
 
+impl SagaView {
+    async fn from_saga(saga: &Saga) -> Self {
+        SagaView {
+            id: saga.id,
+            state: SagaStateView::from_run_state(&saga.run_state).await,
+            params: saga.params.clone(),
+        }
+    }
+
+    // XXX
+    //     pub fn serialized(&self) -> SagaSerialized {
+    //         let status = self.state.status();
+    //         SagaSerialized {
+    //             saga_id: self.id,
+    //             params: self.params.clone(),
+    //             events: status.log().events().to_vec(),
+    //         }
+    //     }
+}
+
 /** State-specific parts of a consumer's view of a saga */
 #[derive(Debug, Clone)]
 pub enum SagaStateView {
@@ -241,6 +278,18 @@ pub enum SagaStateView {
 }
 
 impl SagaStateView {
+    async fn from_run_state(run_state: &SagaRunState) -> SagaStateView {
+        match run_state {
+            SagaRunState::Running { exec, .. } => {
+                SagaStateView::Running { status: exec.status().await }
+            }
+            SagaRunState::Done { status, result } => SagaStateView::Done {
+                status: status.clone(),
+                result: result.clone(),
+            },
+        }
+    }
+
     /** Returns the status summary for this saga */
     pub fn status(&self) -> &SagaExecStatus {
         match self {
@@ -257,6 +306,7 @@ impl SagaStateView {
 /**
  * Message passed from the SecClient to the Sec
  */
+/* XXX TODO would this be cleaner using separate named structs for the enums? */
 enum SecClientMsg {
     /**
      * Creates a new saga
@@ -273,6 +323,8 @@ enum SecClientMsg {
         template_params: Box<dyn TemplateParams>,
         /** name of the template used to create this saga */
         template_name: String,
+        /** serialized saga parameters */
+        serialized_params: JsonValue,
     },
 
     /**
@@ -288,6 +340,8 @@ enum SecClientMsg {
         saga_id: SagaId,
         /** user-type-specific parameters */
         template_params: Box<dyn TemplateParams>,
+        /** serialized saga parameters */
+        serialized_params: JsonValue,
     },
 
     /** List all sagas */
@@ -341,9 +395,9 @@ impl fmt::Debug for SecClientMsg {
  * This trait erases the type parameters on a [`SagaTemplate`], user context,
  * and user parameters so that we can more easily pass it through a channel.
  */
-trait TemplateParams: fmt::Debug {
+trait TemplateParams: Send + fmt::Debug {
     fn into_exec(
-        self,
+        self: Box<Self>,
         log: slog::Logger,
         saga_id: SagaId,
         sec_hdl: SecSagaHdl,
@@ -369,7 +423,7 @@ where
     UserType: SagaType + fmt::Debug,
 {
     fn into_exec(
-        self,
+        self: Box<Self>,
         log: slog::Logger,
         saga_id: SagaId,
         sec_hdl: SecSagaHdl,
@@ -406,7 +460,7 @@ where
     T: Send + Sync + fmt::Debug,
 {
     fn into_exec(
-        self,
+        self: Box<Self>,
         log: slog::Logger,
         saga_id: SagaId,
         sec_hdl: SecSagaHdl,
@@ -436,128 +490,287 @@ struct Sec {
     log: slog::Logger,
     sagas: BTreeMap<SagaId, Saga>,
     sec_store: Arc<dyn SecStore>,
-    saga_futures: FuturesUnordered<BoxFuture<'static, SagaId>>,
+    saga_futures: FuturesUnordered<
+        BoxFuture<'static, (SagaId, SagaExecStatus, SagaResult)>,
+    >,
+    cmd_rx: mpsc::Receiver<SecClientMsg>,
+    shutdown: bool,
 }
-
-pub struct Saga {
-    log: slog::Logger,
-    params: JsonValue,
-    run_state: SagaRunState,
-}
-
-pub enum SagaRunState {
-    Running { exec: Arc<dyn SagaExecManager> },
-    Done { status: SagaExecStatus, result: SagaResult },
-}
-
-// XXX
-// impl SagaView {
-//     pub fn serialized(&self) -> SagaSerialized {
-//         let status = self.state.status();
-//         SagaSerialized {
-//             saga_id: self.id,
-//             params: self.params.clone(),
-//             events: status.log().events().to_vec(),
-//         }
-//     }
-// }
 
 impl Sec {
-    async fn run(self) {
-        // XXX
-        futures::future::pending().await
+    /** Body of the SEC's task */
+    async fn run(mut self) {
+        /*
+         * Until we're asked to shutdown, wait for any sagas to finish or for
+         * messages to be received on the command channel.
+         */
+        info!(&self.log, "SEC running");
+        while !self.shutdown || !self.saga_futures.is_empty() {
+            select! {
+                maybe_result = self.saga_futures.next().fuse() => {
+                    let (saga_id, status, result) = maybe_result.unwrap();
+                    self.saga_finished(saga_id, status, result);
+                },
+                msg_result = self.cmd_rx.recv().fuse() => {
+                    /*
+                     * It shouldn't be possible to receive a message after
+                     * processing a shutdown request.  See the client's
+                     * shutdown() method for details.
+                     */
+                    assert!(!self.shutdown);
+                    let clientmsg = msg_result.expect("error reading command");
+                    /*
+                     * TODO-robustness We probably don't want to allow these
+                     * command functions to be async.  (Or rather: if they
+                     * are, we want to put them into some other
+                     * FuturesUnordered that we can poll on in this loop.)
+                     * In practice, saga_list and saga_get wind up blocking
+                     * on a Mutex that's held while we write saga log
+                     * entries.  It's conceivable this could deadlock (since
+                     * writing the log entries requires that we receive
+                     * messages on a channel, which happens via the the poll
+                     * on saga_futures.next() above).  Worse, it means if
+                     * writes to CockroachDB hang, we won't even be able to
+                     * list the in-memory sagas.  This is also a problem for
+                     * saga_create(), which calls out to the store as well.
+                     * XXX
+                     */
+                    self.cmd_dispatch(clientmsg).await
+                }
+            }
+        }
+    }
+
+    fn saga_finished(
+        &mut self,
+        saga_id: SagaId,
+        status: SagaExecStatus,
+        result: SagaResult,
+    ) {
+        let saga = self.sagas.remove(&saga_id).unwrap();
+        info!(&saga.log, "saga finished");
+        if let SagaRunState::Running { exec, waiter } = saga.run_state {
+            if let Err(error) = waiter.send(()) {
+                warn!(&saga.log, "saga waiter stopped listening");
+            }
+            self.sagas.insert(
+                saga_id,
+                Saga {
+                    id: saga_id,
+                    log: saga.log,
+                    run_state: SagaRunState::Done { status, result },
+                    params: saga.params,
+                },
+            );
+        } else {
+            panic!(
+                "saga future completion for unexpected state: {:?}",
+                saga.run_state
+            );
+        }
+    }
+
+    async fn cmd_dispatch(&mut self, clientmsg: SecClientMsg) {
+        match clientmsg {
+            SecClientMsg::SagaCreate {
+                ack_tx,
+                saga_id,
+                template_params,
+                template_name,
+                serialized_params,
+            } => {
+                ack_tx.send(
+                    self.cmd_saga_create(
+                        saga_id,
+                        template_params,
+                        template_name,
+                        serialized_params,
+                    )
+                    .await,
+                );
+            }
+            SecClientMsg::SagaResume {
+                ack_tx,
+                saga_id,
+                template_params,
+                serialized_params,
+            } => {
+                ack_tx.send(self.cmd_saga_resume(
+                    saga_id,
+                    template_params,
+                    serialized_params,
+                ));
+            }
+            SecClientMsg::SagaList { ack_tx } => {
+                let fut = self.cmd_saga_list();
+                ack_tx.send(fut.await);
+            }
+            SecClientMsg::SagaGet { ack_tx, saga_id } => {
+                let fut = self.cmd_saga_get(saga_id);
+                ack_tx.send(fut.await);
+            }
+            SecClientMsg::Shutdown => self.cmd_shutdown(),
+        }
+    }
+
+    async fn cmd_saga_create(
+        &mut self,
+        saga_id: SagaId,
+        template_params: Box<dyn TemplateParams>,
+        template_name: String,
+        serialized_params: JsonValue,
+    ) -> Result<BoxFuture<'static, ()>, anyhow::Error> {
+        /*
+         * TODO-log would like template name, maybe parameters in the log
+         * Ditto in cmd_saga_resume() XXX
+         */
+        let log = self.log.new(o!("saga_id" => saga_id.to_string()));
+        info!(&log, "saga create");
+
+        /*
+         * Before doing anything else, create a persistent record for this saga.
+         */
+        let saga_create = SagaCreateParams {
+            id: saga_id,
+            template_name,
+            saga_params: serialized_params.clone(),
+        };
+        self.sec_store
+            .saga_create(&saga_create)
+            .await
+            .context("creating saga record")?;
+
+        self.saga_insert(log, saga_id, template_params, serialized_params)
+    }
+
+    fn cmd_saga_resume(
+        &mut self,
+        saga_id: SagaId,
+        template_params: Box<dyn TemplateParams>,
+        serialized_params: JsonValue,
+    ) -> Result<BoxFuture<'static, ()>, anyhow::Error> {
+        let log = self.log.new(o!("saga_id" => saga_id.to_string()));
+        info!(&log, "saga resume");
+        self.saga_insert(log, saga_id, template_params, serialized_params)
+    }
+
+    fn cmd_saga_list<'a>(&'a self) -> impl Future<Output = Vec<SagaView>> + 'a {
+        trace!(&self.log, "saga_list");
+        let vec = self.sagas.values();
+        async {
+            futures::stream::iter(vec).then(SagaView::from_saga).collect().await
+        }
+    }
+
+    fn cmd_saga_get<'a>(
+        &'a self,
+        saga_id: SagaId,
+    ) -> impl Future<Output = Result<SagaView, ()>> + 'a {
+        trace!(&self.log, "saga_get"; "saga_id" => %saga_id);
+        let maybe_saga = self.sagas.get(&saga_id).ok_or(());
+        async move { Ok(SagaView::from_saga(maybe_saga?).await) }
+    }
+
+    fn cmd_shutdown(&mut self) {
+        /*
+         * TODO We probably want to stop executing any sagas that are running at
+         * this point.
+         */
+        info!(&self.log, "initiating shutdown");
+        self.shutdown = true;
+    }
+
+    fn saga_insert(
+        &mut self,
+        log: slog::Logger,
+        saga_id: SagaId,
+        template_params: Box<dyn TemplateParams>,
+        serialized_params: JsonValue,
+    ) -> Result<BoxFuture<'static, ()>, anyhow::Error> {
+        /*
+         * Create a handle for the executor to use to message us back.
+         * The log channel needs minimal buffering because the sender won't do
+         * anything that would generate new log messages while waiting for a log
+         * message to be persisted.
+         */
+        let (log_tx, log_rx) = mpsc::channel(1);
+        // XXX Is the initial value really Running?
+        let (update_tx, update_rx) = watch::channel(SagaCachedState::Running);
+        let sec_hdl =
+            SecSagaHdl { log_channel: log_tx, update_channel: update_tx };
+
+        /* Prepare a channel used to wait for the saga to finish. */
+        let (done_tx, done_rx) = oneshot::channel();
+
+        /* Create the executor to run this saga. */
+        let exec =
+            template_params.into_exec(log.new(o!()), saga_id, sec_hdl)?;
+        let run_state = Saga {
+            id: saga_id,
+            log,
+            params: serialized_params,
+            run_state: SagaRunState::Running {
+                exec: Arc::clone(&exec),
+                waiter: done_tx,
+            },
+        };
+        assert!(self.sagas.insert(saga_id, run_state).is_none());
+        let saga_future = Sec::run_saga(
+            saga_id,
+            Arc::clone(&self.sec_store),
+            exec,
+            log_rx,
+            update_rx,
+        );
+        self.saga_futures.push(saga_future.boxed());
+
+        /*
+         * Return a Future that the consumer can use to wait for the saga to
+         * finish.
+         */
+        Ok(async move {
+            done_rx.await;
+        }
+        .boxed())
+    }
+
+    async fn run_saga(
+        saga_id: SagaId,
+        sec_store: Arc<dyn SecStore>,
+        exec: Arc<dyn SagaExecManager>,
+        mut log_rx: mpsc::Receiver<SecSagaHdlMsgLog>,
+        mut update_rx: watch::Receiver<SagaCachedState>,
+    ) -> (SagaId, SagaExecStatus, SagaResult) {
+        let mut run_fut = exec.run().fuse();
+
+        loop {
+            select! {
+                _ = run_fut => break,
+                maybe_logmsg = log_rx.recv().fuse() => {
+                    let logmsg = maybe_logmsg.expect("bad SecHdl message");
+                    sec_store.record_event(saga_id, &logmsg.event).await;
+                    /*
+                     * `send` can only fail if the other side of the channel has
+                     * closed.  That's illegal because the other side should be
+                     * waiting for our acknowledgement.
+                     */
+                    assert!(logmsg.ack_tx.send(()).is_ok());
+                },
+                _ = update_rx.changed().fuse() => {
+                    /*
+                     * We may get an error when the channel is closing due to
+                     * execution completion.  That's fine -- just ignore it.
+                     */
+                    let update = update_rx.borrow().clone();
+                    /* TODO-robustness this should be retried as needed? */
+                    sec_store.saga_update(saga_id, &update).await;
+                }
+            }
+        }
+
+        (saga_id, exec.status().await, exec.result())
     }
 }
-//     // XXX Should this return a Future that waits on this saga?
-//     pub async fn saga_create<UserType>(
-//         &mut self,
-//         uctx: Arc<UserType::ExecContextType>,
-//         saga_id: SagaId,
-//         template: Arc<SagaTemplate<UserType>>,
-//         template_name: String, // XXX
-//         params: UserType::SagaParamsType,
-//     ) -> Result<(), anyhow::Error>
-//     where
-//         UserType: SagaType,
-//     {
-//         /* TODO-log would like template name, maybe parameters in the log */
-//         let log = self.log.new(o!("id" => saga_id.to_string()));
-//         info!(&log, "saga create");
-//
-//         /*
-//          * Before doing anything else, create a persistent record for this saga.
-//          */
-//         let serialized_params = serde_json::to_value(&params)
-//             .map_err(ActionError::new_serialize)
-//             .context("serializing initial saga params")?;
-//         let saga_create = SagaCreateParams {
-//             id: saga_id,
-//             template_name,
-//             saga_params: serialized_params.clone(),
-//         };
-//         self.sec_store
-//             .saga_create(&saga_create)
-//             .await
-//             .context("creating saga record")?;
-//
-//         /*
-//          * Now create an executor to run this saga.
-//          */
-//         let (internal, log_rx, update_rx) = self.saga_handle(saga_id);
-//         let exec = Arc::new(SagaExecutor::new(
-//             log.new(o!()),
-//             saga_id,
-//             template,
-//             uctx,
-//             params,
-//             internal,
-//         ));
-//         let run_state = Saga {
-//             log,
-//             params: serialized_params,
-//             run_state: SagaRunState::Running { exec: Arc::clone(exec) },
-//         };
-//         assert!(self.sagas.insert(saga_id, run_state).is_none());
-//         let saga_future = self.run_saga(saga_id, exec, log_rx, update_rx);
-//         self.saga_futures.push(saga_future);
-//         Ok(())
-//     }
-//
-//     pub fn saga_resume<T>(
-//         &mut self,
-//         uctx: Arc<T>,
-//         saga_id: SagaId,
-//         template: Arc<dyn SagaTemplateGeneric<T>>,
-//         params: JsonValue,
-//         saga_log: SagaLog,
-//     ) -> Result<(), anyhow::Error>
-//     where
-//         T: Send + Sync,
-//     {
-//         let log = self.log.new(o!("id" => saga_id.to_string()));
-//         /* TODO-log would like template name, maybe parameters in the log */
-//         info!(&self.log, "saga resume"; "id" => %saga_id);
-//
-//         let (internal, log_rx, update_rx) = self.saga_handle(saga_id);
-//         let exec = Arc::new(template.recover(
-//             log.new(o!()),
-//             saga_id,
-//             uctx,
-//             params.clone(),
-//             internal,
-//             saga_log,
-//         )?);
-//         let run_state = Saga {
-//             log,
-//             params,
-//             run_state: SagaRunState::Running { exec: Arc::clone(&exec) },
-//         };
-//         assert!(self.sagas.insert(saga_id, run_state).is_none());
-//         let saga_future = self.run_saga(saga_id, exec, log_rx, update_rx);
-//         self.saga_futures.push(saga_future);
-//         Ok(())
-//     }
-//
 //     pub async fn saga_inject_error(
 //         &mut self,
 //         saga_id: SagaId,
@@ -575,81 +788,31 @@ impl Sec {
 //             SagaRunState::Done { .. } => Err(anyhow!("saga is already done")),
 //         }
 //     }
-//
-//     pub async fn saga_get_state(
-//         &self,
-//         saga_id: SagaId,
-//     ) -> Result<SagaView, anyhow::Error> {
-//         let saga = &self
-//             .sagas
-//             .get(&saga_id)
-//             .ok_or_else(|| anyhow!("no saga with id \"{}\"", saga_id))?;
-//         let state_view = match &saga.run_state {
-//             SagaRunState::Running { exec } => {
-//                 SagaStateView::Running { status: exec.status().await }
-//             }
-//             SagaRunState::Done { status, result } => SagaStateView::Done {
-//                 status: status.clone(),
-//                 result: result.clone(),
-//             },
-//         };
-//         Ok(SagaView {
-//             id: saga_id,
-//             state: state_view,
-//             params: saga.params.clone(),
-//         })
-//     }
-//
-//     fn saga_handle(
-//         &self,
-//         saga_id: SagaId,
-//     ) -> (SecSagaHdl, mpsc::Receiver<SecMsgLog>, watch::Receiver<SagaCachedState>)
-//     {
-//         let (log_tx, log_rx) = mpsc::channel(1);
-//         // XXX Is the initial value really Running?
-//         let (update_tx, update_rx) = watch::channel(SagaCachedState::Running);
-//         // XXX Need to actually listen on these channels at some point!
-//         let si = SecSagaHdl { log_channel: log_tx, update_channel: update_tx };
-//         (si, log_rx, update_rx)
-//     }
-//
-//     async fn run_saga(
-//         &self,
-//         saga_id: SagaId,
-//         exec: Arc<dyn SagaExecManager>,
-//         log_rx: mpsc::Receiver<SecMsgLog>,
-//         update_rx: watch::Receiver<SagaCachedState>,
-//     ) -> SagaId {
-//         let run_fut = exec.run().fuse();
-//         let sec_store = Arc::clone(&self.sec_store);
-//
-//         loop {
-//             select! {
-//                 _ = run_fut => break,
-//                 logmsg = log_rx.recv() => {
-//                     sec_store.record_event(saga_id, &logmsg.event).await;
-//                     /*
-//                      * `send` can only fail if the other side of the channel has
-//                      * closed.  That's illegal because the other side should be
-//                      * waiting for our acknowledgement.
-//                      */
-//                     assert!(logmsg.ack_tx.send(()).is_ok());
-//                 },
-//                 maybe_state_update = update_rx.changed() => {
-//                     /*
-//                      * We may get an error when the channel is closing due to
-//                      * execution completion.  That's fine -- just ignore it.
-//                      */
-//                     if let Ok(update) = maybe_state_update {
-//                         /* TODO-robustness this should be retried as needed? */
-//                         sec_store.saga_update(saga_id, update).await;
-//                     }
-//                 }
-//             }
-//         }
-//     }
-// }
-//
+
+struct Saga {
+    id: SagaId,
+    log: slog::Logger,
+    params: JsonValue,
+    run_state: SagaRunState,
+}
+
+#[derive(Debug)]
+pub enum SagaRunState {
+    /** Saga is currently running */
+    Running {
+        /** Handle to executor (for status, etc.) */
+        exec: Arc<dyn SagaExecManager>,
+        /** Notify when the saga is done */
+        waiter: oneshot::Sender<()>,
+    },
+    /** Saga has finished */
+    Done {
+        /** Final execution status */
+        status: SagaExecStatus,
+        /** Overall saga result */
+        result: SagaResult,
+    },
+}
 
 /**
  * Handle used by [`SagaExecutor`] for sending messages back to the SEC
