@@ -137,12 +137,14 @@ impl SecClient {
         uctx: Arc<T>,
         template: Arc<dyn SagaTemplateGeneric<T>>,
         params: JsonValue,
-        saga_log: SagaLog,
+        log_events: Vec<SagaNodeEvent>,
     ) -> Result<BoxFuture<'static, ()>, anyhow::Error>
     where
         T: Send + Sync + fmt::Debug + 'static,
     {
         let (ack_tx, ack_rx) = oneshot::channel();
+        let saga_log = SagaLog::new_recover(saga_id, log_events)
+            .context("recovering log")?;
         let template_params = Box::new(TemplateParamsForRecover {
             template,
             params: params.clone(),
@@ -264,15 +266,13 @@ impl SagaView {
         }
     }
 
-    // XXX
-    //     pub fn serialized(&self) -> SagaSerialized {
-    //         let status = self.state.status();
-    //         SagaSerialized {
-    //             saga_id: self.id,
-    //             params: self.params.clone(),
-    //             events: status.log().events().to_vec(),
-    //         }
-    //     }
+    pub fn serialized(&self) -> SagaSerialized {
+        SagaSerialized {
+            saga_id: self.id,
+            params: self.params.clone(),
+            events: self.state.status().log().events().to_vec(),
+        }
+    }
 }
 
 /** State-specific parts of a consumer's view of a saga */
@@ -920,37 +920,14 @@ struct SecSagaHdlMsgLog {
     ack_tx: oneshot::Sender<()>,
 }
 
-// /*
-//  * Very simple file-based serialization and deserialization, intended only for
-//  * testing and debugging
-//  */
-// #[derive(Deserialize, Serialize)]
-// pub struct SagaSerialized {
-//     saga_id: SagaId,
-//     params: JsonValue,
-//     events: Vec<SagaNodeEvent>,
-// }
-//
-// // XXX Should we combine these by having SagaLog impl Serialize/Deserialize?
-// // XXX Maybe this is what saga_resume() should take, too?
-// #[derive(Debug, Clone)]
-// pub struct SagaRecovered {
-//     pub saga_id: SagaId,
-//     pub params: JsonValue,
-//     pub log: SagaLog,
-// }
-//
-// impl SagaRecovered {
-//     /* XXX weirdly asymmetric with the way we write this out. */
-//     pub fn read<R: std::io::Read>(
-//         reader: R,
-//     ) -> Result<SagaRecovered, anyhow::Error> {
-//         let s: SagaSerialized = serde_json::from_reader(reader)
-//             .with_context(|| "deserializing saga")?;
-//         Ok(SagaRecovered {
-//             saga_id: s.saga_id,
-//             params: s.params,
-//             log: SagaLog::new_recover(s.saga_id, s.events)?,
-//         })
-//     }
-// }
+/*
+ * Very simple file-based serialization and deserialization, intended only for
+ * testing and debugging
+ */
+
+#[derive(Deserialize, Serialize)]
+pub struct SagaSerialized {
+    saga_id: SagaId,
+    params: JsonValue,
+    events: Vec<SagaNodeEvent>,
+}
