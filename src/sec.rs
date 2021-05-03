@@ -19,7 +19,6 @@ use crate::SagaTemplateGeneric;
 use crate::SagaType;
 use anyhow::anyhow;
 use anyhow::Context;
-use async_trait::async_trait;
 use futures::future::BoxFuture;
 use futures::select;
 use futures::stream::FuturesUnordered;
@@ -549,9 +548,9 @@ impl Sec {
     ) {
         let saga = self.sagas.remove(&saga_id).unwrap();
         info!(&saga.log, "saga finished");
-        if let SagaRunState::Running { exec, waiter } = saga.run_state {
+        if let SagaRunState::Running { waiter, .. } = saga.run_state {
             if let Err(error) = waiter.send(()) {
-                warn!(&saga.log, "saga waiter stopped listening");
+                warn!(&saga.log, "saga waiter stopped listening: {:#}", error);
             }
             self.sagas.insert(
                 saga_id,
@@ -579,15 +578,19 @@ impl Sec {
                 template_name,
                 serialized_params,
             } => {
-                ack_tx.send(
-                    self.cmd_saga_create(
-                        saga_id,
-                        template_params,
-                        template_name,
-                        serialized_params,
+                ack_tx
+                    .send(
+                        self.cmd_saga_create(
+                            saga_id,
+                            template_params,
+                            template_name,
+                            serialized_params,
+                        )
+                        .await,
                     )
-                    .await,
-                );
+                    .unwrap_or_else(|_| {
+                        panic!("failed to send response to client")
+                    });
             }
             SecClientMsg::SagaResume {
                 ack_tx,
@@ -595,19 +598,27 @@ impl Sec {
                 template_params,
                 serialized_params,
             } => {
-                ack_tx.send(self.cmd_saga_resume(
-                    saga_id,
-                    template_params,
-                    serialized_params,
-                ));
+                ack_tx
+                    .send(self.cmd_saga_resume(
+                        saga_id,
+                        template_params,
+                        serialized_params,
+                    ))
+                    .unwrap_or_else(|_| {
+                        panic!("failed to send response to client")
+                    });
             }
             SecClientMsg::SagaList { ack_tx } => {
                 let fut = self.cmd_saga_list();
-                ack_tx.send(fut.await);
+                ack_tx.send(fut.await).unwrap_or_else(|_| {
+                    panic!("failed to send response to client")
+                });
             }
             SecClientMsg::SagaGet { ack_tx, saga_id } => {
                 let fut = self.cmd_saga_get(saga_id);
-                ack_tx.send(fut.await);
+                ack_tx.send(fut.await).unwrap_or_else(|_| {
+                    panic!("failed to send response to client")
+                });
             }
             SecClientMsg::Shutdown => self.cmd_shutdown(),
         }
@@ -726,10 +737,13 @@ impl Sec {
 
         /*
          * Return a Future that the consumer can use to wait for the saga to
-         * finish.
+         * finish.  It should not be possible for the receive to fail because
+         * the other side will not be closed while the saga is still running.
          */
         Ok(async move {
-            done_rx.await;
+            done_rx
+                .await
+                .unwrap_or_else(|_| panic!("failed to wait for saga to finish"))
         }
         .boxed())
     }
