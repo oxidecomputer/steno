@@ -30,6 +30,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -539,39 +540,58 @@ impl Sec {
          */
         info!(&self.log, "SEC running");
         while !self.shutdown || !self.saga_futures.is_empty() {
-            select! {
-                maybe_result = self.saga_futures.next().fuse() => {
-                    let (saga_id, status, result) = maybe_result.unwrap();
-                    self.saga_finished(saga_id, status, result);
-                },
-                msg_result = self.cmd_rx.recv().fuse() => {
-                    /*
-                     * It shouldn't be possible to receive a message after
-                     * processing a shutdown request.  See the client's
-                     * shutdown() method for details.
-                     */
-                    assert!(!self.shutdown);
-                    let clientmsg = msg_result.expect("error reading command");
-                    /*
-                     * TODO-robustness We probably don't want to allow these
-                     * command functions to be async.  (Or rather: if they
-                     * are, we want to put them into some other
-                     * FuturesUnordered that we can poll on in this loop.)
-                     * In practice, saga_list and saga_get wind up blocking
-                     * on a Mutex that's held while we write saga log
-                     * entries.  It's conceivable this could deadlock (since
-                     * writing the log entries requires that we receive
-                     * messages on a channel, which happens via the the poll
-                     * on saga_futures.next() above).  Worse, it means if
-                     * writes to CockroachDB hang, we won't even be able to
-                     * list the in-memory sagas.  This is also a problem for
-                     * saga_create(), which calls out to the store as well.
-                     * XXX
-                     */
-                    self.cmd_dispatch(clientmsg).await
+            /*
+             * One might expect that if we attempt to fetch the next completed
+             * Future from an empty FuturesUnordered, we might wait until a
+             * Future is added to the set and then completes.  Instead, we get
+             * back None, which has the side effect of terminating the Stream.
+             * As a result, we want to avoid waiting on an empty
+             * FuturesUnordered.  That said, if the set is empty, we can only
+             * become unblocked by a command on the cmd_rx channel.
+             */
+            if self.saga_futures.is_empty() {
+                let msg_result = self.cmd_rx.recv().await;
+                self.got_message(msg_result).await;
+            } else {
+                select! {
+                    maybe_result = self.saga_futures.next().fuse() => {
+                        let (saga_id, status, result) = maybe_result.unwrap();
+                        self.saga_finished(saga_id, status, result);
+                    },
+                    msg_result = self.cmd_rx.recv().fuse() => {
+                        let msg_result = self.cmd_rx.recv().await;
+                        self.got_message(msg_result).await;
+                    }
                 }
             }
         }
+    }
+
+    async fn got_message(&mut self, msg_result: Option<SecClientMsg>) {
+        /*
+         * It shouldn't be possible to receive a message after
+         * processing a shutdown request.  See the client's
+         * shutdown() method for details.
+         */
+        assert!(!self.shutdown);
+        let clientmsg = msg_result.expect("error reading command");
+        /*
+         * TODO-robustness We probably don't want to allow these
+         * command functions to be async.  (Or rather: if they
+         * are, we want to put them into some other
+         * FuturesUnordered that we can poll on in this loop.)
+         * In practice, saga_list and saga_get wind up blocking
+         * on a Mutex that's held while we write saga log
+         * entries.  It's conceivable this could deadlock (since
+         * writing the log entries requires that we receive
+         * messages on a channel, which happens via the the poll
+         * on saga_futures.next() above).  Worse, it means if
+         * writes to CockroachDB hang, we won't even be able to
+         * list the in-memory sagas.  This is also a problem for
+         * saga_create(), which calls out to the store as well.
+         * XXX
+         */
+        self.cmd_dispatch(clientmsg).await
     }
 
     fn saga_finished(
@@ -927,7 +947,14 @@ struct SecSagaHdlMsgLog {
 
 #[derive(Deserialize, Serialize)]
 pub struct SagaSerialized {
-    saga_id: SagaId,
-    params: JsonValue,
-    events: Vec<SagaNodeEvent>,
+    pub saga_id: SagaId,
+    pub params: JsonValue,
+    pub events: Vec<SagaNodeEvent>,
+}
+
+impl TryFrom<SagaSerialized> for SagaLog {
+    type Error = anyhow::Error;
+    fn try_from(s: SagaSerialized) -> Result<SagaLog, anyhow::Error> {
+        SagaLog::new_recover(s.saga_id, s.events)
+    }
 }

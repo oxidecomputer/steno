@@ -2,10 +2,11 @@
  * Command-line tool for demo'ing saga interfaces
  */
 
+use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use slog::Drain;
-use slog::Logger;
+use std::convert::TryFrom;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -15,6 +16,8 @@ use steno::make_example_provision_saga;
 use steno::ExampleContext;
 use steno::ExampleParams;
 use steno::SagaId;
+use steno::SagaLog;
+use steno::SagaSerialized;
 use steno::SagaStateView;
 use steno::SagaTemplateGeneric;
 use structopt::StructOpt;
@@ -72,11 +75,8 @@ fn make_log() -> slog::Logger {
     slog::Logger::root(drain, slog::o!())
 }
 
-fn make_sec(log: &slog::Logger) -> steno::Sec {
-    steno::Sec::new(
-        log.new(slog::o!()),
-        Arc::new(steno::InMemorySecStore::new()),
-    )
+fn make_sec(log: &slog::Logger) -> steno::SecClient {
+    steno::sec(log.new(slog::o!()), Arc::new(steno::InMemorySecStore::new()))
 }
 
 fn reader_for_log_input(
@@ -89,6 +89,12 @@ fn reader_for_log_input(
             format!("open recovery log \"{}\"", path.display())
         })?))
     }
+}
+
+fn read_saga_state<R: io::Read>(
+    reader: R,
+) -> Result<SagaSerialized, anyhow::Error> {
+    serde_json::from_reader(reader).context("reading saga state")
 }
 
 /*
@@ -107,7 +113,7 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
 
 async fn cmd_info() -> Result<(), anyhow::Error> {
     let log = make_log();
-    let mut sec = make_sec(&log);
+    let sec = make_sec(&log);
 
     let saga_template = make_example_provision_saga();
     println!("*** saga template definition ***");
@@ -117,8 +123,8 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     println!("*** initial state ***");
     let saga_id = make_saga_id();
     sec.saga_create(
-        Arc::new(ExampleContext::default()),
         saga_id,
+        Arc::new(ExampleContext::default()),
         saga_template,
         "demo-provision".to_string(),
         ExampleParams { instance_name: "fake-o instance".to_string() },
@@ -126,7 +132,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     .await
     .unwrap();
 
-    let saga = sec.saga_get_state(saga_id).await.unwrap();
+    let saga = sec.saga_get(saga_id).await.unwrap();
     let status = saga.state.status();
     println!("{}", status);
     Ok(())
@@ -145,9 +151,9 @@ struct PrintLogArgs {
 async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
     let input_log_path = &args.input_log_path;
     let file = reader_for_log_input(&input_log_path)?;
-    let saga_recovered =
-        steno::SagaRecovered::read(file).context("reading log")?;
-    println!("{:?}", saga_recovered.log);
+    let saga_serialized = read_saga_state(file)?;
+    let saga_log = SagaLog::try_from(saga_serialized)?;
+    println!("{:?}", saga_log);
     Ok(())
 }
 
@@ -176,7 +182,7 @@ struct RunArgs {
 
 async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let log = make_log();
-    let mut sec = make_sec(&log);
+    let sec = make_sec(&log);
     let saga_template = make_example_provision_saga();
     let template_name = "example-template".to_string();
     let uctx = Arc::new(ExampleContext::default());
@@ -186,21 +192,21 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         }
 
         let file = reader_for_log_input(input_log_path)?;
-        let saga_recovered =
-            steno::SagaRecovered::read(file).context("reading saga state")?;
+        let saga_recovered = read_saga_state(file)?;
         let saga_id = saga_recovered.saga_id;
         sec.saga_resume(
-            uctx,
             saga_id,
+            uctx,
             saga_template.clone() as Arc<dyn SagaTemplateGeneric<_>>,
             saga_recovered.params,
-            saga_recovered.log,
+            saga_recovered.events,
         )
-        .context("resuming saga");
+        .await
+        .context("resuming saga")?;
         let saga = sec
-            .saga_get_state(saga_id)
+            .saga_get(saga_id)
             .await
-            .context("fetching newly-created saga")?;
+            .map_err(|_: ()| anyhow!("failed to fetch newly-created saga"))?;
         if !args.quiet {
             print!("recovered state\n");
             println!("{}", saga.state.status());
@@ -209,8 +215,8 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     } else {
         let saga_id = make_saga_id();
         sec.saga_create(
-            uctx,
             saga_id,
+            uctx,
             saga_template.clone(),
             template_name,
             ExampleParams { instance_name: "fake-o instance".to_string() },
@@ -226,7 +232,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             )?;
         sec.saga_inject_error(saga_id, node_id)
             .await
-            .context("injecting error");
+            .context("injecting error")?;
         if !args.quiet {
             println!("will inject error at node \"{}\"", node_name);
         }
@@ -235,14 +241,11 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     if !args.quiet {
         println!("*** running saga ***");
     }
-    // XXX what's the equivalent here?  await on the sec?  Do we need to
-    // "close" it first or something?
-    // exec.run().await;
 
     let saga = sec
-        .saga_get_state(saga_id)
+        .saga_get(saga_id)
         .await
-        .context("fetching saga after running it")?;
+        .map_err(|_: ()| anyhow!("failed to fetch saga after running it"))?;
     if !args.quiet {
         println!("*** finished saga ***");
         println!("\n*** final state ***");
