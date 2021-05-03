@@ -178,6 +178,22 @@ impl SecClient {
     }
 
     /**
+     * Inject an error into one saga
+     */
+    pub async fn saga_inject_error(
+        &self,
+        saga_id: SagaId,
+        node_id: NodeIndex,
+    ) -> Result<(), anyhow::Error> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sec_cmd(
+            ack_rx,
+            SecClientMsg::SagaInjectError { ack_tx, saga_id, node_id },
+        )
+        .await
+    }
+
+    /**
      * Shut down the SEC and wait for it to do so.
      */
     pub async fn shutdown(mut self) {
@@ -357,6 +373,19 @@ enum SecClientMsg {
         saga_id: SagaId,
     },
 
+    /** Inject an error at a specific action in the saga */
+    SagaInjectError {
+        /** response channel */
+        ack_tx: oneshot::Sender<Result<(), anyhow::Error>>,
+        /** id of saga to fetch information about */
+        saga_id: SagaId,
+        /**
+         * id of the node to inject the error (see
+         * [`SagaTemplateMetadata::node_for_name`])
+         */
+        node_id: NodeIndex,
+    },
+
     /** Shut down the SEC */
     Shutdown,
 }
@@ -385,6 +414,11 @@ impl fmt::Debug for SecClientMsg {
             SecClientMsg::SagaGet { saga_id, .. } => {
                 f.debug_struct("SagaGet").field("saga_id", saga_id).finish()
             }
+            SecClientMsg::SagaInjectError { ack_tx, saga_id, node_id } => f
+                .debug_struct("SagaInjectError")
+                .field("saga_id", saga_id)
+                .field("node_Id", node_id)
+                .finish(),
             SecClientMsg::Shutdown { .. } => f.write_str("Shutdown"),
         }
     }
@@ -549,8 +583,8 @@ impl Sec {
         let saga = self.sagas.remove(&saga_id).unwrap();
         info!(&saga.log, "saga finished");
         if let SagaRunState::Running { waiter, .. } = saga.run_state {
-            if let Err(error) = waiter.send(()) {
-                warn!(&saga.log, "saga waiter stopped listening: {:#}", error);
+            if let Err(_) = waiter.send(()) {
+                warn!(&saga.log, "saga waiter stopped listening");
             }
             self.sagas.insert(
                 saga_id,
@@ -620,6 +654,12 @@ impl Sec {
                     panic!("failed to send response to client")
                 });
             }
+            SecClientMsg::SagaInjectError { ack_tx, saga_id, node_id } => {
+                let fut = self.cmd_saga_inject(saga_id, node_id);
+                ack_tx.send(fut.await).unwrap_or_else(|_| {
+                    panic!("failed to send response to client");
+                });
+            }
             SecClientMsg::Shutdown => self.cmd_shutdown(),
         }
     }
@@ -680,6 +720,32 @@ impl Sec {
         trace!(&self.log, "saga_get"; "saga_id" => %saga_id);
         let maybe_saga = self.sagas.get(&saga_id).ok_or(());
         async move { Ok(SagaView::from_saga(maybe_saga?).await) }
+    }
+
+    fn cmd_saga_inject<'a>(
+        &'a self,
+        saga_id: SagaId,
+        node_id: NodeIndex,
+    ) -> impl Future<Output = Result<(), anyhow::Error>> + 'a {
+        trace!(
+            &self.log,
+            "saga_inject_error";
+            "saga_id" => %saga_id,
+            "node_id" => ?node_id,
+        );
+        let maybe_saga = self
+            .sagas
+            .get(&saga_id)
+            .ok_or_else(|| anyhow!("no such saga: {}", saga_id));
+        async move {
+            let saga = maybe_saga?;
+            if let SagaRunState::Running { exec, .. } = &saga.run_state {
+                exec.inject_error(node_id).await;
+                Ok(())
+            } else {
+                Err(anyhow!("saga is not running: {}", saga_id))
+            }
+        }
     }
 
     fn cmd_shutdown(&mut self) {
@@ -785,23 +851,6 @@ impl Sec {
         (saga_id, exec.status().await, exec.result())
     }
 }
-//     pub async fn saga_inject_error(
-//         &mut self,
-//         saga_id: SagaId,
-//         node_id: NodeIndex,
-//     ) -> Result<(), anyhow::Error> {
-//         let saga = self
-//             .sagas
-//             .get(&saga_id)
-//             .ok_or_else(|| anyhow!("no saga with id \"{}\"", saga_id))?;
-//         match &saga.run_state {
-//             SagaRunState::Running { exec } => {
-//                 exec.inject_error(node_id).await;
-//                 Ok(())
-//             }
-//             SagaRunState::Done { .. } => Err(anyhow!("saga is already done")),
-//         }
-//     }
 
 struct Saga {
     id: SagaId,
