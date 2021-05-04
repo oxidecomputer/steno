@@ -63,11 +63,8 @@ const SEC_EXEC_MAXQ_MESSAGES: usize = 2;
  * Creates a new Saga Execution Coordinator
  */
 pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
-    // TODO-cleanup The log and update channels can probably be combined for
-    // clarity.  It doesn't make much functional difference.
     let (cmd_tx, cmd_rx) = mpsc::channel(SEC_CLIENT_MAXQ_MESSAGES);
-    let (log_tx, log_rx) = mpsc::channel(SEC_EXEC_MAXQ_MESSAGES);
-    let (update_tx, update_rx) = mpsc::channel(SEC_EXEC_MAXQ_MESSAGES);
+    let (exec_tx, exec_rx) = mpsc::channel(SEC_EXEC_MAXQ_MESSAGES);
 
     /*
      * We spawn a new task rather than return a `Future` for the caller to
@@ -82,10 +79,8 @@ pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
             futures: FuturesUnordered::new(),
             cmd_rx,
             shutdown: false,
-            log_tx,
-            log_rx,
-            update_tx,
-            update_rx,
+            exec_tx,
+            exec_rx,
         };
 
         sec.run().await
@@ -624,10 +619,8 @@ struct Sec {
     sec_store: Arc<dyn SecStore>,
     futures: FuturesUnordered<BoxFuture<'static, Option<SecStep>>>,
     cmd_rx: mpsc::Receiver<SecClientMsg>,
-    log_tx: mpsc::Sender<SagaLogEventData>,
-    log_rx: mpsc::Receiver<SagaLogEventData>,
-    update_tx: mpsc::Sender<SagaUpdateCacheData>,
-    update_rx: mpsc::Receiver<SagaUpdateCacheData>,
+    exec_tx: mpsc::Sender<SecExecMsg>,
+    exec_rx: mpsc::Receiver<SecExecMsg>,
     shutdown: bool,
 }
 
@@ -660,49 +653,51 @@ impl Sec {
         while !self.shutdown || !self.futures.is_empty() {
             tokio::select! {
                 /*
-                 * One might expect that if we attempt to fetch the next
-                 * completed Future from an empty FuturesUnordered, the
+                 * Carry out any of the asynchronous work that the SEC does and
+                 * wait for any of it to finish.
+                 *
+                 * The guard against `self.futures.is_empty()` might look
+                 * surprising.  One might expect that if we attempt to fetch the
+                 * next completed Future from an empty FuturesUnordered, the
                  * implementation would wait until a Future is added to the set
-                 * and then completes before returning.  Instead, we immediately
-                 * get back None, which has the side effect of terminating the
-                 * Stream.  As a result, we want to avoid waiting on an empty
-                 * FuturesUnordered.
+                 * and then completes before returning.  Instead, the
+                 * implementaiton immediately returns `None`, with the side
+                 * effect of terminating the Stream altogether.  As a result, we
+                 * want to avoid waiting on an empty FuturesUnordered.
                  */
-                maybe_result = self.futures.next(),
+                maybe_work_done = self.futures.next(),
                     if !self.futures.is_empty() => {
                     /* This stream will never end. */
-                    let future_result = maybe_result.unwrap();
-                    if let Some(next_step) = future_result {
+                    let work_result = maybe_work_done.unwrap();
+                    if let Some(next_step) = work_result {
                         self.dispatch_work(next_step);
                     }
                 },
 
-                cmd_result = self.cmd_rx.recv() => {
-                    self.dispatch_client_message(cmd_result);
+                /* Handle messages from the client (Steno consumer) */
+                maybe_client_message = self.cmd_rx.recv() => {
+                    /*
+                     * If we're already shutdown, the only wakeup here must
+                     * result from the channel closing because the client does
+                     * not allow messages to be sent after shutdown.  Relatedly,
+                     * if the channel is closing, we must have already received
+                     * a shutdown message because the client's Drop handler
+                     * ensures that one will be sent.
+                     */
+                    assert_eq!(self.shutdown, maybe_client_message.is_none());
+                    if let Some(client_message) = maybe_client_message {
+                        self.dispatch_client_message(client_message);
+                    }
                 },
 
-                log_result = self.log_rx.recv() => {
+                /* Handle messages from running SagaExecutors */
+                maybe_exec_message = self.exec_rx.recv() => {
                     /* Ignore errors from a closing channel. */
-                    if let Some(log_data) = log_result {
-                        self.dispatch_exec_log(log_data);
+                    if let Some(exec_message) = maybe_exec_message {
+                        self.dispatch_exec_message(exec_message);
                     }
                 }
-
-                update_result = self.update_rx.recv() => {
-                    /* Ignore errors from a closing channel. */
-                    if let Some(update_data) = update_result {
-                        /* TODO-robustness this should be retried as needed? */
-                        self.dispatch_exec_cache_update(update_data);
-                    }
-                },
             }
-        }
-    }
-
-    fn dispatch_work(&mut self, step: SecStep) {
-        match step {
-            SecStep::SagaInsert(insert_data) => self.saga_insert(insert_data),
-            SecStep::SagaDone(done_data) => self.saga_finished(done_data),
         }
     }
 
@@ -716,14 +711,24 @@ impl Sec {
         }
     }
 
+    /*
+     * Dispatch functions for miscellaneous async work
+     */
+
+    fn dispatch_work(&mut self, step: SecStep) {
+        match step {
+            SecStep::SagaInsert(insert_data) => self.saga_insert(insert_data),
+            SecStep::SagaDone(done_data) => self.saga_finished(done_data),
+        }
+    }
+
     fn saga_insert(&mut self, rec: SagaInsertData) {
         let saga_id = rec.saga_id;
         let serialized_params = rec.serialized_params;
         let ack_tx = rec.ack_tx;
         let log = rec.log;
-        let log_channel = self.log_tx.clone();
-        let update_channel = self.update_tx.clone();
-        let sec_hdl = SecSagaHdl { saga_id, log_channel, update_channel };
+        let exec_tx = self.exec_tx.clone();
+        let sec_hdl = SecSagaHdl { saga_id, exec_tx };
 
         /* Prepare a channel used to wait for the saga to finish. */
         let (done_tx, done_rx) = oneshot::channel();
@@ -801,67 +806,11 @@ impl Sec {
     }
 
     /*
-     * Dispatch functions for SagaExecutor messages
-     */
-
-    fn dispatch_exec_log(&mut self, log_data: SagaLogEventData) {
-        let log = self.log.new(o!());
-        debug!(&log, "saga log event";
-            "saga_id" => log_data.saga_id.to_string(),
-            "new_state" => ?log_data.event
-        );
-        let store = Arc::clone(&self.sec_store);
-        let future = async move {
-            store.record_event(log_data.saga_id, &log_data.event).await;
-            Sec::client_respond(&log, log_data.ack_tx, ());
-            None
-        }
-        .boxed();
-        self.futures.push(future);
-    }
-
-    fn dispatch_exec_cache_update(&mut self, update_data: SagaUpdateCacheData) {
-        info!(&self.log, "update for saga cached state";
-            "saga_id" => update_data.saga_id.to_string(),
-            "new_state" => ?update_data.updated_state
-        );
-        let store = Arc::clone(&self.sec_store);
-        self.futures.push(
-            async move {
-                store
-                    .saga_update(
-                        update_data.saga_id,
-                        &update_data.updated_state,
-                    )
-                    .await;
-                None
-            }
-            .boxed(),
-        );
-    }
-
-    /*
      * Dispatch functions for consumer client messages
      */
 
-    fn dispatch_client_message(&mut self, msg_result: Option<SecClientMsg>) {
-        if msg_result.is_none() {
-            /*
-             * The client always sends a shutdown message as part of drop, so it
-             * should not be possible for this channel to close before receiving
-             * that message.
-             */
-            assert!(self.shutdown);
-            return;
-        }
-
-        /*
-         * It shouldn't be possible to receive any messages after shutdown
-         * because shutdown is only sent by the client when the consumer has
-         * given up its reference to the client.
-         */
-        assert!(!self.shutdown);
-        match msg_result.unwrap() {
+    fn dispatch_client_message(&mut self, message: SecClientMsg) {
+        match message {
             SecClientMsg::SagaCreate {
                 ack_tx,
                 saga_id,
@@ -1071,6 +1020,52 @@ impl Sec {
         info!(&self.log, "initiating shutdown");
         self.shutdown = true;
     }
+
+    /*
+     * Dispatch functions for SagaExecutor messages
+     */
+
+    fn dispatch_exec_message(&mut self, exec_message: SecExecMsg) {
+        let log = self.log.new(o!());
+        let store = Arc::clone(&self.sec_store);
+        self.futures.push(match exec_message {
+            SecExecMsg::LogEvent(log_data) => {
+                Sec::executor_log(log, store, log_data).boxed()
+            }
+            SecExecMsg::UpdateCachedState(update_data) => {
+                Sec::executor_update(log, store, update_data).boxed()
+            }
+        });
+    }
+
+    async fn executor_log(
+        log: slog::Logger,
+        store: Arc<dyn SecStore>,
+        log_data: SagaLogEventData,
+    ) -> Option<SecStep> {
+        debug!(&log, "saga log event";
+            "saga_id" => log_data.saga_id.to_string(),
+            "new_state" => ?log_data.event
+        );
+        store.record_event(log_data.saga_id, &log_data.event).await;
+        Sec::client_respond(&log, log_data.ack_tx, ());
+        None
+    }
+
+    async fn executor_update(
+        log: slog::Logger,
+        store: Arc<dyn SecStore>,
+        update_data: SagaUpdateCacheData,
+    ) -> Option<SecStep> {
+        info!(&log, "update for saga cached state";
+            "saga_id" => update_data.saga_id.to_string(),
+            "new_state" => ?update_data.updated_state
+        );
+        store
+            .saga_update(update_data.saga_id, &update_data.updated_state)
+            .await;
+        None
+    }
 }
 
 struct Saga {
@@ -1105,19 +1100,20 @@ pub enum SagaRunState {
 #[derive(Debug)]
 pub struct SecSagaHdl {
     saga_id: SagaId,
-    log_channel: mpsc::Sender<SagaLogEventData>,
-    update_channel: mpsc::Sender<SagaUpdateCacheData>,
+    exec_tx: mpsc::Sender<SecExecMsg>,
 }
 
 impl SecSagaHdl {
     /** Write `event` to the saga log */
     pub async fn record(&self, event: SagaNodeEvent) {
-        /*
-         * XXX How does shutdown interact here (if these channels get closed)?
-         */
+        /* XXX How does shutdown interact (if this channel gets closed)? */
         let (ack_tx, ack_rx) = oneshot::channel();
-        self.log_channel
-            .send(SagaLogEventData { saga_id: self.saga_id, event, ack_tx })
+        self.exec_tx
+            .send(SecExecMsg::LogEvent(SagaLogEventData {
+                saga_id: self.saga_id,
+                event,
+                ack_tx,
+            }))
             .await
             .unwrap();
         ack_rx.await.unwrap()
@@ -1130,23 +1126,33 @@ impl SecSagaHdl {
      * not required for correctness here.
      */
     pub async fn saga_update(&self, update: SagaCachedState) {
-        /*
-         * XXX How does shutdown interact here (if these channels get closed)?
-         */
-        self.update_channel
-            .send(SagaUpdateCacheData {
+        /* XXX How does shutdown interact (if this channel gets closed)? */
+        self.exec_tx
+            .send(SecExecMsg::UpdateCachedState(SagaUpdateCacheData {
                 saga_id: self.saga_id,
                 updated_state: update,
-            })
+            }))
             .await
             .unwrap();
     }
 }
 
 /**
- * Message from [`SagaExecutor`] to [`Sec`] (via [`SecSagaHdl`]) to record
- * an event to the saga log.
+ * Message passed from the [`SecSagaHdl`] (held by a [`SagaExecutor`]) to the
+ * [`Sec`]
  */
+#[derive(Debug)]
+enum SecExecMsg {
+    /** Record an event to the saga log */
+    LogEvent(SagaLogEventData),
+
+    /** Update the cached state of a saga */
+    UpdateCachedState(SagaUpdateCacheData),
+    // /** Create a child saga */
+    // CreateChildSaga(SagaCreateChildData),
+}
+
+/** See [`SecExecMsg::LogEvent`] */
 #[derive(Debug)]
 struct SagaLogEventData {
     /** saga being updated */
@@ -1157,10 +1163,7 @@ struct SagaLogEventData {
     ack_tx: oneshot::Sender<()>,
 }
 
-/**
- * Message from [`SagaExecutor`'] to [`Sec`] (via [`SecSagaHdl`]) to update the
- * cached state of a saga.
- */
+/** See [`SecExecMsg::UpdateCachedState`] */
 #[derive(Debug)]
 struct SagaUpdateCacheData {
     /** saga being updated */
