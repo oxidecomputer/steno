@@ -254,6 +254,7 @@ impl SecClient {
 }
 
 /* TODO-cleanup Is this necessary?  Correct? */
+// XXX These can fail if the SEC panicked.
 impl Drop for SecClient {
     fn drop(&mut self) {
         if !self.shutdown {

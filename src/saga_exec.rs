@@ -261,7 +261,9 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
                         live_state.queue_undo.push(parent);
                     }
 
-                    NodeExecState::QueuedToUndo | NodeExecState::Undone(_) => {
+                    NodeExecState::QueuedToUndo
+                    | NodeExecState::UndoInProgress
+                    | NodeExecState::Undone(_) => {
                         panic!(
                             "already undoing or undone node \
                             whose child was just now undone"
@@ -1297,6 +1299,7 @@ enum NodeExecState {
     Done,
     Failed,
     QueuedToUndo,
+    UndoInProgress,
     Undone(UndoMode),
 }
 
@@ -1316,6 +1319,7 @@ impl fmt::Display for NodeExecState {
             NodeExecState::Done => "done",
             NodeExecState::Failed => "failed",
             NodeExecState::QueuedToUndo => "queued-undo",
+            NodeExecState::UndoInProgress => "undo-working",
             NodeExecState::Undone(UndoMode::ActionNeverRan) => "abandoned",
             NodeExecState::Undone(UndoMode::ActionUndone) => "undone",
             NodeExecState::Undone(UndoMode::ActionFailed) => "failed",
@@ -1349,12 +1353,15 @@ impl<UserType: SagaType> SagaExecLiveState<UserType> {
             assert!(self.node_errors.contains_key(node_id));
             set.insert(NodeExecState::Failed);
         } else if self.node_outputs.contains_key(node_id) {
-            set.insert(NodeExecState::Done);
-        }
-
-        if self.node_tasks.contains_key(node_id) {
+            if self.node_tasks.contains_key(node_id) {
+                set.insert(NodeExecState::UndoInProgress);
+            } else {
+                set.insert(NodeExecState::Done);
+            }
+        } else if self.node_tasks.contains_key(node_id) {
             set.insert(NodeExecState::TaskInProgress);
         }
+
         if self.queue_todo.contains(node_id) {
             set.insert(NodeExecState::QueuedToRun);
         }

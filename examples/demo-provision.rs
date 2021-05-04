@@ -206,6 +206,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             )
             .await
             .context("resuming saga")?;
+        // XXX do not want to have started it yet
         let saga = sec
             .saga_get(saga_id)
             .await
