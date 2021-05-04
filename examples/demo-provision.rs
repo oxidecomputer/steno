@@ -121,21 +121,18 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
 
     println!("*** initial state ***");
     let saga_id = make_saga_id();
-    sec.saga_create(
-        saga_id,
-        Arc::new(ExampleContext::default()),
-        saga_template,
-        "demo-provision".to_string(),
-        ExampleParams { instance_name: "fake-o instance".to_string() },
-    )
-    .await
-    .unwrap();
+    let (_, initial_status) = sec
+        .saga_create(
+            saga_id,
+            Arc::new(ExampleContext::default()),
+            saga_template,
+            "demo-provision".to_string(),
+            ExampleParams { instance_name: "fake-o instance".to_string() },
+        )
+        .await
+        .unwrap();
 
-    /* XXX need to prevent it from going and running the saga */
-
-    let saga = sec.saga_get(saga_id).await.unwrap();
-    let status = saga.state.status();
-    println!("{}", status);
+    println!("{}", initial_status);
     Ok(())
 }
 
@@ -195,7 +192,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         let file = reader_for_log_input(input_log_path)?;
         let saga_recovered = read_saga_state(file)?;
         let saga_id = saga_recovered.saga_id;
-        let future = sec
+        let (future, initial_status) = sec
             .saga_resume(
                 saga_id,
                 uctx,
@@ -206,20 +203,15 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             )
             .await
             .context("resuming saga")?;
-        // XXX do not want to have started it yet
-        let saga = sec
-            .saga_get(saga_id)
-            .await
-            .map_err(|_: ()| anyhow!("failed to fetch newly-created saga"))?;
         if !args.quiet {
             print!("recovered state\n");
-            println!("{}", saga.state.status());
+            println!("{}", initial_status);
             println!("");
         }
         (saga_id, future)
     } else {
         let saga_id = make_saga_id();
-        let future = sec
+        let (future, _) = sec
             .saga_create(
                 saga_id,
                 uctx,
