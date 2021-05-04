@@ -12,6 +12,7 @@ use crate::saga_template::SagaTemplateMetadata;
 use crate::sec::SecExecClient;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
+use crate::SagaStateView;
 use crate::SagaTemplate;
 use crate::SagaType;
 use anyhow::anyhow;
@@ -1165,15 +1166,17 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 /*
                  * If there's a child saga for this node, construct its status.
                  */
-                if let Some(child_execs) = live_state.child_sagas.get(&node) {
+                if let Some(child_ids) = live_state.child_sagas.get(&node) {
                     /*
                      * TODO-correctness check lock order.  This seems okay
                      * because we always take locks from parent -> child and
                      * there cannot be cycles.
                      */
                     let mut statuses = Vec::new();
-                    for c in child_execs {
-                        statuses.push(c.status().await);
+                    for c in child_ids {
+                        let child_view =
+                            live_state.sec_hdl.saga_get(*c).await.unwrap();
+                        statuses.push(child_view.state.status().clone());
                     }
                     child_sagas
                         .insert(node, statuses)
@@ -1229,31 +1232,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     }
 }
 
-/*
- * This trait exists in order to erase the type parameter on SagaExecutor.  In
- * particular, SagaExecutor is necessarily parametrized by the user's SagaType,
- * which includes a bunch of other types that are specific to the user's
- * execution.  However, there are contexts where we don't care about that, and
- * we _do_ need to store a bunch of SagaExecutors that have, for example,
- * different SagaParamsType types.  Namely: a saga can have any number of child
- * sagas with different parameter types, and we want to keep a list of those so
- * that we can get their status.  We use this trait to refer to the child sagas.
- * TODO-cleanup Is there a better way to do this?
- */
-trait SagaExecChild: Send + Sync + 'static {
-    fn status(&self) -> BoxFuture<'_, SagaExecStatus>;
-}
-impl<UserType: SagaType> SagaExecChild for SagaExecutor<UserType> {
-    fn status(&self) -> BoxFuture<'_, SagaExecStatus> {
-        self.status()
-    }
-}
-impl Debug for dyn SagaExecChild {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<SagaExecChild>")
-    }
-}
-
 /**
  * Encapsulates the (mutable) execution state of a saga
  */
@@ -1302,7 +1280,7 @@ struct SagaExecLiveState<UserType: SagaType> {
     node_errors: BTreeMap<NodeIndex, ActionError>,
 
     /** Child sagas created by a node (for status and control) */
-    child_sagas: BTreeMap<NodeIndex, Vec<Arc<dyn SagaExecChild>>>,
+    child_sagas: BTreeMap<NodeIndex, Vec<SagaId>>,
 
     /** Persistent state */
     sglog: SagaLog,
@@ -1707,9 +1685,10 @@ impl<UserType: SagaType> ActionContext<UserType> {
     }
 
     /**
-     * Execute a new saga `sg` within this saga and wait for it to complete.
+     * Execute a new saga based on `template` within this saga and wait for it
+     * to complete
      *
-     * `sg` is considered a "child" saga of the current saga, meaning that
+     * `template` is considered a "child" saga of the current saga, meaning that
      * control actions (like pause) on the current saga will affect the child
      * and status reporting of the current saga will show the status of the
      * child.
@@ -1724,8 +1703,6 @@ impl<UserType: SagaType> ActionContext<UserType> {
      * Saga was constructed what the whole graph looks like, instead of only
      * knowing about child sagas once we start executing the node that
      * creates them.
-     * TODO We probably need to ensure that the child saga is running in the
-     * same SEC.  Speaking of that: how can this be idempotent?
      * TODO-design The only reason that we require ChildType::ExecContextType ==
      * UserType::ExecContextType is so that we can clone the user_context.  We
      * could just as well have the caller pass in a user context instead here,
@@ -1737,14 +1714,48 @@ impl<UserType: SagaType> ActionContext<UserType> {
      */
     pub async fn child_saga<ChildType>(
         &self,
-        saga_id: &SagaId,
-        sg: Arc<SagaTemplate<ChildType>>,
+        saga_id: SagaId,
+        template: Arc<SagaTemplate<ChildType>>,
+        template_name: String,
         initial_params: ChildType::SagaParamsType,
-    ) -> Result<Arc<SagaExecutor<ChildType>>, ActionError>
+    ) -> Result<BoxFuture<'static, SagaResult>, ActionError>
     where
         ChildType: SagaType<ExecContextType = UserType::ExecContextType>,
     {
-        todo!(); // XXX
+        // XXX don't need live_state lock held for most of this
+        let future = {
+            let mut live_state = self.live_state.lock().await;
+            let future = live_state
+                .sec_hdl
+                .child_saga(
+                    saga_id,
+                    Arc::clone(&self.user_context),
+                    template,
+                    template_name,
+                    initial_params,
+                )
+                .await?;
+            live_state
+                .child_sagas
+                .entry(self.node_id)
+                .or_insert_with(Vec::new)
+                .push(saga_id);
+            future
+        };
+
+        let live_arc = Arc::clone(&self.live_state);
+        Ok(async move {
+            future.await;
+            let live_state = live_arc.lock().await;
+            let saga_view = live_state.sec_hdl.saga_get(saga_id).await.unwrap();
+            match saga_view.state {
+                SagaStateView::Done { result, .. } => result,
+                SagaStateView::Running { .. } => {
+                    panic!("future returned too early")
+                }
+            }
+        }
+        .boxed())
     }
 
     /**

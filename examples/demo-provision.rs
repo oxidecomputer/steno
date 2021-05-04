@@ -188,7 +188,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let saga_template = make_example_provision_saga();
     let template_name = "example-template".to_string();
     let uctx = Arc::new(ExampleContext::default());
-    let saga_id = if let Some(input_log_path) = &args.recover_from {
+    let (saga_id, future) = if let Some(input_log_path) = &args.recover_from {
         if !args.quiet {
             println!("recovering from log: {}", input_log_path.display());
         }
@@ -196,16 +196,17 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         let file = reader_for_log_input(input_log_path)?;
         let saga_recovered = read_saga_state(file)?;
         let saga_id = saga_recovered.saga_id;
-        sec.saga_resume(
-            saga_id,
-            uctx,
-            saga_template.clone() as Arc<dyn SagaTemplateGeneric<_>>,
-            template_name,
-            saga_recovered.params,
-            saga_recovered.events,
-        )
-        .await
-        .context("resuming saga")?;
+        let future = sec
+            .saga_resume(
+                saga_id,
+                uctx,
+                saga_template.clone() as Arc<dyn SagaTemplateGeneric<_>>,
+                template_name,
+                saga_recovered.params,
+                saga_recovered.events,
+            )
+            .await
+            .context("resuming saga")?;
         let saga = sec
             .saga_get(saga_id)
             .await
@@ -214,18 +215,19 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             print!("recovered state\n");
             println!("{}", saga.state.status());
         }
-        saga_id
+        (saga_id, future)
     } else {
         let saga_id = make_saga_id();
-        sec.saga_create(
-            saga_id,
-            uctx,
-            saga_template.clone(),
-            template_name,
-            ExampleParams { instance_name: "fake-o instance".to_string() },
-        )
-        .await?;
-        saga_id
+        let future = sec
+            .saga_create(
+                saga_id,
+                uctx,
+                saga_template.clone(),
+                template_name,
+                ExampleParams { instance_name: "fake-o instance".to_string() },
+            )
+            .await?;
+        (saga_id, future)
     };
 
     for node_name in &args.inject_error {
@@ -244,6 +246,8 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     if !args.quiet {
         println!("*** running saga ***");
     }
+
+    future.await;
 
     let saga = sec
         .saga_get(saga_id)

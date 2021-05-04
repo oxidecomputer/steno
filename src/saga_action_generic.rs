@@ -21,7 +21,7 @@ use std::sync::Arc;
  * throughout Steno to avoid a sprawl of type parameters and duplicated trait
  * bounds.
  */
-pub trait SagaType: 'static {
+pub trait SagaType: Debug + 'static {
     /**
      * Type for a saga's input parameters
      *

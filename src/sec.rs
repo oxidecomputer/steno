@@ -579,16 +579,13 @@ pub struct SecExecClient {
 impl SecExecClient {
     /** Write `event` to the saga log */
     pub async fn record(&self, event: SagaNodeEvent) {
-        /* XXX How does shutdown interact (if this channel gets closed)? */
         let (ack_tx, ack_rx) = oneshot::channel();
-        self.exec_tx
-            .send(SecExecMsg::LogEvent(SagaLogEventData {
-                saga_id: self.saga_id,
-                event,
-                ack_tx,
-            }))
-            .await
-            .unwrap();
+        self.sec_send(SecExecMsg::LogEvent(SagaLogEventData {
+            saga_id: self.saga_id,
+            event,
+            ack_tx,
+        }))
+        .await;
         ack_rx.await.unwrap()
     }
 
@@ -597,16 +594,62 @@ impl SecExecClient {
      *
      * This does not block on any write to persistent storage because that is
      * not required for correctness here.
+     * XXX Is this called anywhere?!  We probably _should_ block on this for
+     * consistency and hygiene.  Then we can put the ack_rx.await into
+     * self.sec_send().
      */
     pub async fn saga_update(&self, update: SagaCachedState) {
+        self.sec_send(SecExecMsg::UpdateCachedState(SagaUpdateCacheData {
+            saga_id: self.saga_id,
+            updated_state: update,
+        }))
+        .await;
+    }
+
+    /**
+     * Create or resume the requested child saga
+     */
+    pub async fn child_saga<ChildType>(
+        &self,
+        child_saga_id: SagaId,
+        uctx: Arc<ChildType::ExecContextType>,
+        template: Arc<SagaTemplate<ChildType>>,
+        template_name: String,
+        params: ChildType::SagaParamsType,
+    ) -> Result<BoxFuture<'static, ()>, ActionError>
+    where
+        ChildType: SagaType + fmt::Debug,
+    {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let serialized_params = serde_json::to_value(&params)
+            .map_err(ActionError::new_serialize)?;
+        let template_params =
+            Box::new(TemplateParamsForCreate { template, params, uctx })
+                as Box<dyn TemplateParams>;
+        self.sec_send(SecExecMsg::CreateChildSaga(SagaCreateChildData {
+            parent_saga_id: self.saga_id,
+            create_params: SagaCreateData {
+                ack_tx,
+                saga_id: child_saga_id,
+                template_params,
+                template_name,
+                serialized_params,
+            },
+        }))
+        .await;
+        ack_rx.await.unwrap().map_err(ActionError::new_subsaga)
+    }
+
+    pub async fn saga_get(&self, saga_id: SagaId) -> Result<SagaView, ()> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sec_send(SecExecMsg::SagaGet(SagaGetData { ack_tx, saga_id }))
+            .await;
+        ack_rx.await.unwrap()
+    }
+
+    async fn sec_send(&self, msg: SecExecMsg) {
         /* XXX How does shutdown interact (if this channel gets closed)? */
-        self.exec_tx
-            .send(SecExecMsg::UpdateCachedState(SagaUpdateCacheData {
-                saga_id: self.saga_id,
-                updated_state: update,
-            }))
-            .await
-            .unwrap();
+        self.exec_tx.send(msg).await.unwrap();
     }
 }
 
@@ -615,24 +658,38 @@ impl SecExecClient {
  */
 #[derive(Debug)]
 enum SecExecMsg {
+    /** Fetch the status of a saga */
+    SagaGet(SagaGetData),
+
     /** Record an event to the saga log */
     LogEvent(SagaLogEventData),
 
     /** Update the cached state of a saga */
     UpdateCachedState(SagaUpdateCacheData),
-    // /** Create a child saga */
-    // CreateChildSaga(SagaCreateChildData),
+
+    /** Create a child saga */
+    CreateChildSaga(SagaCreateChildData),
+}
+
+/** See [`SecExecMsg::SagaGet`] */
+// XXX commonize with the client's SagaGet
+#[derive(Debug)]
+struct SagaGetData {
+    /** response channel */
+    ack_tx: oneshot::Sender<Result<SagaView, ()>>,
+    /** saga being updated */
+    saga_id: SagaId,
 }
 
 /** See [`SecExecMsg::LogEvent`] */
 #[derive(Debug)]
 struct SagaLogEventData {
+    /** response channel */
+    ack_tx: oneshot::Sender<()>,
     /** saga being updated */
     saga_id: SagaId,
     /** event to be recorded to the saga log */
     event: SagaNodeEvent,
-    /** response channel */
-    ack_tx: oneshot::Sender<()>,
 }
 
 /** See [`SecExecMsg::UpdateCachedState`] */
@@ -642,6 +699,38 @@ struct SagaUpdateCacheData {
     saga_id: SagaId,
     /** updated state */
     updated_state: SagaCachedState,
+}
+
+/** See [`SecExecMsg::CreateChildSaga`] */
+#[derive(Debug)]
+struct SagaCreateChildData {
+    /** parent saga */
+    parent_saga_id: SagaId,
+    /** child saga creation details */
+    create_params: SagaCreateData,
+}
+
+// XXX commonize with SecClientMessage
+struct SagaCreateData {
+    /** response channel */
+    ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+    /** caller-defined id (must be unique) */
+    saga_id: SagaId,
+    /** user-type-specific parameters */
+    template_params: Box<dyn TemplateParams>,
+    /** name of the template used to create this saga */
+    template_name: String,
+    /** serialized saga parameters */
+    serialized_params: JsonValue,
+}
+
+impl fmt::Debug for SagaCreateData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SagaCreateData")
+            .field("saga_id", &self.saga_id)
+            .field("template_name", &self.template_name)
+            .finish()
+    }
 }
 
 /*
@@ -1069,14 +1158,23 @@ impl Sec {
     fn dispatch_exec_message(&mut self, exec_message: SecExecMsg) {
         let log = self.log.new(o!());
         let store = Arc::clone(&self.sec_store);
-        self.futures.push(match exec_message {
+        match exec_message {
             SecExecMsg::LogEvent(log_data) => {
-                Sec::executor_log(log, store, log_data).boxed()
+                self.futures
+                    .push(Sec::executor_log(log, store, log_data).boxed());
             }
             SecExecMsg::UpdateCachedState(update_data) => {
-                Sec::executor_update(log, store, update_data).boxed()
+                self.futures.push(
+                    Sec::executor_update(log, store, update_data).boxed(),
+                );
             }
-        });
+            SecExecMsg::CreateChildSaga(child_data) => {
+                self.executor_child_saga(child_data)
+            }
+            SecExecMsg::SagaGet(get_data) => {
+                self.executor_saga_get(get_data);
+            }
+        };
     }
 
     async fn executor_log(
@@ -1106,6 +1204,37 @@ impl Sec {
             .saga_update(update_data.saga_id, &update_data.updated_state)
             .await;
         None
+    }
+
+    fn executor_child_saga(&mut self, child: SagaCreateChildData) {
+        info!(&self.log, "create child saga";
+            "parent_saga_id" => child.parent_saga_id.to_string(),
+        );
+
+        /*
+         * TODO-robustness TODO-correctness This implementation assumes that the
+         * child saga does not already exist, but it might!  Would it be correct
+         * to look up the saga in our state and return an appropriate Future if
+         * we find it?  At the very least, this relies on the consumer having
+         * completed recovery already, which isn't a given.
+         *
+         * If the saga alredy does exist, presumably this operation will fail
+         * with an error saying so.  But that raises another issue: how will the
+         * consumer have created a SagaId for this saga?  It needs to be
+         * deterministic.
+         */
+        let params = child.create_params;
+        self.cmd_saga_create(
+            params.ack_tx,
+            params.saga_id,
+            params.template_params,
+            params.template_name,
+            params.serialized_params,
+        );
+    }
+
+    fn executor_saga_get(&self, get_data: SagaGetData) {
+        self.cmd_saga_get(get_data.ack_tx, get_data.saga_id);
     }
 }
 

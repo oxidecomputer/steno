@@ -79,6 +79,10 @@ pub enum ActionError {
     /// successful result, or an action's error.
     #[error("failed to serialize action's result")]
     SerializeFailed { message: String },
+
+    /// The framework failed to create the requested subsaga
+    #[error("failed to create subsaga")]
+    SubsagaCreateFailed { message: String },
 }
 
 impl ActionError {
@@ -139,5 +143,10 @@ impl ActionError {
 
     pub fn new_deserialize(source: SerdeError) -> ActionError {
         ActionError::DeserializeFailed { message: source.to_string() }
+    }
+
+    pub fn new_subsaga(source: anyhow::Error) -> ActionError {
+        let message = format!("{:#}", source);
+        ActionError::SubsagaCreateFailed { message }
     }
 }

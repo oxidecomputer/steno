@@ -159,6 +159,7 @@ async fn demo_prov_vpc_alloc_ip(
 /*
  * The next two steps are in a subsaga!
  */
+#[derive(Debug)]
 struct ExampleSubsagaType {}
 impl SagaType for ExampleSubsagaType {
     type ExecContextType = ExampleContext;
@@ -199,15 +200,16 @@ async fn demo_prov_server_alloc(
     let saga_id = SagaId(
         Uuid::parse_str("bcf32552-2b54-485b-bf13-b316daa7d1d4").unwrap(),
     );
-    let e = sgctx
+    let fut = sgctx
         .child_saga::<ExampleSubsagaType>(
-            &saga_id,
+            saga_id,
             sg,
+            "server_alloc".to_string(),
             ExampleSubsagaParams { number_of_things: 1 },
         )
         .await?;
-    e.run().await;
-    match e.result().kind {
+    let result = fut.await;
+    match result.kind {
         Ok(success) => {
             let server_allocated: Arc<ServerAllocResult> =
                 success.lookup_output("server_reserve")?;
