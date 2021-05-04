@@ -268,6 +268,35 @@ impl SagaLog {
     pub fn events(&self) -> &[SagaNodeEvent] {
         &self.events
     }
+
+    pub fn pretty(&self) -> SagaLogPretty<'_> {
+        SagaLogPretty { log: self }
+    }
+}
+
+/**
+ * Handle for pretty-printing a SagaLog (using the `fmt::Debug` trait)
+ */
+pub struct SagaLogPretty<'a> {
+    log: &'a SagaLog,
+}
+
+impl<'a> fmt::Debug for SagaLogPretty<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SAGA LOG:\n")?;
+        write!(f, "saga id:   {}\n", self.log.saga_id)?;
+        write!(
+            f,
+            "direction: {}\n",
+            if !self.log.unwinding { "forward" } else { "unwinding" }
+        )?;
+        write!(f, "events ({} total):\n", self.log.events.len())?;
+        write!(f, "\n")?;
+        for (i, event) in self.log.events.iter().enumerate() {
+            write!(f, "{:0>3} {:?}\n", i + 1, event)?;
+        }
+        Ok(())
+    }
 }
 
 //

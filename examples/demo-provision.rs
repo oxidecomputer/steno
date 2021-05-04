@@ -29,7 +29,6 @@ async fn main() -> Result<(), anyhow::Error> {
     match subcmd {
         Demo::Dot => cmd_dot().await,
         Demo::Info => cmd_info().await,
-        // XXX need to test print log but I can't do that until I fix Run
         Demo::PrintLog { ref print_log_args } => {
             cmd_print_log(print_log_args).await
         }
@@ -155,7 +154,7 @@ async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
     let file = reader_for_log_input(&input_log_path)?;
     let saga_serialized = read_saga_state(file)?;
     let saga_log = SagaLog::try_from(saga_serialized)?;
-    println!("{:?}", saga_log);
+    println!("{:?}", saga_log.pretty());
     Ok(())
 }
 
@@ -264,7 +263,6 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         _ => bail!("saga's final state was not finished"),
     };
 
-    // XXX use a file-based store instead?
     if let Some(output_log_path) = &args.dump_to {
         let serialized = saga.serialized();
         let (mut stdout_holder, mut file_holder);
@@ -275,6 +273,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             (String::from("stdout"), &mut stdout_holder)
         } else {
             file_holder = fs::OpenOptions::new()
+                .create(true)
                 .write(true)
                 .open(output_log_path)
                 .with_context(|| {
