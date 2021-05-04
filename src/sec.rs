@@ -2,6 +2,18 @@
  * Interfaces for persistence of saga records and saga logs
  */
 /* XXX TODO-doc This whole file */
+/*
+ * XXX The latest SEC changes are pretty ugly.  Probably a better way to do this
+ * would be to have one big FuturesUnordered with Futures that produce an enum
+ * with variants describing what to do next.  Then the body of the SEC is a
+ * select on that FuturesUnordered and the command channel.  (Maybe we could
+ * even phrase the command channel in terms of this, but it's not clear if
+ * that's worth it.)
+ * XXX As part of this cleanup, we ought to commonize the places where we call
+ * send().  We'll also want to review all the places where we panic and consider
+ * whether those are valid even in drop cases (as when the SecClient is dropped
+ * with sagas running).
+ */
 
 use crate::saga_exec::SagaExecutor;
 use crate::store::SagaCachedState;
@@ -666,8 +678,8 @@ impl Sec {
          * It shouldn't be possible to receive a message after processing a
          * shutdown request.  See the client's shutdown() method for details.
          */
-        assert!(!self.shutdown);
         let clientmsg = msg_result.expect("error reading command");
+        assert!(!self.shutdown);
 
         /*
          * TODO-robustness We probably don't want to allow these command
