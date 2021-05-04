@@ -2,18 +2,6 @@
  * Interfaces for persistence of saga records and saga logs
  */
 /* XXX TODO-doc This whole file */
-/*
- * XXX The latest SEC changes are pretty ugly.  Probably a better way to do this
- * would be to have one big FuturesUnordered with Futures that produce an enum
- * with variants describing what to do next.  Then the body of the SEC is a
- * select on that FuturesUnordered and the command channel.  (Maybe we could
- * even phrase the command channel in terms of this, but it's not clear if
- * that's worth it.)
- * XXX As part of this cleanup, we ought to commonize the places where we call
- * send().  We'll also want to review all the places where we panic and consider
- * whether those are valid even in drop cases (as when the SecClient is dropped
- * with sagas running).
- */
 
 use crate::saga_exec::SagaExecutor;
 use crate::store::SagaCachedState;
@@ -53,14 +41,33 @@ use tokio::sync::oneshot;
  */
 
 /**
+ * Maximum number of messages for the SEC that can be queued from the client
+ *
+ * This is very small.  These messages are commands, and the client always waits
+ * for a response.  So it makes little difference to latency or throughput
+ * whether the client waits up front for available buffer space or waits instead
+ * on the response channel (with the request buffered in the queue).
+ */
+const SEC_CLIENT_MAXQ_MESSAGES: usize = 2;
+
+/**
+ * Maximum number of messages for the SEC that can be queued from SagaExecutors
+ *
+ * As with clients, we keep the queue small.  This may mean that SagaExecutors
+ * get stuck behind the SEC, but that's preferable to bloat or more implicit
+ * queueing delays.
+ */
+const SEC_EXEC_MAXQ_MESSAGES: usize = 2;
+
+/**
  * Creates a new Saga Execution Coordinator
  */
 pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
-    // XXX buffer sizes
-    let (cmd_tx, cmd_rx) = mpsc::channel(8); // XXX buffer size
-                                             // XXX combine log and update channels?
-    let (log_tx, log_rx) = mpsc::channel(8);
-    let (update_tx, update_rx) = mpsc::channel(8);
+    // TODO-cleanup The log and update channels can probably be combined for
+    // clarity.  It doesn't make much functional difference.
+    let (cmd_tx, cmd_rx) = mpsc::channel(SEC_CLIENT_MAXQ_MESSAGES);
+    let (log_tx, log_rx) = mpsc::channel(SEC_EXEC_MAXQ_MESSAGES);
+    let (update_tx, update_rx) = mpsc::channel(SEC_EXEC_MAXQ_MESSAGES);
 
     /*
      * We spawn a new task rather than return a `Future` for the caller to
@@ -112,7 +119,7 @@ impl SecClient {
         saga_id: SagaId,
         uctx: Arc<UserType::ExecContextType>,
         template: Arc<SagaTemplate<UserType>>,
-        template_name: String, // XXX
+        template_name: String,
         params: UserType::SagaParamsType,
     ) -> Result<BoxFuture<'static, ()>, anyhow::Error>
     where
@@ -155,6 +162,7 @@ impl SecClient {
         saga_id: SagaId,
         uctx: Arc<T>,
         template: Arc<dyn SagaTemplateGeneric<T>>,
+        template_name: String,
         params: JsonValue,
         log_events: Vec<SagaNodeEvent>,
     ) -> Result<BoxFuture<'static, ()>, anyhow::Error>
@@ -176,6 +184,7 @@ impl SecClient {
                 ack_tx,
                 saga_id,
                 template_params,
+                template_name,
                 serialized_params: params,
             },
         )
@@ -357,9 +366,12 @@ impl SagaStateView {
  */
 
 /**
- * Message passed from the SecClient to the Sec
+ * Message passed from the [`SecClient`] to the [`Sec`]
  */
-/* XXX TODO would this be cleaner using separate named structs for the enums? */
+/*
+ * TODO-cleanup This might be cleaner using separate named structs for the
+ * enums, similar to what we do for SecStep.
+ */
 enum SecClientMsg {
     /**
      * Creates a new saga
@@ -393,6 +405,8 @@ enum SecClientMsg {
         saga_id: SagaId,
         /** user-type-specific parameters */
         template_params: Box<dyn TemplateParams>,
+        /** name of the template used to resume this saga */
+        template_name: String,
         /** serialized saga parameters */
         serialized_params: JsonValue,
     },
@@ -443,9 +457,15 @@ impl fmt::Debug for SecClientMsg {
                 .field("template_params", template_params)
                 .field("template_name", template_name)
                 .finish(),
-            SecClientMsg::SagaResume { saga_id, template_params, .. } => f
+            SecClientMsg::SagaResume {
+                saga_id,
+                template_params,
+                template_name,
+                ..
+            } => f
                 .debug_struct("SagaResume")
                 .field("saga_id", saga_id)
+                .field("template_name", template_name)
                 .field("template_params", template_params)
                 .finish(),
             SecClientMsg::SagaList { .. } => f.write_str("SagaList"),
@@ -572,15 +592,10 @@ enum SecStep {
     SagaDone(SagaDoneData),
 }
 
-struct SecResponseWrap<T> {
-    ack_tx: oneshot::Sender<T>,
-    value: T,
-}
-
-/* XXX TODO-doc */
+/** Data associated with [`SecStep::SagaInsert`] */
 /*
- * XXX could probably be commonized with a struct that makes up the body of the
- * CreateSaga message
+ * TODO-cleanup This could probably be commonized with a struct that makes up
+ * the body of the CreateSaga message.
  */
 struct SagaInsertData {
     log: slog::Logger,
@@ -590,6 +605,7 @@ struct SagaInsertData {
     ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
 }
 
+/** Data associated with [`SecStep::SagaDone`] */
 struct SagaDoneData {
     saga_id: SagaId,
     result: SagaResult,
@@ -692,10 +708,9 @@ impl Sec {
 
     fn client_respond<T>(
         log: &slog::Logger,
-        response_wrap: SecResponseWrap<T>,
+        ack_tx: oneshot::Sender<T>,
+        value: T,
     ) {
-        let ack_tx = response_wrap.ack_tx;
-        let value = response_wrap.value;
         if let Err(_) = ack_tx.send(value) {
             warn!(log, "unexpectedly failed to send response to SEC client");
         }
@@ -717,10 +732,7 @@ impl Sec {
         let maybe_exec =
             rec.template_params.into_exec(log.new(o!()), saga_id, sec_hdl);
         if let Err(e) = maybe_exec {
-            Sec::client_respond(
-                &log,
-                SecResponseWrap { ack_tx, value: Err(e) },
-            );
+            Sec::client_respond(&log, ack_tx, Err(e));
             return;
         }
         let exec = maybe_exec.unwrap();
@@ -752,15 +764,13 @@ impl Sec {
          */
         Sec::client_respond(
             &log,
-            SecResponseWrap {
-                ack_tx,
-                value: Ok(async move {
-                    done_rx.await.unwrap_or_else(|_| {
-                        panic!("failed to wait for saga to finish")
-                    })
-                }
-                .boxed()),
-            },
+            ack_tx,
+            Ok(async move {
+                done_rx.await.unwrap_or_else(|_| {
+                    panic!("failed to wait for saga to finish")
+                })
+            }
+            .boxed()),
         );
     }
 
@@ -769,10 +779,7 @@ impl Sec {
         let saga = self.sagas.remove(&saga_id).unwrap();
         info!(&saga.log, "saga finished");
         if let SagaRunState::Running { waiter, .. } = saga.run_state {
-            Sec::client_respond(
-                &saga.log,
-                SecResponseWrap { ack_tx: waiter, value: () },
-            );
+            Sec::client_respond(&saga.log, waiter, ());
             self.sagas.insert(
                 saga_id,
                 Saga {
@@ -806,10 +813,7 @@ impl Sec {
         let store = Arc::clone(&self.sec_store);
         let future = async move {
             store.record_event(log_data.saga_id, &log_data.event).await;
-            Sec::client_respond(
-                &log,
-                SecResponseWrap { ack_tx: log_data.ack_tx, value: () },
-            );
+            Sec::client_respond(&log, log_data.ack_tx, ());
             None
         }
         .boxed();
@@ -821,7 +825,6 @@ impl Sec {
             "saga_id" => update_data.saga_id.to_string(),
             "new_state" => ?update_data.updated_state
         );
-        let log = self.log.new(o!());
         let store = Arc::clone(&self.sec_store);
         self.futures.push(
             async move {
@@ -878,12 +881,14 @@ impl Sec {
                 ack_tx,
                 saga_id,
                 template_params,
+                template_name,
                 serialized_params,
             } => {
                 self.cmd_saga_resume(
                     ack_tx,
                     saga_id,
                     template_params,
+                    template_name,
                     serialized_params,
                 );
             }
@@ -908,12 +913,14 @@ impl Sec {
         template_name: String,
         serialized_params: JsonValue,
     ) {
-        /*
-         * TODO-log would like template name, maybe parameters in the log
-         * Ditto in cmd_saga_resume() XXX
-         */
-        let log = self.log.new(o!("saga_id" => saga_id.to_string()));
-        info!(&log, "saga create");
+        let log = self.log.new(o!(
+            "saga_id" => saga_id.to_string(),
+            "template_name" => template_name.clone()
+        ));
+        /* TODO-log Figure out the way to log JSON objects to a JSON drain */
+        info!(&log, "saga create";
+            "params" => serde_json::to_string(&serialized_params).unwrap()
+        );
 
         /*
          * Before doing anything else, create a persistent record for this saga.
@@ -930,10 +937,7 @@ impl Sec {
                 .await
                 .context("creating saga record");
             if let Err(error) = result {
-                Sec::client_respond(
-                    &log,
-                    SecResponseWrap { ack_tx, value: Err(error) },
-                );
+                Sec::client_respond(&log, ack_tx, Err(error));
                 None
             } else {
                 Some(SecStep::SagaInsert(SagaInsertData {
@@ -955,10 +959,17 @@ impl Sec {
         ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
+        template_name: String,
         serialized_params: JsonValue,
     ) {
-        let log = self.log.new(o!("saga_id" => saga_id.to_string()));
-        info!(&log, "saga resume");
+        let log = self.log.new(o!(
+            "saga_id" => saga_id.to_string(),
+            "template_name" => template_name,
+        ));
+        /* TODO-log Figure out the way to log JSON objects to a JSON drain */
+        info!(&log, "saga resume";
+            "params" => serde_json::to_string(&serialized_params).unwrap()
+        );
         self.saga_insert(SagaInsertData {
             ack_tx,
             log,
@@ -980,10 +991,7 @@ impl Sec {
                     .then(|f| f)
                     .collect::<Vec<SagaView>>()
                     .await;
-                Sec::client_respond(
-                    &log,
-                    SecResponseWrap { ack_tx, value: views },
-                );
+                Sec::client_respond(&log, ack_tx, views);
                 None
             }
             .boxed(),
@@ -998,10 +1006,7 @@ impl Sec {
         trace!(&self.log, "saga_get"; "saga_id" => %saga_id);
         let maybe_saga = self.sagas.get(&saga_id).ok_or(());
         if let Err(_) = maybe_saga {
-            Sec::client_respond(
-                &self.log,
-                SecResponseWrap { ack_tx, value: Err(()) },
-            );
+            Sec::client_respond(&self.log, ack_tx, Err(()));
             return;
         }
 
@@ -1009,10 +1014,7 @@ impl Sec {
         let log = self.log.new(o!());
         let the_fut = async move {
             let saga_view = fut.await;
-            Sec::client_respond(
-                &log,
-                SecResponseWrap { ack_tx, value: Ok(saga_view) },
-            );
+            Sec::client_respond(&log, ack_tx, Ok(saga_view));
             None
         };
         self.futures.push(the_fut.boxed());
@@ -1036,10 +1038,7 @@ impl Sec {
             .ok_or_else(|| anyhow!("no such saga: {}", saga_id));
 
         if let Err(e) = maybe_saga {
-            Sec::client_respond(
-                &self.log,
-                SecResponseWrap { ack_tx, value: Err(e) },
-            );
+            Sec::client_respond(&self.log, ack_tx, Err(e));
             return;
         }
 
@@ -1049,20 +1048,15 @@ impl Sec {
         } else {
             Sec::client_respond(
                 &self.log,
-                SecResponseWrap {
-                    ack_tx,
-                    value: Err(anyhow!("saga is not running: {}", saga_id)),
-                },
+                ack_tx,
+                Err(anyhow!("saga is not running: {}", saga_id)),
             );
             return;
         };
         let log = self.log.new(o!());
         let fut = async move {
             exec.inject_error(node_id).await;
-            Sec::client_respond(
-                &log,
-                SecResponseWrap { ack_tx: ack_tx, value: Ok(()) },
-            );
+            Sec::client_respond(&log, ack_tx, Ok(()));
             None
         }
         .boxed();

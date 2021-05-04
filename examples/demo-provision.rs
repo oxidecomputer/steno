@@ -200,6 +200,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             saga_id,
             uctx,
             saga_template.clone() as Arc<dyn SagaTemplateGeneric<_>>,
+            template_name,
             saga_recovered.params,
             saga_recovered.events,
         )

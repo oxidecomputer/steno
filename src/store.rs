@@ -47,11 +47,7 @@ pub trait SecStore: fmt::Debug + Send + Sync {
      * saga's log altogether when it next starts up since there's no need to
      * recover the saga.
      */
-    async fn saga_update(
-        &self,
-        id: SagaId,
-        update: &SagaCachedState,
-    ) -> Result<(), anyhow::Error>;
+    async fn saga_update(&self, id: SagaId, update: &SagaCachedState);
 }
 
 /**
@@ -62,7 +58,6 @@ pub struct SagaCreateParams {
     pub id: SagaId,
     pub template_name: String,
     pub saga_params: serde_json::Value,
-    /* XXX SagaCachedState must go here */
 }
 
 /**
@@ -109,12 +104,7 @@ impl SecStore for InMemorySecStore {
         /* Nothing to do. */
     }
 
-    async fn saga_update(
-        &self,
-        _id: SagaId,
-        _update: &SagaCachedState,
-    ) -> Result<(), anyhow::Error> {
+    async fn saga_update(&self, _id: SagaId, _update: &SagaCachedState) {
         /* Nothing to do. */
-        Ok(())
     }
 }
