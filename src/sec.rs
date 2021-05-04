@@ -31,6 +31,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -266,11 +267,13 @@ pub struct SagaView {
 }
 
 impl SagaView {
-    async fn from_saga(saga: &Saga) -> Self {
-        SagaView {
-            id: saga.id,
-            state: SagaStateView::from_run_state(&saga.run_state).await,
-            params: saga.params.clone(),
+    fn from_saga(saga: &Saga) -> impl Future<Output = Self> {
+        let id = saga.id;
+        let params = saga.params.clone();
+        let fut = SagaStateView::from_run_state(&saga.run_state);
+        async move {
+            let state = fut.await;
+            SagaView { id, state, params }
         }
     }
 
@@ -301,15 +304,32 @@ pub enum SagaStateView {
 }
 
 impl SagaStateView {
-    async fn from_run_state(run_state: &SagaRunState) -> SagaStateView {
-        match run_state {
+    fn from_run_state(
+        run_state: &SagaRunState,
+    ) -> impl Future<Output = SagaStateView> {
+        enum Which {
+            Running(Arc<dyn SagaExecManager>),
+            Done(SagaExecStatus, SagaResult),
+        }
+
+        let which = match run_state {
             SagaRunState::Running { exec, .. } => {
-                SagaStateView::Running { status: exec.status().await }
+                Which::Running(Arc::clone(&exec))
             }
-            SagaRunState::Done { status, result } => SagaStateView::Done {
-                status: status.clone(),
-                result: result.clone(),
-            },
+            SagaRunState::Done { status, result } => {
+                Which::Done(status.clone(), result.clone())
+            }
+        };
+
+        async move {
+            match which {
+                Which::Running(exec) => {
+                    SagaStateView::Running { status: exec.status().await }
+                }
+                Which::Done(status, result) => {
+                    SagaStateView::Done { status, result }
+                }
+            }
         }
     }
 
@@ -795,19 +815,17 @@ impl Sec {
     ) {
         trace!(&self.log, "saga_get"; "saga_id" => %saga_id);
         let maybe_saga = self.sagas.get(&saga_id).ok_or(());
-        self.simple_futures.push(
-            async move {
-                ack_tx
-                    .send(match maybe_saga {
-                        Ok(s) => Ok(SagaView::from_saga(s).await),
-                        Err(e) => Err(()),
-                    })
-                    .unwrap_or_else(|_| {
-                        panic!("failed to send response to client")
-                    });
-            }
-            .boxed(),
-        );
+        if let Err(e) = maybe_saga {
+            ack_tx.send(Err(())).unwrap_or_else(|_| panic!()); // XXX panic
+            return;
+        }
+
+        let fut = SagaView::from_saga(maybe_saga.unwrap());
+        let the_fut = async move {
+            let saga_view = fut.await;
+            ack_tx.send(Ok(saga_view)).unwrap_or_else(|_| panic!()); // XXX
+        };
+        self.simple_futures.push(the_fut.boxed());
     }
 
     fn cmd_saga_inject(
