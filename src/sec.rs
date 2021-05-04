@@ -116,7 +116,7 @@ impl SecClient {
         template: Arc<SagaTemplate<UserType>>,
         template_name: String,
         params: UserType::SagaParamsType,
-    ) -> Result<(BoxFuture<'static, ()>, SagaExecStatus), anyhow::Error>
+    ) -> Result<BoxFuture<'static, ()>, anyhow::Error>
     where
         UserType: SagaType + fmt::Debug,
     {
@@ -160,7 +160,7 @@ impl SecClient {
         template_name: String,
         params: JsonValue,
         log_events: Vec<SagaNodeEvent>,
-    ) -> Result<(BoxFuture<'static, ()>, SagaExecStatus), anyhow::Error>
+    ) -> Result<BoxFuture<'static, ()>, anyhow::Error>
     where
         T: Send + Sync + fmt::Debug + 'static,
     {
@@ -377,9 +377,7 @@ enum SecClientMsg {
      */
     SagaCreate {
         /** response channel */
-        ack_tx: oneshot::Sender<
-            Result<(BoxFuture<'static, ()>, SagaExecStatus), anyhow::Error>,
-        >,
+        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
         /** caller-defined id (must be unique) */
         saga_id: SagaId,
         /** user-type-specific parameters */
@@ -398,9 +396,7 @@ enum SecClientMsg {
      */
     SagaResume {
         /** response channel */
-        ack_tx: oneshot::Sender<
-            Result<(BoxFuture<'static, ()>, SagaExecStatus), anyhow::Error>,
-        >,
+        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
         /** unique id of the saga (from persistent state) */
         saga_id: SagaId,
         /** user-type-specific parameters */
@@ -642,11 +638,7 @@ impl SecExecClient {
             },
         }))
         .await;
-        ack_rx
-            .await
-            .unwrap()
-            .map_err(ActionError::new_subsaga)
-            .map(|(waiter_future, _initial_status)| waiter_future)
+        ack_rx.await.unwrap().map_err(ActionError::new_subsaga)
     }
 
     pub async fn saga_get(&self, saga_id: SagaId) -> Result<SagaView, ()> {
@@ -722,9 +714,7 @@ struct SagaCreateChildData {
 // XXX commonize with SecClientMessage
 struct SagaCreateData {
     /** response channel */
-    ack_tx: oneshot::Sender<
-        Result<(BoxFuture<'static, ()>, SagaExecStatus), anyhow::Error>,
-    >,
+    ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
     /** caller-defined id (must be unique) */
     saga_id: SagaId,
     /** user-type-specific parameters */
@@ -848,7 +838,7 @@ impl Sec {
         value: T,
     ) {
         if let Err(_) = ack_tx.send(value) {
-            debug!(log, "unexpectedly failed to send response to SEC client");
+            warn!(log, "unexpectedly failed to send response to SEC client");
         }
     }
 
@@ -860,7 +850,6 @@ impl Sec {
         match step {
             SecStep::SagaInsert(insert_data) => self.saga_insert(insert_data),
             SecStep::SagaDone(done_data) => self.saga_finished(done_data),
-            SecStep::SagaStart(start_data) => self.saga_start(start_data),
         }
     }
 
@@ -893,50 +882,32 @@ impl Sec {
             },
         };
         assert!(self.sagas.insert(saga_id, run_state).is_none());
-
-        /* Prepare a Future that the consumer can use to wait for the saga. */
-        let waiter_future = async move {
-            /*
-             * It should not be possible for the receive to fail because the
-             * other side will not be closed while the saga is still running.
-             */
-            done_rx
-                .await
-                .unwrap_or_else(|_| panic!("failed to wait for saga to finish"))
-        }
-        .boxed();
-
-        /* Prepare a Future to run the executor. */
-        let exec_for_run = Arc::clone(&exec);
-        let run_future = async move {
-            exec_for_run.run().await;
+        let saga_future = async move {
+            exec.run().await;
             Some(SecStep::SagaDone(SagaDoneData {
                 saga_id,
-                result: exec_for_run.result(),
-                status: exec_for_run.status().await,
+                result: exec.result(),
+                status: exec.status().await,
             }))
         }
         .boxed();
+        self.futures.push(saga_future);
 
         /*
-         * With those Futures in hand, kick off the process.  First, we'll fetch
-         * the initial status, which is used by tools and the test suite.  Then
-         * we'll send that with `waiter_future` back to the consumer.  Then
-         * we'll start running the saga.
+         * Return a Future that the consumer can use to wait for the saga to
+         * finish.  It should not be possible for the receive to fail because
+         * the other side will not be closed while the saga is still running.
          */
-        self.futures.push(
-            async move {
-                let status = exec.status().await;
-                Sec::client_respond(&log, ack_tx, Ok((waiter_future, status)));
-                Some(SecStep::SagaStart(SagaStartData { run_future }))
+        Sec::client_respond(
+            &log,
+            ack_tx,
+            Ok(async move {
+                done_rx.await.unwrap_or_else(|_| {
+                    panic!("failed to wait for saga to finish")
+                })
             }
-            .boxed(),
+            .boxed()),
         );
-    }
-
-    fn saga_start(&mut self, start_data: SagaStartData) {
-        /* All the setup work was done in saga_insert(). */
-        self.futures.push(start_data.run_future);
     }
 
     fn saga_finished(&mut self, done_data: SagaDoneData) {
@@ -1016,9 +987,7 @@ impl Sec {
 
     fn cmd_saga_create(
         &mut self,
-        ack_tx: oneshot::Sender<
-            Result<(BoxFuture<'static, ()>, SagaExecStatus), anyhow::Error>,
-        >,
+        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         template_name: String,
@@ -1067,9 +1036,7 @@ impl Sec {
 
     fn cmd_saga_resume(
         &mut self,
-        ack_tx: oneshot::Sender<
-            Result<(BoxFuture<'static, ()>, SagaExecStatus), anyhow::Error>,
-        >,
+        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         template_name: String,
@@ -1317,12 +1284,6 @@ enum SecStep {
     /** Start tracking a new saga, either as part of "create" or "resume"  */
     SagaInsert(SagaInsertData),
 
-    /**
-     * We've fetched the initial saga executor state and are ready to begin
-     * running it
-     */
-    SagaStart(SagaStartData),
-
     /** A saga has just finished. */
     SagaDone(SagaDoneData),
 }
@@ -1337,18 +1298,7 @@ struct SagaInsertData {
     saga_id: SagaId,
     template_params: Box<dyn TemplateParams>,
     serialized_params: JsonValue,
-    ack_tx: oneshot::Sender<
-        Result<(BoxFuture<'static, ()>, SagaExecStatus), anyhow::Error>,
-    >,
-}
-
-/** Data associated with [`SecStep::SagaStart`] */
-/*
- * TODO-cleanup This could probably be commonized with a struct that makes up
- * the body of the CreateSaga message.
- */
-struct SagaStartData {
-    run_future: BoxFuture<'static, Option<SecStep>>,
+    ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
 }
 
 /** Data associated with [`SecStep::SagaDone`] */

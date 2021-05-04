@@ -84,7 +84,7 @@ async fn book_trip(
     let creator = "myself";
 
     // Execute the saga.
-    let (saga_future, _) = sec
+    let saga_future = sec
         .saga_create(
             saga_id,
             Arc::new(trip_context),
