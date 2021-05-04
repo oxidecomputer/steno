@@ -20,7 +20,6 @@ use crate::SagaType;
 use anyhow::anyhow;
 use anyhow::Context;
 use futures::future::BoxFuture;
-use futures::select;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -36,7 +35,6 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::sync::watch;
 
 /*
  * SEC client side (handle used by Steno consumers)
@@ -46,7 +44,11 @@ use tokio::sync::watch;
  * Creates a new Saga Execution Coordinator
  */
 pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
+    // XXX buffer sizes
     let (cmd_tx, cmd_rx) = mpsc::channel(8); // XXX buffer size
+                                             // XXX combine log and update channels?
+    let (log_tx, log_rx) = mpsc::channel(8);
+    let (update_tx, update_rx) = mpsc::channel(8);
 
     /*
      * We spawn a new task rather than return a `Future` for the caller to
@@ -59,8 +61,13 @@ pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
             sagas: BTreeMap::new(),
             sec_store,
             saga_futures: FuturesUnordered::new(),
+            client_futures: FuturesUnordered::new(),
             cmd_rx,
             shutdown: false,
+            log_tx,
+            log_rx,
+            update_tx,
+            update_rx,
         };
 
         sec.run().await
@@ -415,7 +422,7 @@ impl fmt::Debug for SecClientMsg {
             SecClientMsg::SagaGet { saga_id, .. } => {
                 f.debug_struct("SagaGet").field("saga_id", saga_id).finish()
             }
-            SecClientMsg::SagaInjectError { ack_tx, saga_id, node_id } => f
+            SecClientMsg::SagaInjectError { saga_id, node_id, .. } => f
                 .debug_struct("SagaInjectError")
                 .field("saga_id", saga_id)
                 .field("node_Id", node_id)
@@ -527,7 +534,12 @@ struct Sec {
     saga_futures: FuturesUnordered<
         BoxFuture<'static, (SagaId, SagaExecStatus, SagaResult)>,
     >,
+    client_futures: FuturesUnordered<BoxFuture<'static, ()>>,
     cmd_rx: mpsc::Receiver<SecClientMsg>,
+    log_tx: mpsc::Sender<(SagaId, SecSagaHdlMsgLog)>,
+    log_rx: mpsc::Receiver<(SagaId, SecSagaHdlMsgLog)>,
+    update_tx: mpsc::Sender<(SagaId, SagaCachedState)>,
+    update_rx: mpsc::Receiver<(SagaId, SagaCachedState)>,
     shutdown: bool,
 }
 
@@ -540,56 +552,75 @@ impl Sec {
          */
         info!(&self.log, "SEC running");
         while !self.shutdown || !self.saga_futures.is_empty() {
-            /*
-             * One might expect that if we attempt to fetch the next completed
-             * Future from an empty FuturesUnordered, we might wait until a
-             * Future is added to the set and then completes.  Instead, we get
-             * back None, which has the side effect of terminating the Stream.
-             * As a result, we want to avoid waiting on an empty
-             * FuturesUnordered.  That said, if the set is empty, we can only
-             * become unblocked by a command on the cmd_rx channel.
-             */
-            if self.saga_futures.is_empty() {
-                let msg_result = self.cmd_rx.recv().await;
-                self.got_message(msg_result).await;
-            } else {
-                select! {
-                    maybe_result = self.saga_futures.next().fuse() => {
-                        let (saga_id, status, result) = maybe_result.unwrap();
-                        self.saga_finished(saga_id, status, result);
-                    },
-                    msg_result = self.cmd_rx.recv().fuse() => {
-                        let msg_result = self.cmd_rx.recv().await;
-                        self.got_message(msg_result).await;
+            tokio::select! {
+                /*
+                 * One might expect that if we attempt to fetch the next
+                 * completed Future from an empty FuturesUnordered, we might
+                 * wait until a Future is added to the set and then completes.
+                 * Instead, we get back None, which has the side effect of
+                 * terminating the Stream.  As a result, we want to avoid
+                 * waiting on an empty FuturesUnordered.
+                 */
+                maybe_result = self.saga_futures.next(),
+                    if !self.saga_futures.is_empty() => {
+                    let (saga_id, status, result) = maybe_result.unwrap();
+                    self.saga_finished(saga_id, status, result);
+                },
+                maybe_cmd_done = self.client_futures.next(),
+                    if !self.client_futures.is_empty() => { },
+
+                cmd_result = self.cmd_rx.recv() => {
+                    self.client_futures.push(self.got_message(cmd_result).boxed())
+                },
+                log_result = self.log_rx.recv() => {
+                    let (saga_id, logmsg) =
+                        log_result.expect("bad SecHdl message");
+                    self.sec_store.record_event(saga_id, &logmsg.event).await;
+                    /*
+                     * `send` can only fail if the other side of the channel
+                     * has closed.  That's illegal because the other side
+                     * should be waiting for our acknowledgement.
+                     */
+                    assert!(logmsg.ack_tx.send(()).is_ok());
+                },
+                update_result = self.update_rx.recv() => {
+                    /*
+                     * We may get an error when the channel is closing due to
+                     * execution completion.  That's fine -- just ignore it.
+                     */
+                    if let Some((saga_id, cached_state)) = update_result {
+                        /*
+                         * TODO-robustness this should be retried as needed?
+                         */
+                        self
+                            .sec_store
+                            .saga_update(saga_id, &cached_state)
+                            .await;
                     }
-                }
+                },
             }
         }
     }
 
     async fn got_message(&mut self, msg_result: Option<SecClientMsg>) {
         /*
-         * It shouldn't be possible to receive a message after
-         * processing a shutdown request.  See the client's
-         * shutdown() method for details.
+         * It shouldn't be possible to receive a message after processing a
+         * shutdown request.  See the client's shutdown() method for details.
          */
         assert!(!self.shutdown);
         let clientmsg = msg_result.expect("error reading command");
         /*
-         * TODO-robustness We probably don't want to allow these
-         * command functions to be async.  (Or rather: if they
-         * are, we want to put them into some other
-         * FuturesUnordered that we can poll on in this loop.)
-         * In practice, saga_list and saga_get wind up blocking
-         * on a Mutex that's held while we write saga log
-         * entries.  It's conceivable this could deadlock (since
-         * writing the log entries requires that we receive
-         * messages on a channel, which happens via the the poll
-         * on saga_futures.next() above).  Worse, it means if
-         * writes to CockroachDB hang, we won't even be able to
-         * list the in-memory sagas.  This is also a problem for
-         * saga_create(), which calls out to the store as well.
-         * XXX
+         * TODO-robustness We probably don't want to allow these command
+         * functions to be async.  (Or rather: if they are, we want to put them
+         * into some other FuturesUnordered that we can poll on in this loop.)
+         * In practice, saga_list and saga_get wind up blocking on a Mutex
+         * that's held while we write saga log entries.  It's conceivable this
+         * could deadlock (since writing the log entries requires that we
+         * receive messages on a channel, which happens via the the poll on
+         * saga_futures.next() above).  Worse, it means if writes to CockroachDB
+         * hang, we won't even be able to list the in-memory sagas.  This is
+         * also a problem for saga_create(), which calls out to the store as
+         * well.  XXX
          */
         self.cmd_dispatch(clientmsg).await
     }
@@ -784,17 +815,9 @@ impl Sec {
         template_params: Box<dyn TemplateParams>,
         serialized_params: JsonValue,
     ) -> Result<BoxFuture<'static, ()>, anyhow::Error> {
-        /*
-         * Create a handle for the executor to use to message us back.
-         * The log channel needs minimal buffering because the sender won't do
-         * anything that would generate new log messages while waiting for a log
-         * message to be persisted.
-         */
-        let (log_tx, log_rx) = mpsc::channel(1);
-        // XXX Is the initial value really Running?
-        let (update_tx, update_rx) = watch::channel(SagaCachedState::Running);
-        let sec_hdl =
-            SecSagaHdl { log_channel: log_tx, update_channel: update_tx };
+        let log_channel = self.log_tx.clone();
+        let update_channel = self.update_tx.clone();
+        let sec_hdl = SecSagaHdl { saga_id, log_channel, update_channel };
 
         /* Prepare a channel used to wait for the saga to finish. */
         let (done_tx, done_rx) = oneshot::channel();
@@ -812,14 +835,12 @@ impl Sec {
             },
         };
         assert!(self.sagas.insert(saga_id, run_state).is_none());
-        let saga_future = Sec::run_saga(
-            saga_id,
-            Arc::clone(&self.sec_store),
-            exec,
-            log_rx,
-            update_rx,
-        );
-        self.saga_futures.push(saga_future.boxed());
+        let saga_future = async move {
+            exec.run().await;
+            (saga_id, exec.status().await, exec.result())
+        }
+        .boxed();
+        self.saga_futures.push(saga_future);
 
         /*
          * Return a Future that the consumer can use to wait for the saga to
@@ -832,43 +853,6 @@ impl Sec {
                 .unwrap_or_else(|_| panic!("failed to wait for saga to finish"))
         }
         .boxed())
-    }
-
-    async fn run_saga(
-        saga_id: SagaId,
-        sec_store: Arc<dyn SecStore>,
-        exec: Arc<dyn SagaExecManager>,
-        mut log_rx: mpsc::Receiver<SecSagaHdlMsgLog>,
-        mut update_rx: watch::Receiver<SagaCachedState>,
-    ) -> (SagaId, SagaExecStatus, SagaResult) {
-        let mut run_fut = exec.run().fuse();
-
-        loop {
-            select! {
-                _ = run_fut => break,
-                maybe_logmsg = log_rx.recv().fuse() => {
-                    let logmsg = maybe_logmsg.expect("bad SecHdl message");
-                    sec_store.record_event(saga_id, &logmsg.event).await;
-                    /*
-                     * `send` can only fail if the other side of the channel has
-                     * closed.  That's illegal because the other side should be
-                     * waiting for our acknowledgement.
-                     */
-                    assert!(logmsg.ack_tx.send(()).is_ok());
-                },
-                _ = update_rx.changed().fuse() => {
-                    /*
-                     * We may get an error when the channel is closing due to
-                     * execution completion.  That's fine -- just ignore it.
-                     */
-                    let update = update_rx.borrow().clone();
-                    /* TODO-robustness this should be retried as needed? */
-                    sec_store.saga_update(saga_id, &update).await;
-                }
-            }
-        }
-
-        (saga_id, exec.status().await, exec.result())
     }
 }
 
@@ -903,28 +887,30 @@ pub enum SagaRunState {
 /* XXX TODO-cleanup This should be pub(crate).  See lib.rs. */
 #[derive(Debug)]
 pub struct SecSagaHdl {
-    log_channel: mpsc::Sender<SecSagaHdlMsgLog>,
-    update_channel: watch::Sender<SagaCachedState>,
+    saga_id: SagaId,
+    log_channel: mpsc::Sender<(SagaId, SecSagaHdlMsgLog)>,
+    update_channel: mpsc::Sender<(SagaId, SagaCachedState)>,
 }
 
 impl SecSagaHdl {
-    /** Write `event` to the saga log. */
+    /** Write `event` to the saga log */
     pub async fn record(&self, event: SagaNodeEvent) {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.log_channel
-            .send(SecSagaHdlMsgLog { event, ack_tx })
+            .send((self.saga_id, SecSagaHdlMsgLog { event, ack_tx }))
             .await
             .unwrap();
         ack_rx.await.unwrap()
     }
 
     /**
-     * Update the cached state for the saga.  This does not block on any
-     * write to persistent storage because that is not required for
-     * correctness here.
+     * Update the cached state for the saga
+     *
+     * This does not block on any write to persistent storage because that is
+     * not required for correctness here.
      */
     pub async fn saga_update(&self, update: SagaCachedState) {
-        self.update_channel.send(update).unwrap();
+        self.update_channel.send((self.saga_id, update)).await.unwrap();
     }
 }
 
