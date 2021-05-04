@@ -213,6 +213,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         if !args.quiet {
             print!("recovered state\n");
             println!("{}", saga.state.status());
+            println!("");
         }
         (saga_id, future)
     } else {
