@@ -793,12 +793,14 @@ impl Sec {
 
     fn cmd_saga_list(&self, ack_tx: oneshot::Sender<Vec<SagaView>>) {
         trace!(&self.log, "saga_list");
-        let vec = self.sagas.values();
+        /* TODO-cleanup */
+        let futures =
+            self.sagas.values().map(SagaView::from_saga).collect::<Vec<_>>();
         self.simple_futures.push(
             async move {
-                let views = futures::stream::iter(vec)
-                    .then(SagaView::from_saga)
-                    .collect()
+                let views = futures::stream::iter(futures)
+                    .then(|f| f)
+                    .collect::<Vec<SagaView>>()
                     .await;
                 ack_tx.send(views).unwrap_or_else(|_| {
                     panic!("failed to send response to client")
@@ -844,23 +846,28 @@ impl Sec {
             .sagas
             .get(&saga_id)
             .ok_or_else(|| anyhow!("no such saga: {}", saga_id));
-        let fut = async move {
-            if let Err(e) = maybe_saga {
-                ack_tx.send(Err(e)).unwrap_or_else(|_| {
+
+        if let Err(e) = maybe_saga {
+            ack_tx.send(Err(e)).unwrap_or_else(|_| {
+                panic!("failed to send response to client")
+            });
+            return;
+        }
+
+        let saga = maybe_saga.unwrap();
+        let exec = if let SagaRunState::Running { exec, .. } = &saga.run_state {
+            Arc::clone(&exec)
+        } else {
+            ack_tx
+                .send(Err(anyhow!("saga is not running: {}", saga_id)))
+                .unwrap_or_else(|_| {
                     panic!("failed to send response to client")
                 });
-                return;
-            }
-
-            let saga = maybe_saga.unwrap();
-            let result =
-                if let SagaRunState::Running { exec, .. } = &saga.run_state {
-                    exec.inject_error(node_id).await;
-                    Ok(())
-                } else {
-                    Err(anyhow!("saga is not running: {}", saga_id))
-                };
-            ack_tx.send(result).unwrap_or_else(|_| {
+            return;
+        };
+        let fut = async move {
+            exec.inject_error(node_id).await;
+            ack_tx.send(Ok(())).unwrap_or_else(|_| {
                 panic!("failed to send response to client")
             });
         }
