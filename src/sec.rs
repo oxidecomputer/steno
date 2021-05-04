@@ -31,7 +31,6 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::fmt;
-use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -61,7 +60,8 @@ pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
             sagas: BTreeMap::new(),
             sec_store,
             saga_futures: FuturesUnordered::new(),
-            client_futures: FuturesUnordered::new(),
+            create_futures: FuturesUnordered::new(),
+            simple_futures: FuturesUnordered::new(),
             cmd_rx,
             shutdown: false,
             log_tx,
@@ -534,7 +534,9 @@ struct Sec {
     saga_futures: FuturesUnordered<
         BoxFuture<'static, (SagaId, SagaExecStatus, SagaResult)>,
     >,
-    client_futures: FuturesUnordered<BoxFuture<'static, ()>>,
+    create_futures:
+        FuturesUnordered<BoxFuture<'static, Option<SagaInsertRecord>>>,
+    simple_futures: FuturesUnordered<BoxFuture<'static, ()>>,
     cmd_rx: mpsc::Receiver<SecClientMsg>,
     log_tx: mpsc::Sender<(SagaId, SecSagaHdlMsgLog)>,
     log_rx: mpsc::Receiver<(SagaId, SecSagaHdlMsgLog)>,
@@ -566,11 +568,19 @@ impl Sec {
                     let (saga_id, status, result) = maybe_result.unwrap();
                     self.saga_finished(saga_id, status, result);
                 },
-                maybe_cmd_done = self.client_futures.next(),
-                    if !self.client_futures.is_empty() => { },
+                maybe_create_done = self.create_futures.next(),
+                    if !self.create_futures.is_empty() => {
+                    if let Some(insert_record) = maybe_create_done.unwrap() {
+                        self.saga_insert(insert_record);
+                    }
+                },
+                maybe_simple = self.simple_futures.next(),
+                    if !self.simple_futures.is_empty() => {
+                    /* Nothing to do. */
+                },
 
                 cmd_result = self.cmd_rx.recv() => {
-                    self.client_futures.push(self.got_message(cmd_result).boxed())
+                    self.got_message(cmd_result);
                 },
                 log_result = self.log_rx.recv() => {
                     let (saga_id, logmsg) =
@@ -602,29 +612,6 @@ impl Sec {
         }
     }
 
-    async fn got_message(&mut self, msg_result: Option<SecClientMsg>) {
-        /*
-         * It shouldn't be possible to receive a message after processing a
-         * shutdown request.  See the client's shutdown() method for details.
-         */
-        assert!(!self.shutdown);
-        let clientmsg = msg_result.expect("error reading command");
-        /*
-         * TODO-robustness We probably don't want to allow these command
-         * functions to be async.  (Or rather: if they are, we want to put them
-         * into some other FuturesUnordered that we can poll on in this loop.)
-         * In practice, saga_list and saga_get wind up blocking on a Mutex
-         * that's held while we write saga log entries.  It's conceivable this
-         * could deadlock (since writing the log entries requires that we
-         * receive messages on a channel, which happens via the the poll on
-         * saga_futures.next() above).  Worse, it means if writes to CockroachDB
-         * hang, we won't even be able to list the in-memory sagas.  This is
-         * also a problem for saga_create(), which calls out to the store as
-         * well.  XXX
-         */
-        self.cmd_dispatch(clientmsg).await
-    }
-
     fn saga_finished(
         &mut self,
         saga_id: SagaId,
@@ -654,7 +641,27 @@ impl Sec {
         }
     }
 
-    async fn cmd_dispatch(&mut self, clientmsg: SecClientMsg) {
+    fn got_message(&mut self, msg_result: Option<SecClientMsg>) {
+        /*
+         * It shouldn't be possible to receive a message after processing a
+         * shutdown request.  See the client's shutdown() method for details.
+         */
+        assert!(!self.shutdown);
+        let clientmsg = msg_result.expect("error reading command");
+
+        /*
+         * TODO-robustness We probably don't want to allow these command
+         * functions to be async.  (Or rather: if they are, we want to put them
+         * into some other FuturesUnordered that we can poll on in this loop.)
+         * In practice, saga_list and saga_get wind up blocking on a Mutex
+         * that's held while we write saga log entries.  It's conceivable this
+         * could deadlock (since writing the log entries requires that we
+         * receive messages on a channel, which happens via the the poll on
+         * saga_futures.next() above).  Worse, it means if writes to CockroachDB
+         * hang, we won't even be able to list the in-memory sagas.  This is
+         * also a problem for saga_create(), which calls out to the store as
+         * well.  XXX
+         */
         match clientmsg {
             SecClientMsg::SagaCreate {
                 ack_tx,
@@ -663,19 +670,13 @@ impl Sec {
                 template_name,
                 serialized_params,
             } => {
-                ack_tx
-                    .send(
-                        self.cmd_saga_create(
-                            saga_id,
-                            template_params,
-                            template_name,
-                            serialized_params,
-                        )
-                        .await,
-                    )
-                    .unwrap_or_else(|_| {
-                        panic!("failed to send response to client")
-                    });
+                self.cmd_saga_create(
+                    ack_tx,
+                    saga_id,
+                    template_params,
+                    template_name,
+                    serialized_params,
+                );
             }
             SecClientMsg::SagaResume {
                 ack_tx,
@@ -683,45 +684,34 @@ impl Sec {
                 template_params,
                 serialized_params,
             } => {
-                ack_tx
-                    .send(self.cmd_saga_resume(
-                        saga_id,
-                        template_params,
-                        serialized_params,
-                    ))
-                    .unwrap_or_else(|_| {
-                        panic!("failed to send response to client")
-                    });
+                self.cmd_saga_resume(
+                    ack_tx,
+                    saga_id,
+                    template_params,
+                    serialized_params,
+                );
             }
             SecClientMsg::SagaList { ack_tx } => {
-                let fut = self.cmd_saga_list();
-                ack_tx.send(fut.await).unwrap_or_else(|_| {
-                    panic!("failed to send response to client")
-                });
+                self.cmd_saga_list(ack_tx);
             }
             SecClientMsg::SagaGet { ack_tx, saga_id } => {
-                let fut = self.cmd_saga_get(saga_id);
-                ack_tx.send(fut.await).unwrap_or_else(|_| {
-                    panic!("failed to send response to client")
-                });
+                self.cmd_saga_get(ack_tx, saga_id);
             }
             SecClientMsg::SagaInjectError { ack_tx, saga_id, node_id } => {
-                let fut = self.cmd_saga_inject(saga_id, node_id);
-                ack_tx.send(fut.await).unwrap_or_else(|_| {
-                    panic!("failed to send response to client");
-                });
+                self.cmd_saga_inject(ack_tx, saga_id, node_id);
             }
             SecClientMsg::Shutdown => self.cmd_shutdown(),
         }
     }
 
-    async fn cmd_saga_create(
+    fn cmd_saga_create(
         &mut self,
+        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         template_name: String,
         serialized_params: JsonValue,
-    ) -> Result<BoxFuture<'static, ()>, anyhow::Error> {
+    ) {
         /*
          * TODO-log would like template name, maybe parameters in the log
          * Ditto in cmd_saga_resume() XXX
@@ -737,47 +727,95 @@ impl Sec {
             template_name,
             saga_params: serialized_params.clone(),
         };
-        self.sec_store
-            .saga_create(&saga_create)
-            .await
-            .context("creating saga record")?;
+        let store = Arc::clone(&self.sec_store);
+        let create_future = async move {
+            let result = store
+                .saga_create(&saga_create)
+                .await
+                .context("creating saga record");
+            if let Err(error) = result {
+                ack_tx.send(Err(error)).unwrap_or_else(|_| {
+                    panic!("failed to send response to SEC client")
+                });
+                None
+            } else {
+                Some(SagaInsertRecord {
+                    ack_tx,
+                    log,
+                    saga_id,
+                    template_params,
+                    serialized_params,
+                })
+            }
+        }
+        .boxed();
 
-        self.saga_insert(log, saga_id, template_params, serialized_params)
+        self.create_futures.push(create_future);
     }
 
     fn cmd_saga_resume(
         &mut self,
+        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         serialized_params: JsonValue,
-    ) -> Result<BoxFuture<'static, ()>, anyhow::Error> {
+    ) {
         let log = self.log.new(o!("saga_id" => saga_id.to_string()));
         info!(&log, "saga resume");
-        self.saga_insert(log, saga_id, template_params, serialized_params)
+        self.saga_insert(SagaInsertRecord {
+            ack_tx,
+            log,
+            saga_id,
+            template_params,
+            serialized_params,
+        })
     }
 
-    fn cmd_saga_list<'a>(&'a self) -> impl Future<Output = Vec<SagaView>> + 'a {
+    fn cmd_saga_list(&self, ack_tx: oneshot::Sender<Vec<SagaView>>) {
         trace!(&self.log, "saga_list");
         let vec = self.sagas.values();
-        async {
-            futures::stream::iter(vec).then(SagaView::from_saga).collect().await
-        }
+        self.simple_futures.push(
+            async move {
+                let views = futures::stream::iter(vec)
+                    .then(SagaView::from_saga)
+                    .collect()
+                    .await;
+                ack_tx.send(views).unwrap_or_else(|_| {
+                    panic!("failed to send response to client")
+                });
+            }
+            .boxed(),
+        );
     }
 
-    fn cmd_saga_get<'a>(
-        &'a self,
+    fn cmd_saga_get(
+        &self,
+        ack_tx: oneshot::Sender<Result<SagaView, ()>>,
         saga_id: SagaId,
-    ) -> impl Future<Output = Result<SagaView, ()>> + 'a {
+    ) {
         trace!(&self.log, "saga_get"; "saga_id" => %saga_id);
         let maybe_saga = self.sagas.get(&saga_id).ok_or(());
-        async move { Ok(SagaView::from_saga(maybe_saga?).await) }
+        self.simple_futures.push(
+            async move {
+                ack_tx
+                    .send(match maybe_saga {
+                        Ok(s) => Ok(SagaView::from_saga(s).await),
+                        Err(e) => Err(()),
+                    })
+                    .unwrap_or_else(|_| {
+                        panic!("failed to send response to client")
+                    });
+            }
+            .boxed(),
+        );
     }
 
-    fn cmd_saga_inject<'a>(
-        &'a self,
+    fn cmd_saga_inject(
+        &self,
+        ack_tx: oneshot::Sender<Result<(), anyhow::Error>>,
         saga_id: SagaId,
         node_id: NodeIndex,
-    ) -> impl Future<Output = Result<(), anyhow::Error>> + 'a {
+    ) {
         trace!(
             &self.log,
             "saga_inject_error";
@@ -788,15 +826,28 @@ impl Sec {
             .sagas
             .get(&saga_id)
             .ok_or_else(|| anyhow!("no such saga: {}", saga_id));
-        async move {
-            let saga = maybe_saga?;
-            if let SagaRunState::Running { exec, .. } = &saga.run_state {
-                exec.inject_error(node_id).await;
-                Ok(())
-            } else {
-                Err(anyhow!("saga is not running: {}", saga_id))
+        let fut = async move {
+            if let Err(e) = maybe_saga {
+                ack_tx.send(Err(e)).unwrap_or_else(|_| {
+                    panic!("failed to send response to client")
+                });
+                return;
             }
+
+            let saga = maybe_saga.unwrap();
+            let result =
+                if let SagaRunState::Running { exec, .. } = &saga.run_state {
+                    exec.inject_error(node_id).await;
+                    Ok(())
+                } else {
+                    Err(anyhow!("saga is not running: {}", saga_id))
+                };
+            ack_tx.send(result).unwrap_or_else(|_| {
+                panic!("failed to send response to client")
+            });
         }
+        .boxed();
+        self.simple_futures.push(fut);
     }
 
     fn cmd_shutdown(&mut self) {
@@ -808,13 +859,11 @@ impl Sec {
         self.shutdown = true;
     }
 
-    fn saga_insert(
-        &mut self,
-        log: slog::Logger,
-        saga_id: SagaId,
-        template_params: Box<dyn TemplateParams>,
-        serialized_params: JsonValue,
-    ) -> Result<BoxFuture<'static, ()>, anyhow::Error> {
+    fn saga_insert(&mut self, rec: SagaInsertRecord) {
+        let saga_id = rec.saga_id;
+        let serialized_params = rec.serialized_params;
+        let ack_tx = rec.ack_tx;
+        let log = rec.log;
         let log_channel = self.log_tx.clone();
         let update_channel = self.update_tx.clone();
         let sec_hdl = SecSagaHdl { saga_id, log_channel, update_channel };
@@ -823,8 +872,15 @@ impl Sec {
         let (done_tx, done_rx) = oneshot::channel();
 
         /* Create the executor to run this saga. */
-        let exec =
-            template_params.into_exec(log.new(o!()), saga_id, sec_hdl)?;
+        let maybe_exec =
+            rec.template_params.into_exec(log.new(o!()), saga_id, sec_hdl);
+        if let Err(e) = maybe_exec {
+            ack_tx.send(Err(e)).unwrap_or_else(|_| {
+                panic!("failed to send response to SEC client")
+            });
+            return;
+        }
+        let exec = maybe_exec.unwrap();
         let run_state = Saga {
             id: saga_id,
             log,
@@ -847,12 +903,16 @@ impl Sec {
          * finish.  It should not be possible for the receive to fail because
          * the other side will not be closed while the saga is still running.
          */
-        Ok(async move {
-            done_rx
-                .await
-                .unwrap_or_else(|_| panic!("failed to wait for saga to finish"))
-        }
-        .boxed())
+        ack_tx
+            .send(Ok(async move {
+                done_rx.await.unwrap_or_else(|_| {
+                    panic!("failed to wait for saga to finish")
+                })
+            }
+            .boxed()))
+            .unwrap_or_else(|_| {
+                panic!("failed to send response to SEC client")
+            });
     }
 }
 
@@ -924,6 +984,19 @@ struct SecSagaHdlMsgLog {
     event: SagaNodeEvent,
     /** response channel */
     ack_tx: oneshot::Sender<()>,
+}
+
+/* XXX TODO-doc */
+/*
+ * XXX could probably be commonized with a struct that makes up the body of the
+ * CreateSaga message
+ */
+struct SagaInsertRecord {
+    log: slog::Logger,
+    saga_id: SagaId,
+    template_params: Box<dyn TemplateParams>,
+    serialized_params: JsonValue,
+    ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
 }
 
 /*
