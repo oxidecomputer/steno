@@ -568,20 +568,6 @@ enum SecStep {
     /** Start tracking a new saga, either as part of "create" or "resume"  */
     SagaInsert(SagaInsertData),
 
-    /** We're ready to provide a saga_create() failure response */
-    SagaCreateFail(
-        SecResponseWrap<Result<BoxFuture<'static, ()>, anyhow::Error>>,
-    ),
-
-    /** We're ready to provide a saga_get() response */
-    SagaViewReady(SecResponseWrap<Result<SagaView, ()>>),
-
-    /** We're ready to provide a saga_list() response */
-    SagaViewListReady(SecResponseWrap<Vec<SagaView>>),
-
-    /** We're ready to provide a saga_inject_error() response */
-    SagaErrorInjected(SecResponseWrap<Result<(), anyhow::Error>>),
-
     /** A saga has just finished. */
     SagaDone(SagaDoneData),
 }
@@ -620,12 +606,12 @@ struct Sec {
     log: slog::Logger,
     sagas: BTreeMap<SagaId, Saga>,
     sec_store: Arc<dyn SecStore>,
-    futures: FuturesUnordered<BoxFuture<'static, SecStep>>,
+    futures: FuturesUnordered<BoxFuture<'static, Option<SecStep>>>,
     cmd_rx: mpsc::Receiver<SecClientMsg>,
-    log_tx: mpsc::Sender<(SagaId, SecSagaHdlMsgLog)>,
-    log_rx: mpsc::Receiver<(SagaId, SecSagaHdlMsgLog)>,
-    update_tx: mpsc::Sender<(SagaId, SagaCachedState)>,
-    update_rx: mpsc::Receiver<(SagaId, SagaCachedState)>,
+    log_tx: mpsc::Sender<SagaLogEventData>,
+    log_rx: mpsc::Receiver<SagaLogEventData>,
+    update_tx: mpsc::Sender<SagaUpdateCacheData>,
+    update_rx: mpsc::Receiver<SagaUpdateCacheData>,
     shutdown: bool,
 }
 
@@ -668,7 +654,11 @@ impl Sec {
                  */
                 maybe_result = self.futures.next(),
                     if !self.futures.is_empty() => {
-                    self.dispatch_work(maybe_result.unwrap())
+                    /* This stream will never end. */
+                    let future_result = maybe_result.unwrap();
+                    if let Some(next_step) = future_result {
+                        self.dispatch_work(next_step);
+                    }
                 },
 
                 cmd_result = self.cmd_rx.recv() => {
@@ -676,31 +666,17 @@ impl Sec {
                 },
 
                 log_result = self.log_rx.recv() => {
-                    let (saga_id, logmsg) =
-                        log_result.expect("bad SecHdl message");
-                    // XXX do not want to wait here!
-                    self.sec_store.record_event(saga_id, &logmsg.event).await;
-                    /*
-                     * `send` can only fail if the other side of the channel
-                     * has closed.  That's illegal because the other side
-                     * should be waiting for our acknowledgement.
-                     */
-                    assert!(logmsg.ack_tx.send(()).is_ok());
-                },
+                    /* Ignore errors from a closing channel. */
+                    if let Some(log_data) = log_result {
+                        self.dispatch_exec_log(log_data);
+                    }
+                }
 
                 update_result = self.update_rx.recv() => {
-                    /*
-                     * We may get an error when the channel is closing due to
-                     * execution completion.  That's fine -- just ignore it.
-                     */
-                    if let Some((saga_id, cached_state)) = update_result {
-                        /*
-                         * TODO-robustness this should be retried as needed?
-                         */
-                        self
-                            .sec_store
-                            .saga_update(saga_id, &cached_state)
-                            .await;
+                    /* Ignore errors from a closing channel. */
+                    if let Some(update_data) = update_result {
+                        /* TODO-robustness this should be retried as needed? */
+                        self.dispatch_exec_cache_update(update_data);
                     }
                 },
             }
@@ -710,22 +686,18 @@ impl Sec {
     fn dispatch_work(&mut self, step: SecStep) {
         match step {
             SecStep::SagaInsert(insert_data) => self.saga_insert(insert_data),
-            SecStep::SagaViewReady(r) => self.client_respond(r),
-            SecStep::SagaViewListReady(r) => self.client_respond(r),
-            SecStep::SagaErrorInjected(r) => self.client_respond(r),
             SecStep::SagaDone(done_data) => self.saga_finished(done_data),
-            SecStep::SagaCreateFail(r) => self.client_respond(r),
         }
     }
 
-    fn client_respond<T>(&self, response_wrap: SecResponseWrap<T>) {
+    fn client_respond<T>(
+        log: &slog::Logger,
+        response_wrap: SecResponseWrap<T>,
+    ) {
         let ack_tx = response_wrap.ack_tx;
         let value = response_wrap.value;
         if let Err(_) = ack_tx.send(value) {
-            warn!(
-                &self.log,
-                "unexpectedly failed to send response to SEC client"
-            )
+            warn!(log, "unexpectedly failed to send response to SEC client");
         }
     }
 
@@ -745,13 +717,16 @@ impl Sec {
         let maybe_exec =
             rec.template_params.into_exec(log.new(o!()), saga_id, sec_hdl);
         if let Err(e) = maybe_exec {
-            self.client_respond(SecResponseWrap { ack_tx, value: Err(e) });
+            Sec::client_respond(
+                &log,
+                SecResponseWrap { ack_tx, value: Err(e) },
+            );
             return;
         }
         let exec = maybe_exec.unwrap();
         let run_state = Saga {
             id: saga_id,
-            log,
+            log: log.new(o!()),
             params: serialized_params,
             run_state: SagaRunState::Running {
                 exec: Arc::clone(&exec),
@@ -761,11 +736,11 @@ impl Sec {
         assert!(self.sagas.insert(saga_id, run_state).is_none());
         let saga_future = async move {
             exec.run().await;
-            SecStep::SagaDone(SagaDoneData {
+            Some(SecStep::SagaDone(SagaDoneData {
                 saga_id,
                 result: exec.result(),
                 status: exec.status().await,
-            })
+            }))
         }
         .boxed();
         self.futures.push(saga_future);
@@ -775,15 +750,18 @@ impl Sec {
          * finish.  It should not be possible for the receive to fail because
          * the other side will not be closed while the saga is still running.
          */
-        self.client_respond(SecResponseWrap {
-            ack_tx,
-            value: Ok(async move {
-                done_rx.await.unwrap_or_else(|_| {
-                    panic!("failed to wait for saga to finish")
-                })
-            }
-            .boxed()),
-        });
+        Sec::client_respond(
+            &log,
+            SecResponseWrap {
+                ack_tx,
+                value: Ok(async move {
+                    done_rx.await.unwrap_or_else(|_| {
+                        panic!("failed to wait for saga to finish")
+                    })
+                }
+                .boxed()),
+            },
+        );
     }
 
     fn saga_finished(&mut self, done_data: SagaDoneData) {
@@ -791,7 +769,10 @@ impl Sec {
         let saga = self.sagas.remove(&saga_id).unwrap();
         info!(&saga.log, "saga finished");
         if let SagaRunState::Running { waiter, .. } = saga.run_state {
-            self.client_respond(SecResponseWrap { ack_tx: waiter, value: () });
+            Sec::client_respond(
+                &saga.log,
+                SecResponseWrap { ack_tx: waiter, value: () },
+            );
             self.sagas.insert(
                 saga_id,
                 Saga {
@@ -811,6 +792,54 @@ impl Sec {
             );
         }
     }
+
+    /*
+     * Dispatch functions for SagaExecutor messages
+     */
+
+    fn dispatch_exec_log(&mut self, log_data: SagaLogEventData) {
+        let log = self.log.new(o!());
+        debug!(&log, "saga log event";
+            "saga_id" => log_data.saga_id.to_string(),
+            "new_state" => ?log_data.event
+        );
+        let store = Arc::clone(&self.sec_store);
+        let future = async move {
+            store.record_event(log_data.saga_id, &log_data.event).await;
+            Sec::client_respond(
+                &log,
+                SecResponseWrap { ack_tx: log_data.ack_tx, value: () },
+            );
+            None
+        }
+        .boxed();
+        self.futures.push(future);
+    }
+
+    fn dispatch_exec_cache_update(&mut self, update_data: SagaUpdateCacheData) {
+        info!(&self.log, "update for saga cached state";
+            "saga_id" => update_data.saga_id.to_string(),
+            "new_state" => ?update_data.updated_state
+        );
+        let log = self.log.new(o!());
+        let store = Arc::clone(&self.sec_store);
+        self.futures.push(
+            async move {
+                store
+                    .saga_update(
+                        update_data.saga_id,
+                        &update_data.updated_state,
+                    )
+                    .await;
+                None
+            }
+            .boxed(),
+        );
+    }
+
+    /*
+     * Dispatch functions for consumer client messages
+     */
 
     fn dispatch_client_message(&mut self, msg_result: Option<SecClientMsg>) {
         if msg_result.is_none() {
@@ -901,18 +930,19 @@ impl Sec {
                 .await
                 .context("creating saga record");
             if let Err(error) = result {
-                SecStep::SagaCreateFail(SecResponseWrap {
-                    ack_tx,
-                    value: Err(error),
-                })
+                Sec::client_respond(
+                    &log,
+                    SecResponseWrap { ack_tx, value: Err(error) },
+                );
+                None
             } else {
-                SecStep::SagaInsert(SagaInsertData {
+                Some(SecStep::SagaInsert(SagaInsertData {
                     ack_tx,
                     log,
                     saga_id,
                     template_params,
                     serialized_params,
-                })
+                }))
             }
         }
         .boxed();
@@ -941,6 +971,7 @@ impl Sec {
     fn cmd_saga_list(&self, ack_tx: oneshot::Sender<Vec<SagaView>>) {
         trace!(&self.log, "saga_list");
         /* TODO-cleanup */
+        let log = self.log.new(o!());
         let futures =
             self.sagas.values().map(SagaView::from_saga).collect::<Vec<_>>();
         self.futures.push(
@@ -949,14 +980,11 @@ impl Sec {
                     .then(|f| f)
                     .collect::<Vec<SagaView>>()
                     .await;
-                /*
-                 * XXX For several of these, we could just send the response
-                 * right away and return no SagaStep.
-                 */
-                SecStep::SagaViewListReady(SecResponseWrap {
-                    ack_tx,
-                    value: views,
-                })
+                Sec::client_respond(
+                    &log,
+                    SecResponseWrap { ack_tx, value: views },
+                );
+                None
             }
             .boxed(),
         );
@@ -969,18 +997,23 @@ impl Sec {
     ) {
         trace!(&self.log, "saga_get"; "saga_id" => %saga_id);
         let maybe_saga = self.sagas.get(&saga_id).ok_or(());
-        if let Err(e) = maybe_saga {
-            self.client_respond(SecResponseWrap { ack_tx, value: Err(()) });
+        if let Err(_) = maybe_saga {
+            Sec::client_respond(
+                &self.log,
+                SecResponseWrap { ack_tx, value: Err(()) },
+            );
             return;
         }
 
         let fut = SagaView::from_saga(maybe_saga.unwrap());
+        let log = self.log.new(o!());
         let the_fut = async move {
             let saga_view = fut.await;
-            SecStep::SagaViewReady(SecResponseWrap {
-                ack_tx,
-                value: Ok(saga_view),
-            })
+            Sec::client_respond(
+                &log,
+                SecResponseWrap { ack_tx, value: Ok(saga_view) },
+            );
+            None
         };
         self.futures.push(the_fut.boxed());
     }
@@ -1003,7 +1036,10 @@ impl Sec {
             .ok_or_else(|| anyhow!("no such saga: {}", saga_id));
 
         if let Err(e) = maybe_saga {
-            self.client_respond(SecResponseWrap { ack_tx, value: Err(e) });
+            Sec::client_respond(
+                &self.log,
+                SecResponseWrap { ack_tx, value: Err(e) },
+            );
             return;
         }
 
@@ -1011,18 +1047,23 @@ impl Sec {
         let exec = if let SagaRunState::Running { exec, .. } = &saga.run_state {
             Arc::clone(&exec)
         } else {
-            self.client_respond(SecResponseWrap {
-                ack_tx,
-                value: Err(anyhow!("saga is not running: {}", saga_id)),
-            });
+            Sec::client_respond(
+                &self.log,
+                SecResponseWrap {
+                    ack_tx,
+                    value: Err(anyhow!("saga is not running: {}", saga_id)),
+                },
+            );
             return;
         };
+        let log = self.log.new(o!());
         let fut = async move {
             exec.inject_error(node_id).await;
-            SecStep::SagaErrorInjected(SecResponseWrap {
-                ack_tx: ack_tx,
-                value: Ok(()),
-            })
+            Sec::client_respond(
+                &log,
+                SecResponseWrap { ack_tx: ack_tx, value: Ok(()) },
+            );
+            None
         }
         .boxed();
         self.futures.push(fut);
@@ -1070,8 +1111,8 @@ pub enum SagaRunState {
 #[derive(Debug)]
 pub struct SecSagaHdl {
     saga_id: SagaId,
-    log_channel: mpsc::Sender<(SagaId, SecSagaHdlMsgLog)>,
-    update_channel: mpsc::Sender<(SagaId, SagaCachedState)>,
+    log_channel: mpsc::Sender<SagaLogEventData>,
+    update_channel: mpsc::Sender<SagaUpdateCacheData>,
 }
 
 impl SecSagaHdl {
@@ -1082,7 +1123,7 @@ impl SecSagaHdl {
          */
         let (ack_tx, ack_rx) = oneshot::channel();
         self.log_channel
-            .send((self.saga_id, SecSagaHdlMsgLog { event, ack_tx }))
+            .send(SagaLogEventData { saga_id: self.saga_id, event, ack_tx })
             .await
             .unwrap();
         ack_rx.await.unwrap()
@@ -1098,7 +1139,13 @@ impl SecSagaHdl {
         /*
          * XXX How does shutdown interact here (if these channels get closed)?
          */
-        self.update_channel.send((self.saga_id, update)).await.unwrap();
+        self.update_channel
+            .send(SagaUpdateCacheData {
+                saga_id: self.saga_id,
+                updated_state: update,
+            })
+            .await
+            .unwrap();
     }
 }
 
@@ -1107,11 +1154,25 @@ impl SecSagaHdl {
  * an event to the saga log.
  */
 #[derive(Debug)]
-struct SecSagaHdlMsgLog {
+struct SagaLogEventData {
+    /** saga being updated */
+    saga_id: SagaId,
     /** event to be recorded to the saga log */
     event: SagaNodeEvent,
     /** response channel */
     ack_tx: oneshot::Sender<()>,
+}
+
+/**
+ * Message from [`SagaExecutor`'] to [`Sec`] (via [`SecSagaHdl`]) to update the
+ * cached state of a saga.
+ */
+#[derive(Debug)]
+struct SagaUpdateCacheData {
+    /** saga being updated */
+    saga_id: SagaId,
+    /** updated state */
+    updated_state: SagaCachedState,
 }
 
 /*
