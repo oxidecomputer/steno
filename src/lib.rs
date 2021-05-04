@@ -84,7 +84,7 @@ pub use store::SecStore;
  * type.  This ought to be a sealed trait where this function is private or
  * something.
  */
-pub use sec::SecSagaHdl;
+pub use sec::SecExecClient;
 
 #[macro_use]
 extern crate slog;

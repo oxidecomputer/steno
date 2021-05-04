@@ -486,7 +486,7 @@ trait TemplateParams: Send + fmt::Debug {
         self: Box<Self>,
         log: slog::Logger,
         saga_id: SagaId,
-        sec_hdl: SecSagaHdl,
+        sec_hdl: SecExecClient,
     ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error>;
 }
 
@@ -512,7 +512,7 @@ where
         self: Box<Self>,
         log: slog::Logger,
         saga_id: SagaId,
-        sec_hdl: SecSagaHdl,
+        sec_hdl: SecExecClient,
     ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
         Ok(Arc::new(SagaExecutor::new(
             log,
@@ -549,7 +549,7 @@ where
         self: Box<Self>,
         log: slog::Logger,
         saga_id: SagaId,
-        sec_hdl: SecSagaHdl,
+        sec_hdl: SecExecClient,
     ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
         Ok(self.template.recover(
             log,
@@ -563,49 +563,90 @@ where
 }
 
 /*
- * SEC server side (background task)
+ * SEC internal client side (handle used by SagaExecutor)
  */
 
 /**
- * Describes the next step that an SEC needs to take in order to process a
- * command, execute a saga, or any other asynchronous work
- *
- * This provides a uniform interface that can be processed in the body of the
- * SEC loop.
- *
- * In some cases, it would seem clearer to write straight-line async code to
- * handle a complete client request.  However, that code would wind up borrowing
- * the Sec (sometimes mutably) for the duration of async work.  It's important
- * to avoid that here in order to avoid deadlock or blocking all operations in
- * pathological conditions (e.g., when writes to the database hang).
+ * Handle used by [`SagaExecutor`] for sending messages back to the SEC
  */
-enum SecStep {
-    /** Start tracking a new saga, either as part of "create" or "resume"  */
-    SagaInsert(SagaInsertData),
-
-    /** A saga has just finished. */
-    SagaDone(SagaDoneData),
+/* XXX TODO-cleanup This should be pub(crate).  See lib.rs. */
+#[derive(Debug)]
+pub struct SecExecClient {
+    saga_id: SagaId,
+    exec_tx: mpsc::Sender<SecExecMsg>,
 }
 
-/** Data associated with [`SecStep::SagaInsert`] */
+impl SecExecClient {
+    /** Write `event` to the saga log */
+    pub async fn record(&self, event: SagaNodeEvent) {
+        /* XXX How does shutdown interact (if this channel gets closed)? */
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.exec_tx
+            .send(SecExecMsg::LogEvent(SagaLogEventData {
+                saga_id: self.saga_id,
+                event,
+                ack_tx,
+            }))
+            .await
+            .unwrap();
+        ack_rx.await.unwrap()
+    }
+
+    /**
+     * Update the cached state for the saga
+     *
+     * This does not block on any write to persistent storage because that is
+     * not required for correctness here.
+     */
+    pub async fn saga_update(&self, update: SagaCachedState) {
+        /* XXX How does shutdown interact (if this channel gets closed)? */
+        self.exec_tx
+            .send(SecExecMsg::UpdateCachedState(SagaUpdateCacheData {
+                saga_id: self.saga_id,
+                updated_state: update,
+            }))
+            .await
+            .unwrap();
+    }
+}
+
+/**
+ * Message passed from the [`SecExecClient`] to the [`Sec`]
+ */
+#[derive(Debug)]
+enum SecExecMsg {
+    /** Record an event to the saga log */
+    LogEvent(SagaLogEventData),
+
+    /** Update the cached state of a saga */
+    UpdateCachedState(SagaUpdateCacheData),
+    // /** Create a child saga */
+    // CreateChildSaga(SagaCreateChildData),
+}
+
+/** See [`SecExecMsg::LogEvent`] */
+#[derive(Debug)]
+struct SagaLogEventData {
+    /** saga being updated */
+    saga_id: SagaId,
+    /** event to be recorded to the saga log */
+    event: SagaNodeEvent,
+    /** response channel */
+    ack_tx: oneshot::Sender<()>,
+}
+
+/** See [`SecExecMsg::UpdateCachedState`] */
+#[derive(Debug)]
+struct SagaUpdateCacheData {
+    /** saga being updated */
+    saga_id: SagaId,
+    /** updated state */
+    updated_state: SagaCachedState,
+}
+
 /*
- * TODO-cleanup This could probably be commonized with a struct that makes up
- * the body of the CreateSaga message.
+ * SEC server side (background task)
  */
-struct SagaInsertData {
-    log: slog::Logger,
-    saga_id: SagaId,
-    template_params: Box<dyn TemplateParams>,
-    serialized_params: JsonValue,
-    ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
-}
-
-/** Data associated with [`SecStep::SagaDone`] */
-struct SagaDoneData {
-    saga_id: SagaId,
-    result: SagaResult,
-    status: SagaExecStatus,
-}
 
 /**
  * The `Sec` (Saga Execution Coordinator) is responsible for tracking and
@@ -728,7 +769,7 @@ impl Sec {
         let ack_tx = rec.ack_tx;
         let log = rec.log;
         let exec_tx = self.exec_tx.clone();
-        let sec_hdl = SecSagaHdl { saga_id, exec_tx };
+        let sec_hdl = SecExecClient { saga_id, exec_tx };
 
         /* Prepare a channel used to wait for the saga to finish. */
         let (done_tx, done_rx) = oneshot::channel();
@@ -1068,6 +1109,9 @@ impl Sec {
     }
 }
 
+/**
+ * Represents the internal state of a saga in the [`Sec`]
+ */
 struct Saga {
     id: SagaId,
     log: slog::Logger,
@@ -1094,82 +1138,44 @@ pub enum SagaRunState {
 }
 
 /**
- * Handle used by [`SagaExecutor`] for sending messages back to the SEC
+ * Describes the next step that an SEC needs to take in order to process a
+ * command, execute a saga, or any other asynchronous work
+ *
+ * This provides a uniform interface that can be processed in the body of the
+ * SEC loop.
+ *
+ * In some cases, it would seem clearer to write straight-line async code to
+ * handle a complete client request.  However, that code would wind up borrowing
+ * the Sec (sometimes mutably) for the duration of async work.  It's important
+ * to avoid that here in order to avoid deadlock or blocking all operations in
+ * pathological conditions (e.g., when writes to the database hang).
  */
-/* XXX TODO-cleanup This should be pub(crate).  See lib.rs. */
-#[derive(Debug)]
-pub struct SecSagaHdl {
-    saga_id: SagaId,
-    exec_tx: mpsc::Sender<SecExecMsg>,
+enum SecStep {
+    /** Start tracking a new saga, either as part of "create" or "resume"  */
+    SagaInsert(SagaInsertData),
+
+    /** A saga has just finished. */
+    SagaDone(SagaDoneData),
 }
 
-impl SecSagaHdl {
-    /** Write `event` to the saga log */
-    pub async fn record(&self, event: SagaNodeEvent) {
-        /* XXX How does shutdown interact (if this channel gets closed)? */
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.exec_tx
-            .send(SecExecMsg::LogEvent(SagaLogEventData {
-                saga_id: self.saga_id,
-                event,
-                ack_tx,
-            }))
-            .await
-            .unwrap();
-        ack_rx.await.unwrap()
-    }
-
-    /**
-     * Update the cached state for the saga
-     *
-     * This does not block on any write to persistent storage because that is
-     * not required for correctness here.
-     */
-    pub async fn saga_update(&self, update: SagaCachedState) {
-        /* XXX How does shutdown interact (if this channel gets closed)? */
-        self.exec_tx
-            .send(SecExecMsg::UpdateCachedState(SagaUpdateCacheData {
-                saga_id: self.saga_id,
-                updated_state: update,
-            }))
-            .await
-            .unwrap();
-    }
-}
-
-/**
- * Message passed from the [`SecSagaHdl`] (held by a [`SagaExecutor`]) to the
- * [`Sec`]
+/** Data associated with [`SecStep::SagaInsert`] */
+/*
+ * TODO-cleanup This could probably be commonized with a struct that makes up
+ * the body of the CreateSaga message.
  */
-#[derive(Debug)]
-enum SecExecMsg {
-    /** Record an event to the saga log */
-    LogEvent(SagaLogEventData),
-
-    /** Update the cached state of a saga */
-    UpdateCachedState(SagaUpdateCacheData),
-    // /** Create a child saga */
-    // CreateChildSaga(SagaCreateChildData),
+struct SagaInsertData {
+    log: slog::Logger,
+    saga_id: SagaId,
+    template_params: Box<dyn TemplateParams>,
+    serialized_params: JsonValue,
+    ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
 }
 
-/** See [`SecExecMsg::LogEvent`] */
-#[derive(Debug)]
-struct SagaLogEventData {
-    /** saga being updated */
+/** Data associated with [`SecStep::SagaDone`] */
+struct SagaDoneData {
     saga_id: SagaId,
-    /** event to be recorded to the saga log */
-    event: SagaNodeEvent,
-    /** response channel */
-    ack_tx: oneshot::Sender<()>,
-}
-
-/** See [`SecExecMsg::UpdateCachedState`] */
-#[derive(Debug)]
-struct SagaUpdateCacheData {
-    /** saga being updated */
-    saga_id: SagaId,
-    /** updated state */
-    updated_state: SagaCachedState,
+    result: SagaResult,
+    status: SagaExecStatus,
 }
 
 /*

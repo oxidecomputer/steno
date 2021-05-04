@@ -9,7 +9,7 @@ use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
 use crate::saga_template::SagaId;
 use crate::saga_template::SagaTemplateMetadata;
-use crate::sec::SecSagaHdl;
+use crate::sec::SecExecClient;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
 use crate::SagaTemplate;
@@ -382,7 +382,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         saga_template: Arc<SagaTemplate<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
         user_saga_params: UserType::SagaParamsType,
-        sec_hdl: SecSagaHdl,
+        sec_hdl: SecExecClient,
     ) -> SagaExecutor<UserType> {
         let sglog = SagaLog::new_empty(saga_id);
 
@@ -412,7 +412,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         saga_template: Arc<SagaTemplate<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
         user_saga_params: UserType::SagaParamsType,
-        sec_hdl: SecSagaHdl,
+        sec_hdl: SecExecClient,
         sglog: SagaLog,
     ) -> Result<SagaExecutor<UserType>, anyhow::Error> {
         /*
@@ -1281,7 +1281,7 @@ struct SagaExecLiveState<UserType: SagaType> {
     /** Unique identifier for this saga (an execution of a saga template) */
     saga_id: SagaId,
 
-    sec_hdl: SecSagaHdl,
+    sec_hdl: SecExecClient,
 
     /** Overall execution state */
     exec_state: SagaState,

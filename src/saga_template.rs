@@ -80,7 +80,7 @@ pub trait SagaTemplateGeneric<T>: fmt::Debug + Send + Sync {
         saga_id: SagaId,
         user_context: Arc<T>,
         params: serde_json::Value,
-        sec: crate::sec::SecSagaHdl,
+        sec: crate::sec::SecExecClient,
         sglog: crate::SagaLog,
     ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>;
 }
@@ -95,7 +95,7 @@ where
         saga_id: SagaId,
         user_context: Arc<ST::ExecContextType>,
         params: serde_json::Value,
-        sec: crate::sec::SecSagaHdl,
+        sec: crate::sec::SecExecClient,
         sglog: crate::SagaLog,
     ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>
     where
