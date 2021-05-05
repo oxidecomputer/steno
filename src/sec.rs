@@ -3,6 +3,8 @@
  */
 /* XXX TODO-doc This whole file */
 
+#![allow(clippy::large_enum_variant)]
+
 use crate::saga_exec::SagaExecutor;
 use crate::store::SagaCachedState;
 use crate::store::SagaCreateParams;
@@ -586,14 +588,14 @@ where
         saga_id: SagaId,
         sec_hdl: SecExecClient,
     ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
-        Ok(self.template.recover(
+        self.template.recover(
             log,
             saga_id,
             self.uctx,
             self.params,
             sec_hdl,
             self.saga_log,
-        )?)
+        )
     }
 }
 
