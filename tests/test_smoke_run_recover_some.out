@@ -8,7 +8,7 @@ recovered state
               +-- done: ServerAlloc (subsaga) (produces "server_id")
 +-- stage  3: done: InstanceConfigure (produces "instance_configure")
 +-- stage  4: done: VolumeAttach (produces "volume_attach")
-+-- stage  5: working: InstanceBoot (produces "instance_boot")
++-- stage  5: queued-todo: InstanceBoot (produces "instance_boot")
 +-- stage  6: blocked: Print (produces "print")
 
 

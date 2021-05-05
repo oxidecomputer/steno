@@ -1757,7 +1757,7 @@ impl<UserType: SagaType> ActionContext<UserType> {
             let saga_view = live_state.sec_hdl.saga_get(saga_id).await.unwrap();
             match saga_view.state {
                 SagaStateView::Done { result, .. } => result,
-                SagaStateView::Running { .. } => {
+                SagaStateView::Ready { .. } | SagaStateView::Running { .. } => {
                     panic!("future returned too early")
                 }
             }

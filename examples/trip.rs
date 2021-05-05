@@ -83,7 +83,7 @@ async fn book_trip(
     //
     let creator = "myself";
 
-    // Execute the saga.
+    // Create the saga.
     let saga_future = sec
         .saga_create(
             saga_id,
@@ -94,6 +94,9 @@ async fn book_trip(
         )
         .await
         .expect("failed to create saga");
+
+    // Set it running.
+    sec.saga_start(saga_id).await.expect("failed to start saga running");
 
     //
     // Wait for the saga to finish running.  This could take a while, depending

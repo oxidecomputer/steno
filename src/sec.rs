@@ -187,6 +187,18 @@ impl SecClient {
     }
 
     /**
+     * Start running (or resume running) a saga that was created with
+     * [`SecClient::saga_create()`] or [`SecClient::saga_resume()`].
+     */
+    pub async fn saga_start(
+        &self,
+        saga_id: SagaId,
+    ) -> Result<(), anyhow::Error> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sec_cmd(ack_rx, SecClientMsg::SagaStart { ack_tx, saga_id }).await
+    }
+
+    /**
      * List known sagas
      */
     pub async fn saga_list(&self) -> Vec<SagaView> {
@@ -304,6 +316,11 @@ impl SagaView {
 /** State-specific parts of a consumer's view of a saga */
 #[derive(Debug, Clone)]
 pub enum SagaStateView {
+    /** The saga is ready to start running */
+    Ready {
+        /** initial execution status */
+        status: SagaExecStatus,
+    },
     /** The saga is still running */
     Running {
         /** current execution status */
@@ -323,11 +340,13 @@ impl SagaStateView {
         run_state: &SagaRunState,
     ) -> impl Future<Output = SagaStateView> {
         enum Which {
+            Ready(Arc<dyn SagaExecManager>),
             Running(Arc<dyn SagaExecManager>),
             Done(SagaExecStatus, SagaResult),
         }
 
         let which = match run_state {
+            SagaRunState::Ready { exec, .. } => Which::Ready(Arc::clone(&exec)),
             SagaRunState::Running { exec, .. } => {
                 Which::Running(Arc::clone(&exec))
             }
@@ -338,6 +357,9 @@ impl SagaStateView {
 
         async move {
             match which {
+                Which::Ready(exec) => {
+                    SagaStateView::Ready { status: exec.status().await }
+                }
                 Which::Running(exec) => {
                     SagaStateView::Running { status: exec.status().await }
                 }
@@ -351,6 +373,7 @@ impl SagaStateView {
     /** Returns the status summary for this saga */
     pub fn status(&self) -> &SagaExecStatus {
         match self {
+            SagaStateView::Ready { status } => &status,
             SagaStateView::Running { status } => &status,
             SagaStateView::Done { status, .. } => &status,
         }
@@ -405,6 +428,14 @@ enum SecClientMsg {
         template_name: String,
         /** serialized saga parameters */
         serialized_params: JsonValue,
+    },
+
+    /** Start (or resume) running a saga */
+    SagaStart {
+        /** response channel */
+        ack_tx: oneshot::Sender<Result<(), anyhow::Error>>,
+        /** id of the saga to start running */
+        saga_id: SagaId,
     },
 
     /** List all sagas */
@@ -474,6 +505,9 @@ impl fmt::Debug for SecClientMsg {
                 .field("node_Id", node_id)
                 .finish(),
             SecClientMsg::Shutdown { .. } => f.write_str("Shutdown"),
+            SecClientMsg::SagaStart { saga_id, .. } => {
+                f.debug_struct("SagaStart").field("saga_id", saga_id).finish()
+            }
         }
     }
 }
@@ -876,38 +910,88 @@ impl Sec {
             id: saga_id,
             log: log.new(o!()),
             params: serialized_params,
-            run_state: SagaRunState::Running {
+            run_state: SagaRunState::Ready {
                 exec: Arc::clone(&exec),
                 waiter: done_tx,
             },
         };
         assert!(self.sagas.insert(saga_id, run_state).is_none());
-        let saga_future = async move {
-            exec.run().await;
-            Some(SecStep::SagaDone(SagaDoneData {
-                saga_id,
-                result: exec.result(),
-                status: exec.status().await,
-            }))
-        }
-        .boxed();
-        self.futures.push(saga_future);
 
-        /*
-         * Return a Future that the consumer can use to wait for the saga to
-         * finish.  It should not be possible for the receive to fail because
-         * the other side will not be closed while the saga is still running.
-         */
+        if rec.autostart {
+            self.do_saga_start(saga_id).unwrap();
+        }
+
+        /* Return a Future that the consumer can use to wait for the saga. */
         Sec::client_respond(
             &log,
             ack_tx,
             Ok(async move {
+                /*
+                 * It should not be possible for the receive to fail because the
+                 * other side will not be closed while the saga is still
+                 * running.
+                 */
                 done_rx.await.unwrap_or_else(|_| {
                     panic!("failed to wait for saga to finish")
                 })
             }
             .boxed()),
         );
+    }
+
+    fn cmd_saga_start(
+        &mut self,
+        ack_tx: oneshot::Sender<Result<(), anyhow::Error>>,
+        saga_id: SagaId,
+    ) {
+        let result = self.do_saga_start(saga_id);
+        Sec::client_respond(&self.log, ack_tx, result);
+    }
+
+    fn do_saga_start(&mut self, saga_id: SagaId) -> Result<(), anyhow::Error> {
+        /* XXX common function for producing the error */
+        let saga = self
+            .sagas
+            .remove(&saga_id)
+            .ok_or_else(|| anyhow!("no such saga: {}", saga_id))?;
+
+        let new_saga = Saga {
+            id: saga_id,
+            log: saga.log,
+            params: saga.params,
+            run_state: match saga.run_state {
+                SagaRunState::Ready { exec, waiter } => {
+                    SagaRunState::Running { exec, waiter }
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "saga not in \"ready\" state: {}",
+                        saga_id
+                    ))
+                }
+            },
+        };
+
+        // XXX clean this up
+        let exec = match &new_saga.run_state {
+            SagaRunState::Running { exec, .. } => Arc::clone(&exec),
+            _ => unimplemented!(),
+        };
+        self.sagas.insert(saga_id, new_saga);
+
+        self.futures.push(
+            async move {
+                exec.run().await;
+                Some(SecStep::SagaDone(SagaDoneData {
+                    saga_id,
+                    result: exec.result(),
+                    status: exec.status().await,
+                }))
+            }
+            .boxed(),
+        );
+
+        Ok(())
     }
 
     fn saga_finished(&mut self, done_data: SagaDoneData) {
@@ -972,6 +1056,9 @@ impl Sec {
                     serialized_params,
                 );
             }
+            SecClientMsg::SagaStart { ack_tx, saga_id } => {
+                self.cmd_saga_start(ack_tx, saga_id);
+            }
             SecClientMsg::SagaList { ack_tx } => {
                 self.cmd_saga_list(ack_tx);
             }
@@ -992,6 +1079,25 @@ impl Sec {
         template_params: Box<dyn TemplateParams>,
         template_name: String,
         serialized_params: JsonValue,
+    ) {
+        self.do_saga_create(
+            ack_tx,
+            saga_id,
+            template_params,
+            template_name,
+            serialized_params,
+            false,
+        );
+    }
+
+    fn do_saga_create(
+        &mut self,
+        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+        saga_id: SagaId,
+        template_params: Box<dyn TemplateParams>,
+        template_name: String,
+        serialized_params: JsonValue,
+        autostart: bool,
     ) {
         let log = self.log.new(o!(
             "saga_id" => saga_id.to_string(),
@@ -1026,6 +1132,7 @@ impl Sec {
                     saga_id,
                     template_params,
                     serialized_params,
+                    autostart,
                 }))
             }
         }
@@ -1056,6 +1163,7 @@ impl Sec {
             saga_id,
             template_params,
             serialized_params,
+            autostart: false,
         })
     }
 
@@ -1123,15 +1231,17 @@ impl Sec {
         }
 
         let saga = maybe_saga.unwrap();
-        let exec = if let SagaRunState::Running { exec, .. } = &saga.run_state {
-            Arc::clone(&exec)
-        } else {
-            Sec::client_respond(
-                &self.log,
-                ack_tx,
-                Err(anyhow!("saga is not running: {}", saga_id)),
-            );
-            return;
+        let exec = match &saga.run_state {
+            SagaRunState::Ready { exec, .. } => Arc::clone(&exec),
+            SagaRunState::Running { exec, .. } => Arc::clone(&exec),
+            SagaRunState::Done { .. } => {
+                Sec::client_respond(
+                    &self.log,
+                    ack_tx,
+                    Err(anyhow!("saga is not running: {}", saga_id)),
+                );
+                return;
+            }
         };
         let log = self.log.new(o!());
         let fut = async move {
@@ -1225,12 +1335,14 @@ impl Sec {
          * deterministic.
          */
         let params = child.create_params;
-        self.cmd_saga_create(
+        let saga_id = params.saga_id;
+        self.do_saga_create(
             params.ack_tx,
-            params.saga_id,
+            saga_id,
             params.template_params,
             params.template_name,
             params.serialized_params,
+            true,
         );
     }
 
@@ -1251,6 +1363,13 @@ struct Saga {
 
 #[derive(Debug)]
 pub enum SagaRunState {
+    /** Saga is ready to be run */
+    Ready {
+        /** Handle to executor (for status, etc.) */
+        exec: Arc<dyn SagaExecManager>,
+        /** Notify when the saga is done */
+        waiter: oneshot::Sender<()>,
+    },
     /** Saga is currently running */
     Running {
         /** Handle to executor (for status, etc.) */
@@ -1299,6 +1418,7 @@ struct SagaInsertData {
     template_params: Box<dyn TemplateParams>,
     serialized_params: JsonValue,
     ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+    autostart: bool,
 }
 
 /** Data associated with [`SecStep::SagaDone`] */
