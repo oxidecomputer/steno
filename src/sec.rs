@@ -287,9 +287,11 @@ impl Drop for SecClient {
 }
 
 /** External consumer's view of a saga */
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 pub struct SagaView {
     pub id: SagaId,
+
+    #[serde(skip)] // XXX impl an appropriate Serialize here
     pub state: SagaStateView,
 
     params: JsonValue,

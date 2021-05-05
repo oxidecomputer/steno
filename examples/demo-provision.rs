@@ -131,8 +131,6 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     .await
     .unwrap();
 
-    /* XXX need to prevent it from going and running the saga */
-
     let saga = sec.saga_get(saga_id).await.unwrap();
     let status = saga.state.status();
     println!("{}", status);
