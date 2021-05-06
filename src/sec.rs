@@ -633,16 +633,17 @@ impl SecExecClient {
      *
      * This does not block on any write to persistent storage because that is
      * not required for correctness here.
-     * XXX Is this called anywhere?!  We probably _should_ block on this for
-     * consistency and hygiene.  Then we can put the ack_rx.await into
-     * self.sec_send().
+     * XXX We can put the ack_rx.await into self.sec_send().
      */
     pub async fn saga_update(&self, update: SagaCachedState) {
+        let (ack_tx, ack_rx) = oneshot::channel();
         self.sec_send(SecExecMsg::UpdateCachedState(SagaUpdateCacheData {
+            ack_tx,
             saga_id: self.saga_id,
             updated_state: update,
         }))
         .await;
+        ack_rx.await.unwrap();
     }
 
     /**
@@ -734,6 +735,8 @@ struct SagaLogEventData {
 /** See [`SecExecMsg::UpdateCachedState`] */
 #[derive(Debug)]
 struct SagaUpdateCacheData {
+    /** response channel */
+    ack_tx: oneshot::Sender<()>,
     /** saga being updated */
     saga_id: SagaId,
     /** updated state */
@@ -1317,9 +1320,9 @@ impl Sec {
             "saga_id" => update_data.saga_id.to_string(),
             "new_state" => ?update_data.updated_state
         );
-        store
-            .saga_update(update_data.saga_id, update_data.updated_state)
-            .await;
+        let ack_tx = update_data.ack_tx;
+        store.saga_update(update_data.saga_id, update_data.updated_state).await;
+        Sec::client_respond(&log, ack_tx, ());
         None
     }
 

@@ -10,6 +10,7 @@ use crate::saga_log::SagaNodeLoadStatus;
 use crate::saga_template::SagaId;
 use crate::saga_template::SagaTemplateMetadata;
 use crate::sec::SecExecClient;
+use crate::SagaCachedState;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
 use crate::SagaStateView;
@@ -279,7 +280,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
  * Execution state for the saga overall
  */
 // XXX redundant with elsewhere?
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum SagaState {
     Running,
     Unwinding,
@@ -742,6 +743,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             let live_state = self.live_state.lock().await;
             if live_state.exec_state == SagaState::Done {
                 self.finish_tx.send(()).expect("failed to send finish message");
+                live_state.sec_hdl.saga_update(SagaCachedState::Done).await;
                 return;
             }
         }
@@ -782,7 +784,17 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             task.await.expect("node task failed unexpectedly");
 
             let mut live_state = self.live_state.lock().await;
+            let prev_state = live_state.exec_state;
             message.node.propagate(&self, &mut live_state);
+            // XXX Simplify this
+            if live_state.exec_state == SagaState::Unwinding
+                && prev_state != SagaState::Unwinding
+            {
+                live_state
+                    .sec_hdl
+                    .saga_update(SagaCachedState::Unwinding)
+                    .await;
+            }
             if live_state.exec_state == SagaState::Done {
                 break;
             }
@@ -791,6 +803,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let live_state = self.live_state.try_lock().unwrap();
         assert_eq!(live_state.exec_state, SagaState::Done);
         self.finish_tx.send(()).expect("failed to send finish message");
+        live_state.sec_hdl.saga_update(SagaCachedState::Done).await;
     }
 
     /*
