@@ -65,6 +65,7 @@ pub use saga_exec::SagaResultOk;
 pub use saga_log::SagaLog;
 pub use saga_log::SagaNodeEvent;
 pub use saga_log::SagaNodeEventType;
+pub use saga_log::SagaNodeId;
 pub use saga_template::SagaId;
 pub use saga_template::SagaTemplate;
 pub use saga_template::SagaTemplateBuilder;
@@ -76,6 +77,7 @@ pub use sec::SagaSerialized;
 pub use sec::SagaStateView;
 pub use sec::SecClient;
 pub use store::InMemorySecStore;
+pub use store::SagaCreateParams;
 pub use store::SecStore;
 
 /*

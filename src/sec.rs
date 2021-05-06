@@ -1119,6 +1119,7 @@ impl Sec {
             id: saga_id,
             template_name,
             saga_params: serialized_params.clone(),
+            state: SagaCachedState::Running,
         };
         let store = Arc::clone(&self.sec_store);
         let create_future = async move {

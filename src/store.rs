@@ -4,10 +4,12 @@
 
 use crate::SagaId;
 use crate::SagaNodeEvent;
+use anyhow::Context;
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::convert::TryFrom;
 use std::fmt;
 
 /**
@@ -58,6 +60,7 @@ pub struct SagaCreateParams {
     pub id: SagaId,
     pub template_name: String,
     pub saga_params: serde_json::Value,
+    pub state: SagaCachedState,
 }
 
 /**
@@ -73,6 +76,36 @@ pub enum SagaCachedState {
     Running,
     Unwinding,
     Done,
+}
+
+impl fmt::Display for SagaCachedState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", <&str>::from(self))
+    }
+}
+
+impl TryFrom<&str> for SagaCachedState {
+    type Error = anyhow::Error;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        /*
+         * Round-tripping through serde is a little absurd, but has the benefit
+         * of always staying in sync with the real definition.  (The initial
+         * serialization is necessary to correctly handle any quotes or the like
+         * in the input string.)
+         */
+        let json = serde_json::to_string(value).unwrap();
+        serde_json::from_str(&json).context("parsing saga state")
+    }
+}
+
+impl<'a> From<&'a SagaCachedState> for &'a str {
+    fn from(s: &'a SagaCachedState) -> &'a str {
+        match s {
+            SagaCachedState::Running => "running",
+            SagaCachedState::Unwinding => "unwinding",
+            SagaCachedState::Done => "done",
+        }
+    }
 }
 
 /**
