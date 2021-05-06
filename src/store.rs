@@ -29,13 +29,13 @@ pub trait SecStore: fmt::Debug + Send + Sync {
      */
     async fn saga_create(
         &self,
-        create_params: &SagaCreateParams,
+        create_params: SagaCreateParams,
     ) -> Result<(), anyhow::Error>;
 
     /**
      * Write a record to a saga's persistent log
      */
-    async fn record_event(&self, id: SagaId, event: &SagaNodeEvent);
+    async fn record_event(&self, id: SagaId, event: SagaNodeEvent);
 
     /**
      * Update the cached runtime state of the saga
@@ -49,7 +49,7 @@ pub trait SecStore: fmt::Debug + Send + Sync {
      * saga's log altogether when it next starts up since there's no need to
      * recover the saga.
      */
-    async fn saga_update(&self, id: SagaId, update: &SagaCachedState);
+    async fn saga_update(&self, id: SagaId, update: SagaCachedState);
 }
 
 /**
@@ -127,17 +127,17 @@ impl InMemorySecStore {
 impl SecStore for InMemorySecStore {
     async fn saga_create(
         &self,
-        _create_params: &SagaCreateParams,
+        _create_params: SagaCreateParams,
     ) -> Result<(), anyhow::Error> {
         /* Nothing to do. */
         Ok(())
     }
 
-    async fn record_event(&self, _id: SagaId, _event: &SagaNodeEvent) {
+    async fn record_event(&self, _id: SagaId, _event: SagaNodeEvent) {
         /* Nothing to do. */
     }
 
-    async fn saga_update(&self, _id: SagaId, _update: &SagaCachedState) {
+    async fn saga_update(&self, _id: SagaId, _update: SagaCachedState) {
         /* Nothing to do. */
     }
 }

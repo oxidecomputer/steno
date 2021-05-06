@@ -23,7 +23,6 @@ use uuid::Uuid;
 #[derive(
     Clone,
     Copy,
-    Debug,
     Deserialize,
     Eq,
     JsonSchema,
@@ -32,7 +31,10 @@ use uuid::Uuid;
     PartialOrd,
     Serialize,
 )]
+#[serde(transparent)]
 pub struct SagaId(pub Uuid);
+// TODO-cleanup figure out how to use custom_derive here?
+NewtypeDebug! { () pub struct SagaId(Uuid); }
 /*
  * TODO-design In the Oxide consumer, we probably want to have the serialized
  * form of ids have a prefix describing the type.  This seems consumer-specific,
@@ -40,11 +42,8 @@ pub struct SagaId(pub Uuid);
  * this is to have the consumer have their own enum or trait that impls Display
  * using the various ids provided by consumers.
  */
-impl fmt::Display for SagaId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "sg-{}", self.0)
-    }
-}
+NewtypeDisplay! { () pub struct SagaId(Uuid); }
+NewtypeFrom! { () pub struct SagaId(Uuid); }
 
 /**
  * A directed acyclic graph (DAG) where each node implements `Action`

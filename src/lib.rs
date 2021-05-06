@@ -77,6 +77,7 @@ pub use sec::SagaSerialized;
 pub use sec::SagaStateView;
 pub use sec::SecClient;
 pub use store::InMemorySecStore;
+pub use store::SagaCachedState;
 pub use store::SagaCreateParams;
 pub use store::SecStore;
 

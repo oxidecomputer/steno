@@ -1124,7 +1124,7 @@ impl Sec {
         let store = Arc::clone(&self.sec_store);
         let create_future = async move {
             let result = store
-                .saga_create(&saga_create)
+                .saga_create(saga_create)
                 .await
                 .context("creating saga record");
             if let Err(error) = result {
@@ -1302,8 +1302,9 @@ impl Sec {
             "saga_id" => log_data.saga_id.to_string(),
             "new_state" => ?log_data.event
         );
-        store.record_event(log_data.saga_id, &log_data.event).await;
-        Sec::client_respond(&log, log_data.ack_tx, ());
+        let ack_tx = log_data.ack_tx;
+        store.record_event(log_data.saga_id, log_data.event).await;
+        Sec::client_respond(&log, ack_tx, ());
         None
     }
 
@@ -1317,7 +1318,7 @@ impl Sec {
             "new_state" => ?update_data.updated_state
         );
         store
-            .saga_update(update_data.saga_id, &update_data.updated_state)
+            .saga_update(update_data.saga_id, update_data.updated_state)
             .await;
         None
     }
