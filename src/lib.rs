@@ -11,7 +11,7 @@
 //! * Write some functions that will be used as _actions_ and _undo actions_ for
 //!   your saga.  Package these up with [`ActionFunc::new_action()`].
 //! * Use [`SagaTemplateBuilder`] to construct a graph of these actions.
-//! * Construct a saga execution coordinator with [`sec`] and use that to run
+//! * Construct a saga execution coordinator with [`sec()`] and use that to run
 //!   the saga.  You can start with an [`InMemorySecStore`] or impl your own
 //!   [`SecStore`].
 //!

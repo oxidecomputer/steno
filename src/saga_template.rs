@@ -54,7 +54,7 @@ NewtypeFrom! { () pub struct SagaId(Uuid); }
  * action run.
  *
  * You define a saga template using [`SagaTemplateBuilder`].  You can execute a
- * saga as many times as you want using [`crate::SagaExecutor`].
+ * saga as many times as you want using [`crate::SecClient::saga_create()`].
  */
 #[derive(Debug)]
 pub struct SagaTemplate<UserType: SagaType> {

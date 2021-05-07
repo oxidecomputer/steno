@@ -8,7 +8,7 @@
  *
  * The implementation is grouped into
  *
- * * `sec`, a function to start up an SEC
+ * * [`sec()`], a function to start up an SEC
  * * an `SecClient`, which Steno consumers use to interact with the SEC
  * * an `Sec`: a background task that owns the list of sagas and their overall
  *   runtime state.  (The detailed runtime state is owned by a separate
@@ -18,7 +18,7 @@
  *   state, etc.)
  *
  * The Steno consumer is responsible for implementing an `SecStore` to store
- * persistent state.  There's an [`steno::InMemorySecStore`] to play around
+ * persistent state.  There's an [`crate::InMemorySecStore`] to play around
  * with.
  */
 
@@ -639,7 +639,7 @@ where
  */
 
 /**
- * Handle used by [`SagaExecutor`] for sending messages back to the SEC
+ * Handle used by `SagaExecutor` for sending messages back to the SEC
  */
 /* TODO-cleanup This should be pub(crate).  See lib.rs. */
 #[derive(Debug)]
