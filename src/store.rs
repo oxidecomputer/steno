@@ -35,7 +35,7 @@ pub trait SecStore: fmt::Debug + Send + Sync {
     /**
      * Write a record to a saga's persistent log
      */
-    async fn record_event(&self, id: SagaId, event: SagaNodeEvent);
+    async fn record_event(&self, event: SagaNodeEvent);
 
     /**
      * Update the cached runtime state of the saga
@@ -133,7 +133,7 @@ impl SecStore for InMemorySecStore {
         Ok(())
     }
 
-    async fn record_event(&self, _id: SagaId, _event: SagaNodeEvent) {
+    async fn record_event(&self, _event: SagaNodeEvent) {
         /* Nothing to do. */
     }
 

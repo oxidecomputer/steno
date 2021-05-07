@@ -4,6 +4,7 @@ use crate::saga_action_error::ActionError;
 use crate::saga_template::SagaId;
 use anyhow::anyhow;
 use anyhow::Context;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -23,7 +24,15 @@ use thiserror::Error;
  */
 // TODO-cleanup figure out how to use custom_derive here?
 #[derive(
-    Deserialize, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    Eq,
+    Ord,
+    JsonSchema,
+    PartialEq,
+    PartialOrd,
+    Serialize,
 )]
 #[serde(transparent)]
 pub struct SagaNodeId(u32);

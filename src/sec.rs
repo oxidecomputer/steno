@@ -651,14 +651,11 @@ pub struct SecExecClient {
 impl SecExecClient {
     /** Write `event` to the saga log */
     pub async fn record(&self, event: SagaNodeEvent) {
+        assert_eq!(event.saga_id, self.saga_id);
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sec_send(
             ack_rx,
-            SecExecMsg::LogEvent(SagaLogEventData {
-                saga_id: self.saga_id,
-                event,
-                ack_tx,
-            }),
+            SecExecMsg::LogEvent(SagaLogEventData { event, ack_tx }),
         )
         .await
     }
@@ -772,8 +769,6 @@ struct SagaGetData {
 struct SagaLogEventData {
     /** response channel */
     ack_tx: oneshot::Sender<()>,
-    /** saga being updated */
-    saga_id: SagaId,
     /** event to be recorded to the saga log */
     event: SagaNodeEvent,
 }
@@ -1353,11 +1348,10 @@ impl Sec {
         log_data: SagaLogEventData,
     ) -> Option<SecStep> {
         debug!(&log, "saga log event";
-            "saga_id" => log_data.saga_id.to_string(),
             "new_state" => ?log_data.event
         );
         let ack_tx = log_data.ack_tx;
-        store.record_event(log_data.saga_id, log_data.event).await;
+        store.record_event(log_data.event).await;
         Sec::client_respond(&log, ack_tx, ());
         None
     }
