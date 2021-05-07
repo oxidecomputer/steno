@@ -1004,29 +1004,30 @@ impl Sec {
 
     fn do_saga_start(&mut self, saga_id: SagaId) -> Result<(), anyhow::Error> {
         let saga = self.saga_remove(saga_id)?;
-        let new_saga = Saga {
-            id: saga_id,
-            log: saga.log,
-            params: saga.params,
-            run_state: match saga.run_state {
-                SagaRunState::Ready { exec, waiter } => {
-                    SagaRunState::Running { exec, waiter }
-                }
-                _ => {
-                    return Err(anyhow!(
-                        "saga not in \"ready\" state: {}",
-                        saga_id
-                    ))
-                }
-            },
+        let log = saga.log;
+        let params = saga.params;
+        let (exec, waiter) = match saga.run_state {
+            SagaRunState::Ready { exec, waiter } => (exec, waiter),
+            _ => {
+                return Err(anyhow!(
+                    "saga not in \"ready\" state: {:?}",
+                    saga_id
+                ))
+            }
         };
 
-        // XXX clean this up
-        let exec = match &new_saga.run_state {
-            SagaRunState::Running { exec, .. } => Arc::clone(&exec),
-            _ => unimplemented!(),
-        };
-        self.sagas.insert(saga_id, new_saga);
+        self.sagas.insert(
+            saga_id,
+            Saga {
+                id: saga_id,
+                log: log,
+                params: params,
+                run_state: SagaRunState::Running {
+                    exec: Arc::clone(&exec),
+                    waiter,
+                },
+            },
+        );
 
         self.futures.push(
             async move {
