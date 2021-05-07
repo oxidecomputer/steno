@@ -4,8 +4,6 @@ use crate::saga_action_generic::ActionData;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Error as SerdeError;
-use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 /**
@@ -63,7 +61,7 @@ use thiserror::Error;
 pub enum ActionError {
     /// Action failed due to a consumer-specific error
     #[error("action failed")]
-    ActionFailed { source_error: JsonValue },
+    ActionFailed { source_error: serde_json::Value },
 
     /// The framework failed to deserialize the saga parameters, an action's
     /// successful result, or an action's error.
@@ -137,11 +135,11 @@ impl ActionError {
         }
     }
 
-    pub fn new_serialize(source: SerdeError) -> ActionError {
+    pub fn new_serialize(source: serde_json::Error) -> ActionError {
         ActionError::SerializeFailed { message: source.to_string() }
     }
 
-    pub fn new_deserialize(source: SerdeError) -> ActionError {
+    pub fn new_deserialize(source: serde_json::Error) -> ActionError {
         ActionError::DeserializeFailed { message: source.to_string() }
     }
 

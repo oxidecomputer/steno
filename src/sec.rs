@@ -29,7 +29,6 @@ use petgraph::graph::NodeIndex;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::fmt;
@@ -160,7 +159,7 @@ impl SecClient {
         uctx: Arc<T>,
         template: Arc<dyn SagaTemplateGeneric<T>>,
         template_name: String,
-        params: JsonValue,
+        params: serde_json::Value,
         log_events: Vec<SagaNodeEvent>,
     ) -> Result<BoxFuture<'static, ()>, anyhow::Error>
     where
@@ -294,7 +293,7 @@ pub struct SagaView {
     #[serde(skip)] // XXX impl an appropriate Serialize here
     pub state: SagaStateView,
 
-    params: JsonValue,
+    params: serde_json::Value,
 }
 
 impl SagaView {
@@ -412,7 +411,7 @@ enum SecClientMsg {
         /** name of the template used to create this saga */
         template_name: String,
         /** serialized saga parameters */
-        serialized_params: JsonValue,
+        serialized_params: serde_json::Value,
     },
 
     /**
@@ -431,7 +430,7 @@ enum SecClientMsg {
         /** name of the template used to resume this saga */
         template_name: String,
         /** serialized saga parameters */
-        serialized_params: JsonValue,
+        serialized_params: serde_json::Value,
     },
 
     /** Start (or resume) running a saga */
@@ -575,7 +574,7 @@ where
 #[derive(Debug)]
 struct TemplateParamsForRecover<T: Send + Sync + fmt::Debug> {
     template: Arc<dyn SagaTemplateGeneric<T>>,
-    params: JsonValue,
+    params: serde_json::Value,
     uctx: Arc<T>,
     saga_log: SagaLog,
 }
@@ -763,7 +762,7 @@ struct SagaCreateData {
     /** name of the template used to create this saga */
     template_name: String,
     /** serialized saga parameters */
-    serialized_params: JsonValue,
+    serialized_params: serde_json::Value,
 }
 
 impl fmt::Debug for SagaCreateData {
@@ -1085,7 +1084,7 @@ impl Sec {
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         template_name: String,
-        serialized_params: JsonValue,
+        serialized_params: serde_json::Value,
     ) {
         self.do_saga_create(
             ack_tx,
@@ -1103,7 +1102,7 @@ impl Sec {
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         template_name: String,
-        serialized_params: JsonValue,
+        serialized_params: serde_json::Value,
         autostart: bool,
     ) {
         let log = self.log.new(o!(
@@ -1155,7 +1154,7 @@ impl Sec {
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         template_name: String,
-        serialized_params: JsonValue,
+        serialized_params: serde_json::Value,
     ) {
         let log = self.log.new(o!(
             "saga_id" => saga_id.to_string(),
@@ -1366,7 +1365,7 @@ impl Sec {
 struct Saga {
     id: SagaId,
     log: slog::Logger,
-    params: JsonValue,
+    params: serde_json::Value,
     run_state: SagaRunState,
 }
 
@@ -1425,7 +1424,7 @@ struct SagaInsertData {
     log: slog::Logger,
     saga_id: SagaId,
     template_params: Box<dyn TemplateParams>,
-    serialized_params: JsonValue,
+    serialized_params: serde_json::Value,
     ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
     autostart: bool,
 }
@@ -1445,7 +1444,7 @@ struct SagaDoneData {
 #[derive(Deserialize, Serialize)]
 pub struct SagaSerialized {
     pub saga_id: SagaId,
-    pub params: JsonValue,
+    pub params: serde_json::Value,
     pub events: Vec<SagaNodeEvent>,
 }
 

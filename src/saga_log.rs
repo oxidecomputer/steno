@@ -6,7 +6,6 @@ use anyhow::anyhow;
 use anyhow::Context;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -67,7 +66,7 @@ pub enum SagaNodeEventType {
     /** The action has started running */
     Started,
     /** The action completed successfully (with output data) */
-    Succeeded(Arc<JsonValue>),
+    Succeeded(Arc<serde_json::Value>),
     /** The action failed */
     Failed(ActionError),
     /** The undo action has started running */
@@ -113,11 +112,11 @@ pub enum SagaNodeLoadStatus {
     /** The action has started running */
     Started,
     /** The action completed successfully (with output data) */
-    Succeeded(Arc<JsonValue>),
+    Succeeded(Arc<serde_json::Value>),
     /** The action failed */
     Failed(ActionError),
     /** The undo action has started running (with output data from success) */
-    UndoStarted(Arc<JsonValue>),
+    UndoStarted(Arc<serde_json::Value>),
     /** The undo action has finished */
     UndoFinished,
 }

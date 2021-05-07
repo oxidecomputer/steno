@@ -211,7 +211,7 @@ where
         let fut = { (self.action_func)(sgctx) };
         /*
          * Execute the caller's function and translate its type into the generic
-         * JsonValue that the framework uses to store action outputs.
+         * serde_json::Value that the framework uses to store action outputs.
          */
         fut.await
             .and_then(|func_output| {
