@@ -91,13 +91,13 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsDone> {
             /*
              * If we've completed the last node, the saga is done.
              */
-            assert_eq!(live_state.exec_state, SagaState::Running);
+            assert_eq!(live_state.exec_state, SagaCachedState::Running);
             assert_eq!(graph.node_count(), live_state.node_outputs.len());
             live_state.mark_saga_done();
             return;
         }
 
-        if live_state.exec_state == SagaState::Unwinding {
+        if live_state.exec_state == SagaCachedState::Unwinding {
             /*
              * If the saga is currently unwinding, then this node finishing
              * doesn't unblock any other nodes.  However, it potentially
@@ -143,7 +143,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsFailed> {
             .insert(self.node_id, self.state.0.clone())
             .expect_none("node finished twice (storing error)");
 
-        if live_state.exec_state == SagaState::Unwinding {
+        if live_state.exec_state == SagaCachedState::Unwinding {
             /*
              * This node failed while we're already unwinding.  We don't
              * need to kick off unwinding again.  We could in theory
@@ -168,7 +168,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsFailed> {
              * Begin the unwinding process.  Start with the end node: mark
              * it trivially "undone" and propagate that.
              */
-            live_state.exec_state = SagaState::Unwinding;
+            live_state.exec_state = SagaCachedState::Unwinding;
             assert_ne!(self.node_id, exec.saga_metadata.end_node);
             let new_node = SagaNode {
                 node_id: exec.saga_metadata.end_node,
@@ -190,7 +190,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
         live_state: &mut SagaExecLiveState<UserType>,
     ) {
         let graph = &exec.saga_metadata.graph;
-        assert_eq!(live_state.exec_state, SagaState::Unwinding);
+        assert_eq!(live_state.exec_state, SagaCachedState::Unwinding);
         live_state
             .nodes_undone
             .insert(self.node_id, self.state.0)
@@ -274,17 +274,6 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
             }
         }
     }
-}
-
-/**
- * Execution state for the saga overall
- */
-// XXX redundant with elsewhere?
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum SagaState {
-    Running,
-    Unwinding,
-    Done,
 }
 
 /**
@@ -435,9 +424,9 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             saga_template: Arc::clone(&saga_template),
             saga_metadata: Arc::new(saga_template.metadata().clone()),
             exec_state: if forward {
-                SagaState::Running
+                SagaCachedState::Running
             } else {
-                SagaState::Unwinding
+                SagaCachedState::Unwinding
             },
             queue_todo: Vec::new(),
             queue_undo: Vec::new(),
@@ -741,7 +730,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
              * consumer has run() it (once).
              */
             let live_state = self.live_state.lock().await;
-            if live_state.exec_state == SagaState::Done {
+            if live_state.exec_state == SagaCachedState::Done {
                 self.finish_tx.send(()).expect("failed to send finish message");
                 live_state.sec_hdl.saga_update(SagaCachedState::Done).await;
                 return;
@@ -787,21 +776,21 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             let prev_state = live_state.exec_state;
             message.node.propagate(&self, &mut live_state);
             // XXX Simplify this
-            if live_state.exec_state == SagaState::Unwinding
-                && prev_state != SagaState::Unwinding
+            if live_state.exec_state == SagaCachedState::Unwinding
+                && prev_state != SagaCachedState::Unwinding
             {
                 live_state
                     .sec_hdl
                     .saga_update(SagaCachedState::Unwinding)
                     .await;
             }
-            if live_state.exec_state == SagaState::Done {
+            if live_state.exec_state == SagaCachedState::Done {
                 break;
             }
         }
 
         let live_state = self.live_state.try_lock().unwrap();
-        assert_eq!(live_state.exec_state, SagaState::Done);
+        assert_eq!(live_state.exec_state, SagaCachedState::Done);
         self.finish_tx.send(()).expect("failed to send finish message");
         live_state.sec_hdl.saga_update(SagaCachedState::Done).await;
     }
@@ -877,7 +866,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             live_state.node_task(node_id, task);
         }
 
-        if live_state.exec_state == SagaState::Running {
+        if live_state.exec_state == SagaCachedState::Running {
             assert!(live_state.queue_undo.is_empty());
             return;
         }
@@ -1093,7 +1082,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .live_state
             .try_lock()
             .expect("attempted to get result while saga still running?");
-        assert_eq!(live_state.exec_state, SagaState::Done);
+        assert_eq!(live_state.exec_state, SagaCachedState::Done);
 
         if live_state.nodes_undone.contains_key(&self.saga_metadata.start_node)
         {
@@ -1277,7 +1266,7 @@ struct SagaExecLiveState<UserType: SagaType> {
     sec_hdl: SecExecClient,
 
     /** Overall execution state */
-    exec_state: SagaState,
+    exec_state: SagaCachedState,
 
     /** Queue of nodes that have not started but whose deps are satisfied */
     queue_todo: Vec<NodeIndex>,
@@ -1396,10 +1385,10 @@ impl<UserType: SagaType> SagaExecLiveState<UserType> {
         assert!(self.queue_todo.is_empty());
         assert!(self.queue_undo.is_empty());
         assert!(
-            self.exec_state == SagaState::Running
-                || self.exec_state == SagaState::Unwinding
+            self.exec_state == SagaCachedState::Running
+                || self.exec_state == SagaCachedState::Unwinding
         );
-        self.exec_state = SagaState::Done;
+        self.exec_state = SagaCachedState::Done;
     }
 
     fn node_task(&mut self, node_id: NodeIndex, task: JoinHandle<()>) {
