@@ -71,7 +71,25 @@ impl<UserType: SagaType> SagaTemplate<UserType> {
     }
 }
 
-/* XXX TODO-cleanup cleanup, doc, better name */
+/**
+ * Type-erased wrapper for [`SagaTemplate`], used for saga recovery
+ *
+ * `SagaTemplate` is parametrized by a [`SagaType`] type parameter, which allows
+ * the Steno consumer to bring their own types for saga parameters, function
+ * arguments, etc.  This works fine for code that just wants to create a new
+ * saga because it necessarily knows `SagaType`.
+ *
+ * Saga recovery is more complicated: the consumer is generally reading
+ * serialized saga state from persistent storage.  That state will identify
+ * which template is being run, but what does the consumer do with that
+ * information?  It could search a collection of templates identified by name.
+ * That collection would need to store `SagaTemplate`s with various type
+ * parameters.  This type can be used in such a collection to refer to
+ * templates having different values of [`SagaType`].
+ *
+ * This trait also provides a `recover` function that enables Steno to use the
+ * real `SagaType` when needed.
+ */
 pub trait SagaTemplateGeneric<T>: fmt::Debug + Send + Sync {
     fn recover(
         self: Arc<Self>,

@@ -11,7 +11,16 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
-// XXX TODO-doc
+/**
+ * Unique identifier for a saga node
+ */
+/*
+ * We use a newtype for SagaNodeId for the usual reasons.  What about the
+ * underlying representation?  The Omicron consumer is going to store these in
+ * CockroachDB, which makes `i64` the most natural numeric type.  There's no
+ * need for signed values here, so we choose `u32` as large enough for our
+ * purposes, unsigned, and can be infallibly converted to an `i64`.
+ */
 // TODO-cleanup figure out how to use custom_derive here?
 #[derive(
     Deserialize, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize,
