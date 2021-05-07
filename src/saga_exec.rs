@@ -14,7 +14,6 @@ use crate::SagaCachedState;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
 use crate::SagaNodeId;
-use crate::SagaStateView;
 use crate::SagaTemplate;
 use crate::SagaType;
 use anyhow::anyhow;
@@ -1755,19 +1754,7 @@ impl<UserType: SagaType> ActionContext<UserType> {
             future
         };
 
-        let live_arc = Arc::clone(&self.live_state);
-        Ok(async move {
-            future.await;
-            let live_state = live_arc.lock().await;
-            let saga_view = live_state.sec_hdl.saga_get(saga_id).await.unwrap();
-            match saga_view.state {
-                SagaStateView::Done { result, .. } => result,
-                SagaStateView::Ready { .. } | SagaStateView::Running { .. } => {
-                    panic!("future returned too early")
-                }
-            }
-        }
-        .boxed())
+        Ok(async move { future.await }.boxed())
     }
 
     /**

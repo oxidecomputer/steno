@@ -3,7 +3,6 @@
  */
 
 use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use slog::Drain;
 use std::convert::TryFrom;
@@ -18,7 +17,6 @@ use steno::ExampleParams;
 use steno::SagaId;
 use steno::SagaLog;
 use steno::SagaSerialized;
-use steno::SagaStateView;
 use steno::SagaTemplateGeneric;
 use structopt::StructOpt;
 use uuid::Uuid;
@@ -257,11 +255,6 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         println!("\n*** final state ***");
         println!("{}", saga.state.status());
     }
-
-    match &saga.state {
-        SagaStateView::Done { result, .. } => &result,
-        _ => bail!("saga's final state was not finished"),
-    };
 
     if let Some(output_log_path) = &args.dump_to {
         let serialized = saga.serialized();

@@ -1,7 +1,26 @@
 /*!
- * Interfaces for persistence of saga records and saga logs
+ * Saga Execution Coordinator
+ *
+ * The Saga Execution Coordinator ("SEC") manages the execution of a group of
+ * sagas, providing interfaces for running new sagas, recovering sagas that were
+ * running in a previous lifetime, listing sagas, querying the state of a saga,
+ * and providing some control over sagas (e.g., to inject errors).
+ *
+ * The implementation is grouped into
+ *
+ * * `sec`, a function to start up an SEC
+ * * an `SecClient`, which Steno consumers use to interact with the SEC
+ * * an `Sec`: a background task that owns the list of sagas and their overall
+ *   runtime state.  (The detailed runtime state is owned by a separate
+ *   `SagaExecutor` type internally.)
+ * * a number of `SecExecClient` objects, which individual saga executors use to
+ *   communicate back to the Sec (to communicate progress, record persistent
+ *   state, etc.)
+ *
+ * The Steno consumer is responsible for implementing an `SecStore` to store
+ * persistent state.  There's an [`steno::InMemorySecStore`] to play around
+ * with.
  */
-/* XXX TODO-doc This whole file */
 
 #![allow(clippy::large_enum_variant)]
 
@@ -117,7 +136,7 @@ impl SecClient {
         template: Arc<SagaTemplate<UserType>>,
         template_name: String,
         params: UserType::SagaParamsType,
-    ) -> Result<BoxFuture<'static, ()>, anyhow::Error>
+    ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
         UserType: SagaType + fmt::Debug,
     {
@@ -161,7 +180,7 @@ impl SecClient {
         template_name: String,
         params: serde_json::Value,
         log_events: Vec<SagaNodeEvent>,
-    ) -> Result<BoxFuture<'static, ()>, anyhow::Error>
+    ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
         T: Send + Sync + fmt::Debug + 'static,
     {
@@ -266,8 +285,11 @@ impl SecClient {
     }
 }
 
-/* TODO-cleanup Is this necessary?  Correct? */
-// XXX These can fail if the SEC panicked.
+/*
+ * TODO-cleanup Is this necessary?  Correct?
+ * TODO-correctness Sending messages to the SEC can fail if it panicked.  What
+ * do we want to do here?
+ */
 impl Drop for SecClient {
     fn drop(&mut self) {
         if !self.shutdown {
@@ -290,7 +312,8 @@ impl Drop for SecClient {
 pub struct SagaView {
     pub id: SagaId,
 
-    #[serde(skip)] // XXX impl an appropriate Serialize here
+    /* TODO-debugging impl an appropriate Serialize here */
+    #[serde(skip)]
     pub state: SagaStateView,
 
     params: serde_json::Value,
@@ -307,6 +330,13 @@ impl SagaView {
         }
     }
 
+    /**
+     * Returns an object that impl's serde's `Deserialize` and `Serialize`
+     * traits
+     *
+     * This is mainly intended for tooling and demoing.  Production state
+     * serialization happens via the [`SecStore`].
+     */
     pub fn serialized(&self) -> SagaSerialized {
         SagaSerialized {
             saga_id: self.id,
@@ -403,7 +433,9 @@ enum SecClientMsg {
      */
     SagaCreate {
         /** response channel */
-        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+        ack_tx: oneshot::Sender<
+            Result<BoxFuture<'static, SagaResult>, anyhow::Error>,
+        >,
         /** caller-defined id (must be unique) */
         saga_id: SagaId,
         /** user-type-specific parameters */
@@ -422,7 +454,9 @@ enum SecClientMsg {
      */
     SagaResume {
         /** response channel */
-        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+        ack_tx: oneshot::Sender<
+            Result<BoxFuture<'static, SagaResult>, anyhow::Error>,
+        >,
         /** unique id of the saga (from persistent state) */
         saga_id: SagaId,
         /** user-type-specific parameters */
@@ -607,7 +641,7 @@ where
 /**
  * Handle used by [`SagaExecutor`] for sending messages back to the SEC
  */
-/* XXX TODO-cleanup This should be pub(crate).  See lib.rs. */
+/* TODO-cleanup This should be pub(crate).  See lib.rs. */
 #[derive(Debug)]
 pub struct SecExecClient {
     saga_id: SagaId,
@@ -618,31 +652,31 @@ impl SecExecClient {
     /** Write `event` to the saga log */
     pub async fn record(&self, event: SagaNodeEvent) {
         let (ack_tx, ack_rx) = oneshot::channel();
-        self.sec_send(SecExecMsg::LogEvent(SagaLogEventData {
-            saga_id: self.saga_id,
-            event,
-            ack_tx,
-        }))
-        .await;
-        ack_rx.await.unwrap()
+        self.sec_send(
+            ack_rx,
+            SecExecMsg::LogEvent(SagaLogEventData {
+                saga_id: self.saga_id,
+                event,
+                ack_tx,
+            }),
+        )
+        .await
     }
 
     /**
      * Update the cached state for the saga
-     *
-     * This does not block on any write to persistent storage because that is
-     * not required for correctness here.
-     * XXX We can put the ack_rx.await into self.sec_send().
      */
     pub async fn saga_update(&self, update: SagaCachedState) {
         let (ack_tx, ack_rx) = oneshot::channel();
-        self.sec_send(SecExecMsg::UpdateCachedState(SagaUpdateCacheData {
-            ack_tx,
-            saga_id: self.saga_id,
-            updated_state: update,
-        }))
-        .await;
-        ack_rx.await.unwrap();
+        self.sec_send(
+            ack_rx,
+            SecExecMsg::UpdateCachedState(SagaUpdateCacheData {
+                ack_tx,
+                saga_id: self.saga_id,
+                updated_state: update,
+            }),
+        )
+        .await
     }
 
     /**
@@ -655,7 +689,7 @@ impl SecExecClient {
         template: Arc<SagaTemplate<ChildType>>,
         template_name: String,
         params: ChildType::SagaParamsType,
-    ) -> Result<BoxFuture<'static, ()>, ActionError>
+    ) -> Result<BoxFuture<'static, SagaResult>, ActionError>
     where
         ChildType: SagaType + fmt::Debug,
     {
@@ -665,30 +699,43 @@ impl SecExecClient {
         let template_params =
             Box::new(TemplateParamsForCreate { template, params, uctx })
                 as Box<dyn TemplateParams>;
-        self.sec_send(SecExecMsg::CreateChildSaga(SagaCreateChildData {
-            parent_saga_id: self.saga_id,
-            create_params: SagaCreateData {
-                ack_tx,
-                saga_id: child_saga_id,
-                template_params,
-                template_name,
-                serialized_params,
-            },
-        }))
-        .await;
-        ack_rx.await.unwrap().map_err(ActionError::new_subsaga)
+        self.sec_send(
+            ack_rx,
+            SecExecMsg::CreateChildSaga(SagaCreateChildData {
+                parent_saga_id: self.saga_id,
+                create_params: SagaCreateData {
+                    ack_tx,
+                    saga_id: child_saga_id,
+                    template_params,
+                    template_name,
+                    serialized_params,
+                },
+            }),
+        )
+        .await
+        .map_err(ActionError::new_subsaga)
     }
 
     pub async fn saga_get(&self, saga_id: SagaId) -> Result<SagaView, ()> {
         let (ack_tx, ack_rx) = oneshot::channel();
-        self.sec_send(SecExecMsg::SagaGet(SagaGetData { ack_tx, saga_id }))
-            .await;
-        ack_rx.await.unwrap()
+        self.sec_send(
+            ack_rx,
+            SecExecMsg::SagaGet(SagaGetData { ack_tx, saga_id }),
+        )
+        .await
     }
 
-    async fn sec_send(&self, msg: SecExecMsg) {
-        /* XXX How does shutdown interact (if this channel gets closed)? */
+    async fn sec_send<T>(
+        &self,
+        ack_rx: oneshot::Receiver<T>,
+        msg: SecExecMsg,
+    ) -> T {
+        /*
+         * TODO-robustness How does shutdown interact (if this channel gets
+         * closed)?
+         */
         self.exec_tx.send(msg).await.unwrap();
+        ack_rx.await.unwrap()
     }
 }
 
@@ -711,7 +758,7 @@ enum SecExecMsg {
 }
 
 /** See [`SecExecMsg::SagaGet`] */
-// XXX commonize with the client's SagaGet
+/* TODO-cleanup commonize with the client's SagaGet */
 #[derive(Debug)]
 struct SagaGetData {
     /** response channel */
@@ -751,10 +798,11 @@ struct SagaCreateChildData {
     create_params: SagaCreateData,
 }
 
-// XXX commonize with SecClientMessage
+/* TODO-cleanup commonize with SecClientMessage */
 struct SagaCreateData {
     /** response channel */
-    ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+    ack_tx:
+        oneshot::Sender<Result<BoxFuture<'static, SagaResult>, anyhow::Error>>,
     /** caller-defined id (must be unique) */
     saga_id: SagaId,
     /** user-type-specific parameters */
@@ -955,12 +1003,7 @@ impl Sec {
     }
 
     fn do_saga_start(&mut self, saga_id: SagaId) -> Result<(), anyhow::Error> {
-        /* XXX common function for producing the error */
-        let saga = self
-            .sagas
-            .remove(&saga_id)
-            .ok_or_else(|| anyhow!("no such saga: {}", saga_id))?;
-
+        let saga = self.saga_remove(saga_id)?;
         let new_saga = Saga {
             id: saga_id,
             log: saga.log,
@@ -1005,7 +1048,7 @@ impl Sec {
         let saga = self.sagas.remove(&saga_id).unwrap();
         info!(&saga.log, "saga finished");
         if let SagaRunState::Running { waiter, .. } = saga.run_state {
-            Sec::client_respond(&saga.log, waiter, ());
+            Sec::client_respond(&saga.log, waiter, done_data.result.clone());
             self.sagas.insert(
                 saga_id,
                 Saga {
@@ -1080,7 +1123,9 @@ impl Sec {
 
     fn cmd_saga_create(
         &mut self,
-        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+        ack_tx: oneshot::Sender<
+            Result<BoxFuture<'static, SagaResult>, anyhow::Error>,
+        >,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         template_name: String,
@@ -1098,7 +1143,9 @@ impl Sec {
 
     fn do_saga_create(
         &mut self,
-        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+        ack_tx: oneshot::Sender<
+            Result<BoxFuture<'static, SagaResult>, anyhow::Error>,
+        >,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         template_name: String,
@@ -1150,7 +1197,9 @@ impl Sec {
 
     fn cmd_saga_resume(
         &mut self,
-        ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+        ack_tx: oneshot::Sender<
+            Result<BoxFuture<'static, SagaResult>, anyhow::Error>,
+        >,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
         template_name: String,
@@ -1193,13 +1242,19 @@ impl Sec {
         );
     }
 
+    /*
+     * TODO-cleanup We should define a useful error type for the SEC.  This
+     * function can only produce a NotFound, and we use `()` just to
+     * communicate that there's only one kind of error here (so that the caller
+     * can produce an appropriate NotFound instead of a generic error).
+     */
     fn cmd_saga_get(
         &self,
         ack_tx: oneshot::Sender<Result<SagaView, ()>>,
         saga_id: SagaId,
     ) {
         trace!(&self.log, "saga_get"; "saga_id" => %saga_id);
-        let maybe_saga = self.sagas.get(&saga_id).ok_or(());
+        let maybe_saga = self.saga_lookup(saga_id);
         if let Err(_) = maybe_saga {
             Sec::client_respond(&self.log, ack_tx, Err(()));
             return;
@@ -1227,11 +1282,7 @@ impl Sec {
             "saga_id" => %saga_id,
             "node_id" => ?node_id,
         );
-        let maybe_saga = self
-            .sagas
-            .get(&saga_id)
-            .ok_or_else(|| anyhow!("no such saga: {}", saga_id));
-
+        let maybe_saga = self.saga_lookup(saga_id);
         if let Err(e) = maybe_saga {
             Sec::client_respond(&self.log, ack_tx, Err(e));
             return;
@@ -1357,6 +1408,18 @@ impl Sec {
     fn executor_saga_get(&self, get_data: SagaGetData) {
         self.cmd_saga_get(get_data.ack_tx, get_data.saga_id);
     }
+
+    fn saga_lookup(&self, saga_id: SagaId) -> Result<&Saga, anyhow::Error> {
+        self.sagas
+            .get(&saga_id)
+            .ok_or_else(|| anyhow!("no such saga: {:?}", saga_id))
+    }
+
+    fn saga_remove(&mut self, saga_id: SagaId) -> Result<Saga, anyhow::Error> {
+        self.sagas
+            .remove(&saga_id)
+            .ok_or_else(|| anyhow!("no such saga: {:?}", saga_id))
+    }
 }
 
 /**
@@ -1376,14 +1439,14 @@ pub enum SagaRunState {
         /** Handle to executor (for status, etc.) */
         exec: Arc<dyn SagaExecManager>,
         /** Notify when the saga is done */
-        waiter: oneshot::Sender<()>,
+        waiter: oneshot::Sender<SagaResult>,
     },
     /** Saga is currently running */
     Running {
         /** Handle to executor (for status, etc.) */
         exec: Arc<dyn SagaExecManager>,
         /** Notify when the saga is done */
-        waiter: oneshot::Sender<()>,
+        waiter: oneshot::Sender<SagaResult>,
     },
     /** Saga has finished */
     Done {
@@ -1425,7 +1488,8 @@ struct SagaInsertData {
     saga_id: SagaId,
     template_params: Box<dyn TemplateParams>,
     serialized_params: serde_json::Value,
-    ack_tx: oneshot::Sender<Result<BoxFuture<'static, ()>, anyhow::Error>>,
+    ack_tx:
+        oneshot::Sender<Result<BoxFuture<'static, SagaResult>, anyhow::Error>>,
     autostart: bool,
 }
 

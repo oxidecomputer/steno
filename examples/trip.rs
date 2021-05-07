@@ -19,7 +19,6 @@ use steno::ActionContext;
 use steno::ActionError;
 use steno::ActionFunc;
 use steno::SagaId;
-use steno::SagaStateView;
 use steno::SagaTemplate;
 use steno::SagaTemplateBuilder;
 use steno::SagaType;
@@ -107,41 +106,32 @@ async fn book_trip(
     // Note that the SEC will run all this regardless of whether you wait for it
     // here.  This is just a handle for you to know when the saga has finished.
     //
-    saga_future.await;
-
-    //
-    // Fetch the results and print them out.
-    //
-    let saga_view = sec.saga_get(saga_id).await.expect("saga went missing");
+    let result = saga_future.await;
 
     // Print the results.
-    if let SagaStateView::Done { result, .. } = saga_view.state {
-        match result.kind {
-            Ok(success) => {
-                println!(
-                    "hotel:   {:?}",
-                    success.lookup_output::<HotelReservation>("hotel")
-                );
-                println!(
-                    "flight:  {:?}",
-                    success.lookup_output::<FlightReservation>("flight")
-                );
-                println!(
-                    "car:     {:?}",
-                    success.lookup_output::<CarReservation>("car")
-                );
-                println!(
-                    "payment: {:?}",
-                    success.lookup_output::<PaymentConfirmation>("payment")
-                );
-            }
-            Err(error) => {
-                println!("action failed: {}", error.error_node_name);
-                println!("error: {}", error.error_source);
-            }
+    match result.kind {
+        Ok(success) => {
+            println!(
+                "hotel:   {:?}",
+                success.lookup_output::<HotelReservation>("hotel")
+            );
+            println!(
+                "flight:  {:?}",
+                success.lookup_output::<FlightReservation>("flight")
+            );
+            println!(
+                "car:     {:?}",
+                success.lookup_output::<CarReservation>("car")
+            );
+            println!(
+                "payment: {:?}",
+                success.lookup_output::<PaymentConfirmation>("payment")
+            );
         }
-    } else {
-        panic!("saga future returned unexpectedly early");
+        Err(error) => {
+            println!("action failed: {}", error.error_node_name);
+            println!("error: {}", error.error_source);
+        }
     }
 }
 
