@@ -77,6 +77,7 @@ pub use saga_template::SagaTemplateMetadata;
 pub use sec::sec;
 pub use sec::SagaSerialized;
 pub use sec::SagaStateView;
+pub use sec::SagaView;
 pub use sec::SecClient;
 pub use store::InMemorySecStore;
 pub use store::SagaCachedState;

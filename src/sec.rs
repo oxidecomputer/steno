@@ -52,6 +52,7 @@ use std::collections::BTreeMap;
 use std::convert::TryFrom;
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -221,9 +222,14 @@ impl SecClient {
     /**
      * List known sagas
      */
-    pub async fn saga_list(&self) -> Vec<SagaView> {
+    pub async fn saga_list(
+        &self,
+        marker: Option<SagaId>,
+        limit: NonZeroU32,
+    ) -> Vec<SagaView> {
         let (ack_tx, ack_rx) = oneshot::channel();
-        self.sec_cmd(ack_rx, SecClientMsg::SagaList { ack_tx }).await
+        self.sec_cmd(ack_rx, SecClientMsg::SagaList { ack_tx, marker, limit })
+            .await
     }
 
     /**
@@ -475,10 +481,14 @@ enum SecClientMsg {
         saga_id: SagaId,
     },
 
-    /** List all sagas */
+    /** List sagas */
     SagaList {
         /** response channel */
         ack_tx: oneshot::Sender<Vec<SagaView>>,
+        /** marker (where in the ID space to start listing from) */
+        marker: Option<SagaId>,
+        /** maximum number of sagas to return */
+        limit: NonZeroU32,
     },
 
     /** Fetch information about one saga */
@@ -1104,8 +1114,8 @@ impl Sec {
             SecClientMsg::SagaStart { ack_tx, saga_id } => {
                 self.cmd_saga_start(ack_tx, saga_id);
             }
-            SecClientMsg::SagaList { ack_tx } => {
-                self.cmd_saga_list(ack_tx);
+            SecClientMsg::SagaList { ack_tx, marker, limit } => {
+                self.cmd_saga_list(ack_tx, marker, limit);
             }
             SecClientMsg::SagaGet { ack_tx, saga_id } => {
                 self.cmd_saga_get(ack_tx, saga_id);
@@ -1219,12 +1229,39 @@ impl Sec {
         })
     }
 
-    fn cmd_saga_list(&self, ack_tx: oneshot::Sender<Vec<SagaView>>) {
+    fn cmd_saga_list(
+        &self,
+        ack_tx: oneshot::Sender<Vec<SagaView>>,
+        marker: Option<SagaId>,
+        limit: NonZeroU32,
+    ) {
         trace!(&self.log, "saga_list");
         /* TODO-cleanup */
         let log = self.log.new(o!());
-        let futures =
-            self.sagas.values().map(SagaView::from_saga).collect::<Vec<_>>();
+
+        /*
+         * We always expect to be able to go from NonZeroU32 to usize.  This
+         * would only not be true on systems with usize < 32 bits, which seems
+         * an unlikely target for us.
+         */
+        let limit = usize::try_from(limit.get()).unwrap();
+        let futures = match marker {
+            None => self
+                .sagas
+                .values()
+                .take(limit)
+                .map(SagaView::from_saga)
+                .collect::<Vec<_>>(),
+            Some(marker_value) => {
+                use std::ops::Bound;
+                self.sagas
+                    .range((Bound::Excluded(marker_value), Bound::Unbounded))
+                    .take(limit)
+                    .map(|(_, v)| SagaView::from_saga(v))
+                    .collect::<Vec<_>>()
+            }
+        };
+
         self.futures.push(
             async move {
                 let views = futures::stream::iter(futures)
