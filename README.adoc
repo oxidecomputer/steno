@@ -21,7 +21,7 @@ This crate has usable interfaces for defining and executing sagas.
 
 Features:
 
-* Execution is recorded to a saga log, but there's no built-in means to persist this as execution progresses yet.  Still, intermediate log states can be recovered, meaning that you can resume execution after a simulated crash.
+* Execution is recorded to a saga log.  Consumers can impl `SecStore` to persist this to a database.  Intermediate log states can be recovered, meaning that you can resume execution after a simulated crash.
 * Actions can share state using arbitrary serializable types (dynamically-checked, unfortunately).
 * Unwinding: if an action fails, all nodes are unwound (basically, undo actions are executed for nodes whose actions completed; it's more complicated for nodes whose actions _may_ have run)
 * Injecting errors into an arbitrary node
@@ -37,7 +37,6 @@ There are lots of caveats:
 * There are many important considerations not yet addressed.  To start with:
 ** updates and versioning: how a saga's code gets packaged, updated, etc.; and how the code and state get versioned
 ** Subsagas: it's totally possible for saga actions to create other sagas, which is important because composeability is important for our use case.  However, doing so is not idempotent, and won't necessarily do the right thing in the event of failures.
-* Serialization format for the log is a little dubious -- see the event_type enum.
 
 Major risks and open questions:
 

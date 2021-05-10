@@ -6,10 +6,12 @@ use crate::saga_action_generic::ActionEndNode;
 use crate::saga_action_generic::ActionStartNode;
 use crate::SagaType;
 use anyhow::anyhow;
+use anyhow::Context;
 use petgraph::dot;
 use petgraph::graph::NodeIndex;
 use petgraph::Directed;
 use petgraph::Graph;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -19,9 +21,20 @@ use uuid::Uuid;
 
 /** Unique identifier for a Saga (an execution of a saga template) */
 #[derive(
-    Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize,
+    Clone,
+    Copy,
+    Deserialize,
+    Eq,
+    JsonSchema,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
 )]
+#[serde(transparent)]
 pub struct SagaId(pub Uuid);
+// TODO-cleanup figure out how to use custom_derive here?
+NewtypeDebug! { () pub struct SagaId(Uuid); }
 /*
  * TODO-design In the Oxide consumer, we probably want to have the serialized
  * form of ids have a prefix describing the type.  This seems consumer-specific,
@@ -29,11 +42,8 @@ pub struct SagaId(pub Uuid);
  * this is to have the consumer have their own enum or trait that impls Display
  * using the various ids provided by consumers.
  */
-impl fmt::Display for SagaId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "sg-{}", self.0)
-    }
-}
+NewtypeDisplay! { () pub struct SagaId(Uuid); }
+NewtypeFrom! { () pub struct SagaId(Uuid); }
 
 /**
  * A directed acyclic graph (DAG) where each node implements `Action`
@@ -44,7 +54,7 @@ impl fmt::Display for SagaId {
  * action run.
  *
  * You define a saga template using [`SagaTemplateBuilder`].  You can execute a
- * saga as many times as you want using [`crate::SagaExecutor`].
+ * saga as many times as you want using [`crate::SecClient::saga_create()`].
  */
 #[derive(Debug)]
 pub struct SagaTemplate<UserType: SagaType> {
@@ -58,6 +68,68 @@ pub struct SagaTemplate<UserType: SagaType> {
 impl<UserType: SagaType> SagaTemplate<UserType> {
     pub fn metadata(&self) -> &SagaTemplateMetadata {
         &self.metadata
+    }
+}
+
+/**
+ * Type-erased wrapper for [`SagaTemplate`], used for saga recovery
+ *
+ * `SagaTemplate` is parametrized by a [`SagaType`] type parameter, which allows
+ * the Steno consumer to bring their own types for saga parameters, function
+ * arguments, etc.  This works fine for code that just wants to create a new
+ * saga because it necessarily knows `SagaType`.
+ *
+ * Saga recovery is more complicated: the consumer is generally reading
+ * serialized saga state from persistent storage.  That state will identify
+ * which template is being run, but what does the consumer do with that
+ * information?  It could search a collection of templates identified by name.
+ * That collection would need to store `SagaTemplate`s with various type
+ * parameters.  This type can be used in such a collection to refer to
+ * templates having different values of [`SagaType`].
+ *
+ * This trait also provides a `recover` function that enables Steno to use the
+ * real `SagaType` when needed.
+ */
+pub trait SagaTemplateGeneric<T>: fmt::Debug + Send + Sync {
+    fn recover(
+        self: Arc<Self>,
+        log: slog::Logger,
+        saga_id: SagaId,
+        user_context: Arc<T>,
+        params: serde_json::Value,
+        sec: crate::sec::SecExecClient,
+        sglog: crate::SagaLog,
+    ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>;
+}
+
+impl<ST> SagaTemplateGeneric<ST::ExecContextType> for SagaTemplate<ST>
+where
+    ST: SagaType + fmt::Debug,
+{
+    fn recover(
+        self: Arc<Self>,
+        log: slog::Logger,
+        saga_id: SagaId,
+        user_context: Arc<ST::ExecContextType>,
+        params: serde_json::Value,
+        sec: crate::sec::SecExecClient,
+        sglog: crate::SagaLog,
+    ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>
+    where
+        ST: SagaType,
+    {
+        let params_deserialized =
+            serde_json::from_value::<ST::SagaParamsType>(params)
+                .context("deserializing saga parameters")?;
+        Ok(Arc::new(crate::saga_exec::SagaExecutor::new_recover(
+            log,
+            saga_id,
+            self,
+            user_context,
+            params_deserialized,
+            sec,
+            sglog,
+        )?))
     }
 }
 

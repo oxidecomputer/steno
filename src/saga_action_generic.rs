@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use core::fmt::Debug;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json::Value as JsonValue;
 use std::sync::Arc;
 
 /**
@@ -21,15 +20,15 @@ use std::sync::Arc;
  * throughout Steno to avoid a sprawl of type parameters and duplicated trait
  * bounds.
  */
-pub trait SagaType: 'static {
+pub trait SagaType: Debug + 'static {
     /**
      * Type for a saga's input parameters
      *
      * When consumers begin execution of a saga with
-     * [`crate::SagaExecutor::new()`], they can specify parameters for the saga.
-     * The collection of parameters has this type.  These parameters are
-     * immediately recorded to the saga log.  They're subsequently made
-     * available to the saga's actions via
+     * [`crate::SecClient::saga_create()`], they can specify parameters for the
+     * saga.  The collection of parameters has this type.  These parameters are
+     * recorded to the saga's persistent representation.  They're subsequently
+     * made available to the saga's actions via
      * [`crate::ActionContext::saga_params()`].
      */
     type SagaParamsType: ActionData;
@@ -37,18 +36,17 @@ pub trait SagaType: 'static {
     /**
      * Type for the consumer's context object
      *
-     * When beginning execution of a saga with [`crate::SagaExecutor::new()`] or
-     * resuming a previous execution with
-     * [`crate::SagaExecutor::new_recover()`], consumers provide a context
-     * object with this type.  This object is not persistent.  Rather, it
-     * provides programming interfaces the consumer wants available from within
-     * actions.  For example, this could include HTTP clients that will be used
-     * by the action to make requests to dependent services.
-     * This object is made available to actions via
-     * [`crate::ActionContext::user_data()`].  There's one context for the life of
-     * the `SagaExecutor`.
+     * When beginning execution of a saga with
+     * [`crate::SecClient::saga_create()`] or resuming a previous execution with
+     * [`crate::SecClient::saga_resume()`], consumers provide a context object
+     * with this type.  This object is not persistent.  Rather, it provides
+     * programming interfaces the consumer wants available from within actions.
+     * For example, this could include HTTP clients that will be used by the
+     * action to make requests to dependent services.  This object is made
+     * available to actions via [`crate::ActionContext::user_data()`].  There's
+     * one context for the life of each saga's execution.
      */
-    type ExecContextType: Send + Sync + 'static;
+    type ExecContextType: Debug + Send + Sync + 'static;
 }
 
 /**
@@ -72,14 +70,14 @@ impl<T: Debug + DeserializeOwned + Serialize + Send + Sync + 'static> ActionData
  * Result of a saga action
  *
  * In this generic Action interface, actions return a pretty generic
- * `JsonValue`.  This is something that we can store uniformly, serialize to the
- * log, and deserialize into a more specific type when the consumer asks for
- * that.  (By contrast, the `ActionFunc` impl is a little fancier.  It allows
- * consumers to return anything that _can_ be serialized.  That's why consumers
- * should prefer that interface and not this one.)
+ * `serde_json::Value`.  This is something that we can store uniformly,
+ * serialize to the log, and deserialize into a more specific type when the
+ * consumer asks for that.  (By contrast, the `ActionFunc` impl is a little
+ * fancier.  It allows consumers to return anything that _can_ be serialized.
+ * That's why consumers should prefer that interface and not this one.)
  */
 // TODO-cleanup can we drop this Arc?
-pub type ActionResult = Result<Arc<JsonValue>, ActionError>;
+pub type ActionResult = Result<Arc<serde_json::Value>, ActionError>;
 
 /** Result of a saga undo action */
 // TODO-design what should the error type here be?  Maybe something that can
@@ -141,7 +139,7 @@ where
 {
     async fn do_it(&self, _: ActionContext<UserType>) -> ActionResult {
         // TODO-log
-        Ok(Arc::new(JsonValue::Null))
+        Ok(Arc::new(serde_json::Value::Null))
     }
 
     async fn undo_it(&self, _: ActionContext<UserType>) -> UndoResult {
@@ -158,7 +156,7 @@ pub struct ActionEndNode {}
 impl<UserType: SagaType> Action<UserType> for ActionEndNode {
     async fn do_it(&self, _: ActionContext<UserType>) -> ActionResult {
         // TODO-log
-        Ok(Arc::new(JsonValue::Null))
+        Ok(Arc::new(serde_json::Value::Null))
     }
 
     async fn undo_it(&self, _: ActionContext<UserType>) -> UndoResult {

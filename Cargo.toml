@@ -11,6 +11,7 @@ edition = "2018"
 anyhow = "1.0.34"
 async-trait = "0.1.42"
 futures = "0.3.8"
+newtype_derive = "0.1.6"
 petgraph = "0.5.1"
 serde_json = "1.0"
 thiserror = "1.0"
@@ -19,12 +20,16 @@ thiserror = "1.0"
 version = "0.4"
 features = [ "serde" ]
 
+[dependencies.schemars]
+version = "0.8"
+features = [ "chrono", "uuid" ]
+
 [dependencies.serde]
 version = "1.0"
 features = [ "derive", "rc" ]
 
 [dependencies.slog]
-version = "2.5"
+version = "2.7"
 features = [ "max_level_trace", "release_max_level_debug" ]
 
 [dependencies.tokio]
@@ -37,5 +42,7 @@ features = [ "serde", "v4" ]
 
 [dev-dependencies]
 expectorate = "1.0"
+slog-async = "2.6"
+slog-term = "2.8"
 structopt = "0.3"
 subprocess = "0.2.6"
