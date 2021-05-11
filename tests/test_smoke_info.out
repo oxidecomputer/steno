@@ -25,7 +25,7 @@ digraph {
 }
 
 *** initial state ***
-+ saga execution: sg-049b2522-308d-442e-bc65-9bfaef863597
++ saga execution: 049b2522-308d-442e-bc65-9bfaef863597
 +-- stage  1: blocked: InstanceCreate (produces "instance_id")
 +-- stage  2: + (actions in parallel)
               +-- blocked: VpcAllocIp (produces "instance_ip")

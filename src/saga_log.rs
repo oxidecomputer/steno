@@ -4,25 +4,43 @@ use crate::saga_action_error::ActionError;
 use crate::saga_template::SagaId;
 use anyhow::anyhow;
 use anyhow::Context;
-use chrono::DateTime;
-use chrono::SecondsFormat;
-use chrono::Utc;
-use core::future::Future;
-use serde::de::DeserializeOwned;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::Read;
-use std::io::Write;
 use std::sync::Arc;
 use thiserror::Error;
 
-/* TODO-cleanup newtype for this? */
-type SagaNodeId = u64;
+/**
+ * Unique identifier for a saga node
+ */
+/*
+ * We use a newtype for SagaNodeId for the usual reasons.  What about the
+ * underlying representation?  The Omicron consumer is going to store these in
+ * CockroachDB, which makes `i64` the most natural numeric type.  There's no
+ * need for signed values here, so we choose `u32` as large enough for our
+ * purposes, unsigned, and can be infallibly converted to an `i64`.
+ */
+// TODO-cleanup figure out how to use custom_derive here?
+#[derive(
+    Deserialize,
+    Clone,
+    Copy,
+    Eq,
+    Ord,
+    JsonSchema,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+)]
+#[serde(transparent)]
+pub struct SagaNodeId(u32);
+NewtypeDebug! { () pub struct SagaNodeId(u32); }
+NewtypeDisplay! { () pub struct SagaNodeId(u32); }
+NewtypeFrom! { () pub struct SagaNodeId(u32); }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum SagaLogError {
     #[error(
         "event type {event_type} is illegal with current \
@@ -32,6 +50,25 @@ pub enum SagaLogError {
         current_status: SagaNodeLoadStatus,
         event_type: SagaNodeEventType,
     },
+}
+
+/**
+ * An entry in the saga log
+ */
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SagaNodeEvent {
+    /** id of the saga */
+    pub saga_id: SagaId,
+    /** id of the saga node */
+    pub node_id: SagaNodeId,
+    /** what's indicated by this event */
+    pub event_type: SagaNodeEventType,
+}
+
+impl fmt::Debug for SagaNodeEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "N{:0>3} {}", self.node_id, self.event_type)
+    }
 }
 
 /**
@@ -47,7 +84,7 @@ pub enum SagaNodeEventType {
     /** The action has started running */
     Started,
     /** The action completed successfully (with output data) */
-    Succeeded(Arc<JsonValue>),
+    Succeeded(Arc<serde_json::Value>),
     /** The action failed */
     Failed(ActionError),
     /** The undo action has started running */
@@ -58,13 +95,19 @@ pub enum SagaNodeEventType {
 
 impl fmt::Display for SagaNodeEventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+        f.write_str(self.label())
+    }
+}
+
+impl SagaNodeEventType {
+    pub fn label(&self) -> &'static str {
+        match self {
             SagaNodeEventType::Started => "started",
             SagaNodeEventType::Succeeded(_) => "succeeded",
             SagaNodeEventType::Failed(_) => "failed",
-            SagaNodeEventType::UndoStarted => "undo started",
-            SagaNodeEventType::UndoFinished => "undo finished",
-        })
+            SagaNodeEventType::UndoStarted => "undo_started",
+            SagaNodeEventType::UndoFinished => "undo_finished",
+        }
     }
 }
 
@@ -87,11 +130,11 @@ pub enum SagaNodeLoadStatus {
     /** The action has started running */
     Started,
     /** The action completed successfully (with output data) */
-    Succeeded(Arc<JsonValue>),
+    Succeeded(Arc<serde_json::Value>),
     /** The action failed */
     Failed(ActionError),
     /** The undo action has started running (with output data from success) */
-    UndoStarted(Arc<JsonValue>),
+    UndoStarted(Arc<serde_json::Value>),
     /** The undo action has finished */
     UndoFinished,
 }
@@ -130,160 +173,31 @@ impl SagaNodeLoadStatus {
 }
 
 /**
- * An entry in the saga log
- */
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SagaNodeEvent {
-    /** id of the saga */
-    saga_id: SagaId,
-    /** id of the saga node */
-    node_id: SagaNodeId,
-    /** what's indicated by this event */
-    event_type: SagaNodeEventType,
-
-    /* The following debugging fields are not used in the code. */
-    /** when this event was recorded (for debugging) */
-    event_time: DateTime<Utc>,
-    /** creator of this event (e.g., a hostname, for debugging) */
-    creator: String,
-}
-
-impl fmt::Debug for SagaNodeEvent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {} N{:0>3} {}",
-            self.event_time.to_rfc3339_opts(SecondsFormat::Millis, true),
-            self.creator,
-            self.node_id,
-            self.event_type
-        )
-    }
-}
-
-/**
  * Write to a saga's log
  */
-/*
- * TODO-cleanup This structure is used both for writing to the log and
- * recovering the log.  There are some similarities.  However, it might be
- * useful to enforce that you're only doing one of these at a time by having
- * these by separate types, with the recovery one converting into SagaLog when
- * you're done with recovery.
- */
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SagaLog {
-    /* TODO-robustness include version here */
-    pub saga_id: SagaId,
-    pub unwinding: bool,
-    creator: String,
-    params: JsonValue,
+    saga_id: SagaId,
+    unwinding: bool,
     events: Vec<SagaNodeEvent>,
     node_status: BTreeMap<SagaNodeId, SagaNodeLoadStatus>,
 }
 
 impl SagaLog {
-    pub fn new(creator: &str, saga_id: &SagaId, params: JsonValue) -> SagaLog {
+    pub fn new_empty(saga_id: SagaId) -> SagaLog {
         SagaLog {
-            saga_id: *saga_id,
-            creator: creator.to_string(),
+            saga_id,
             events: Vec::new(),
-            params,
             node_status: BTreeMap::new(),
             unwinding: false,
         }
     }
 
-    pub fn record_now(
-        &mut self,
-        node_id: SagaNodeId,
-        event_type: SagaNodeEventType,
-    ) -> impl Future<Output = Result<(), SagaLogError>> {
-        let event = SagaNodeEvent {
-            saga_id: self.saga_id,
-            node_id,
-            event_time: Utc::now(),
-            event_type,
-            creator: self.creator.clone(),
-        };
-
-        self.record(event)
-            .unwrap_or_else(|_| panic!("illegal event for node {}", node_id));
-
-        /*
-         * Although this implementation is synchronous, we want callers to
-         * behave as though it were async.
-         */
-        async move { Ok(()) }
-    }
-
-    fn record(&mut self, event: SagaNodeEvent) -> Result<(), SagaLogError> {
-        let current_status = self.load_status_for_node(event.node_id);
-        let next_status = current_status.next_status(&event.event_type)?;
-
-        match next_status {
-            SagaNodeLoadStatus::Failed(_)
-            | SagaNodeLoadStatus::UndoStarted(_)
-            | SagaNodeLoadStatus::UndoFinished => {
-                self.unwinding = true;
-            }
-            _ => (),
-        };
-
-        self.node_status.insert(event.node_id, next_status);
-        self.events.push(event);
-
-        Ok(())
-    }
-
-    pub fn load_status_for_node(
-        &self,
-        node_id: SagaNodeId,
-    ) -> &SagaNodeLoadStatus {
-        self.node_status
-            .get(&node_id)
-            .unwrap_or(&SagaNodeLoadStatus::NeverStarted)
-    }
-
-    pub fn events(&self) -> &Vec<SagaNodeEvent> {
-        &self.events
-    }
-
-    pub fn params_as<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
-        serde_json::from_value(self.params.clone())
-            .context("deserializing initial saga parameters")
-    }
-
-    // TODO-blocking
-    pub fn dump<W: Write>(&self, writer: W) -> Result<(), anyhow::Error> {
-        /* TODO-cleanup can we avoid these clones? */
-        let s = SagaLogSerialized {
-            saga_id: self.saga_id,
-            creator: self.creator.clone(),
-            events: self.events.clone(),
-            params: self.params.clone(),
-        };
-
-        serde_json::to_writer_pretty(writer, &s).with_context(|| {
-            format!("serializing log for saga {}", self.saga_id)
-        })
-    }
-
-    // TODO-blocking
-    // TODO-design There's some confusion about the recovery process in general
-    // and the "creator" field.  The recorded log has a creator, and each entry
-    // has a creator.  The executor also has a creator, and the SagaLog has a
-    // creator.  These can nearly all be different, but the executor and SagaLog
-    // creator should match.  Part of the problem here is that the SagaLog only
-    // has one "creator", but we really want it to have two: the one in the
-    // recorded log, and the one that's used for new entries.
-    pub fn load<R: Read>(
-        creator: &str,
-        reader: R,
+    pub fn new_recover(
+        saga_id: SagaId,
+        mut events: Vec<SagaNodeEvent>,
     ) -> Result<SagaLog, anyhow::Error> {
-        let mut s: SagaLogSerialized = serde_json::from_reader(reader)
-            .with_context(|| "deserializing saga log")?;
-        let mut sglog = SagaLog::new(&creator, &s.saga_id, s.params.clone());
+        let mut log = Self::new_empty(saga_id);
 
         /*
          * Sort the events by the event type.  This ensures that if there's at
@@ -298,7 +212,7 @@ impl SagaLog {
          * person looking at the sequence of entries (as they appear in memory)
          * for debugging.
          */
-        s.events.sort_by_key(|f| match f.event_type {
+        events.sort_by_key(|f| match f.event_type {
             /*
              * TODO-cleanup Is there a better way to do this?  We want to sort
              * by the event type, where event types are compared by the order
@@ -318,50 +232,86 @@ impl SagaLog {
         /*
          * Replay the events for this saga.
          */
-        for event in s.events {
-            if event.saga_id != sglog.saga_id {
+        for event in events {
+            if event.saga_id != saga_id {
                 return Err(anyhow!(
                     "found an event in the log for a \
-                    different saga ({}) than the log's header ({})",
+                    different saga ({}) than requested ({})",
                     event.saga_id,
-                    sglog.saga_id
+                    saga_id,
                 ));
             }
 
-            sglog.record(event).with_context(|| "recovering saga log")?;
+            log.record(&event).with_context(|| "SagaLog::new_recover")?;
         }
-        Ok(sglog)
+
+        Ok(log)
+    }
+
+    pub fn record(
+        &mut self,
+        event: &SagaNodeEvent,
+    ) -> Result<(), SagaLogError> {
+        let current_status = self.load_status_for_node(event.node_id);
+        let next_status = current_status.next_status(&event.event_type)?;
+
+        match next_status {
+            SagaNodeLoadStatus::Failed(_)
+            | SagaNodeLoadStatus::UndoStarted(_)
+            | SagaNodeLoadStatus::UndoFinished => {
+                self.unwinding = true;
+            }
+            _ => (),
+        };
+
+        self.node_status.insert(event.node_id, next_status);
+        self.events.push(event.clone());
+        Ok(())
+    }
+
+    pub fn unwinding(&self) -> bool {
+        self.unwinding
+    }
+
+    pub fn load_status_for_node(
+        &self,
+        node_id: SagaNodeId,
+    ) -> &SagaNodeLoadStatus {
+        self.node_status
+            .get(&node_id)
+            .unwrap_or(&SagaNodeLoadStatus::NeverStarted)
+    }
+
+    pub fn events(&self) -> &[SagaNodeEvent] {
+        &self.events
+    }
+
+    pub fn pretty(&self) -> SagaLogPretty<'_> {
+        SagaLogPretty { log: self }
     }
 }
 
-#[doc(hidden)]
-#[derive(Deserialize, Serialize)]
-pub struct SagaLogSerialized {
-    /* TODO-robustness add version */
-    pub saga_id: SagaId,
-    pub creator: String,
-    pub params: JsonValue,
-    pub events: Vec<SagaNodeEvent>,
+/**
+ * Handle for pretty-printing a SagaLog (using the `fmt::Debug` trait)
+ */
+pub struct SagaLogPretty<'a> {
+    log: &'a SagaLog,
 }
 
-impl fmt::Debug for SagaLog {
+impl<'a> fmt::Debug for SagaLogPretty<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "SAGA LOG:\n")?;
-        write!(f, "saga execution id: {}\n", self.saga_id)?;
-        write!(f, "creator:           {}\n", self.creator)?;
-        write!(f, "params (generic):  {}\n", self.params)?;
+        write!(f, "saga id:   {}\n", self.log.saga_id)?;
         write!(
             f,
-            "direction:         {}\n",
-            if !self.unwinding { "forward" } else { "unwinding" }
+            "direction: {}\n",
+            if !self.log.unwinding { "forward" } else { "unwinding" }
         )?;
-        write!(f, "events ({} total):\n", self.events.len())?;
+        write!(f, "events ({} total):\n", self.log.events.len())?;
         write!(f, "\n")?;
-
-        for (i, event) in self.events.iter().enumerate() {
+        for (i, event) in self.log.events.iter().enumerate() {
             write!(f, "{:0>3} {:?}\n", i + 1, event)?;
         }
-
         Ok(())
     }
 }

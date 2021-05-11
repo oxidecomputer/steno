@@ -10,11 +10,11 @@ use crate::saga_action_generic::ActionResult;
 use crate::saga_action_generic::SagaType;
 use crate::saga_action_generic::UndoResult;
 use crate::saga_exec::ActionContext;
-use core::any::type_name;
-use core::fmt;
-use core::fmt::Debug;
-use core::future::Future;
 use futures::future::BoxFuture;
+use std::any::type_name;
+use std::fmt;
+use std::fmt::Debug;
+use std::future::Future;
 use std::sync::Arc;
 
 /**
@@ -144,8 +144,9 @@ where
         Box::pin(async move {
             let fut = self.action_func.act(sgctx);
             /*
-             * Execute the caller's function and translate its type into the generic
-             * JsonValue that the framework uses to store action outputs.
+             * Execute the caller's function and translate its type into the
+             * generic JsonValue that the framework uses to store action
+             * outputs.
              */
             fut.await
                 .and_then(|func_output| {

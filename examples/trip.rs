@@ -13,15 +13,16 @@
 
 use serde::Deserialize;
 use serde::Serialize;
+use slog::Drain;
 use std::sync::Arc;
 use steno::ActionContext;
 use steno::ActionError;
 use steno::ActionFunc;
-use steno::SagaExecutor;
 use steno::SagaId;
 use steno::SagaTemplate;
 use steno::SagaTemplateBuilder;
 use steno::SagaType;
+use steno::SecClient;
 use uuid::Uuid;
 
 //
@@ -32,6 +33,17 @@ use uuid::Uuid;
 //
 #[tokio::main]
 async fn main() {
+    let log = {
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog::LevelFilter(drain, slog::Level::Warning).fuse();
+        let drain = slog_async::Async::new(drain).build().fuse();
+        slog::Logger::root(drain, slog::o!())
+    };
+    let sec = steno::sec(
+        log.new(slog::o!()),
+        Arc::new(steno::InMemorySecStore::new()),
+    );
     let trip_context = Arc::new(TripContext {});
     let params = TripParams {
         hotel_name: String::from("Springfield Palace Hotel"),
@@ -39,11 +51,15 @@ async fn main() {
         car_info: String::from("1998 Canyonero"),
         charge_details: String::from("Moneybank Charge Card"),
     };
-    book_trip(trip_context, params).await;
+    book_trip(sec, trip_context, params).await;
 }
 
 // Create a new "book trip" saga with the given parameters and then execute it.
-async fn book_trip(trip_context: Arc<TripContext>, params: TripParams) {
+async fn book_trip(
+    sec: SecClient,
+    trip_context: Arc<TripContext>,
+    params: TripParams,
+) {
     //
     // Build a saga template.  The template describes the actions that are part
     // of the saga (including the functions to be invoked to do each of the
@@ -66,26 +82,34 @@ async fn book_trip(trip_context: Arc<TripContext>, params: TripParams) {
     //
     let creator = "myself";
 
-    // Create an executor to execute the saga.
-    let saga_exec = SagaExecutor::new(
-        &saga_id,
-        saga_template,
-        creator,
-        Arc::new(trip_context),
-        params,
-    )
-    .expect("failed to serialize saga parameters");
+    // Create the saga.
+    let saga_future = sec
+        .saga_create(
+            saga_id,
+            Arc::new(trip_context),
+            saga_template,
+            "book-trip".to_string(),
+            params,
+        )
+        .await
+        .expect("failed to create saga");
+
+    // Set it running.
+    sec.saga_start(saga_id).await.expect("failed to start saga running");
 
     //
-    // Run the saga to completion.  This could take a while, depending on what
-    // the saga does!  This traverses the DAG of actions, executing each one.
-    // If one fails, then it's all unwound: any actions that previously
+    // Wait for the saga to finish running.  This could take a while, depending
+    // on what the saga does!  This traverses the DAG of actions, executing each
+    // one.  If one fails, then it's all unwound: any actions that previously
     // completed will be undone.
     //
-    saga_exec.run().await;
+    // Note that the SEC will run all this regardless of whether you wait for it
+    // here.  This is just a handle for you to know when the saga has finished.
+    //
+    let result = saga_future.await;
 
     // Print the results.
-    match saga_exec.result().kind {
+    match result.kind {
         Ok(success) => {
             println!(
                 "hotel:   {:?}",
@@ -181,12 +205,14 @@ struct TripParams {
 // easy for us to access application-specific state, like a logger, HTTP
 // clients, etc.
 //
+#[derive(Debug)]
 struct TripContext;
 
 //
 // Steno uses several type parameters that you specify by impl'ing the SagaType
 // trait.
 //
+#[derive(Debug)]
 struct TripSaga;
 impl SagaType for TripSaga {
     // Type for the saga's parameters

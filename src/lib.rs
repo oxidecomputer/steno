@@ -11,7 +11,9 @@
 //! * Write some functions that will be used as _actions_ and _undo actions_ for
 //!   your saga.  Package these up with [`ActionFunc::new_action()`].
 //! * Use [`SagaTemplateBuilder`] to construct a graph of these actions.
-//! * Use [`SagaExecutor`] to execute the saga.
+//! * Construct a saga execution coordinator with [`sec()`] and use that to run
+//!   the saga.  You can start with an [`InMemorySecStore`] or impl your own
+//!   [`SecStore`].
 //!
 //! This crate is necessarily somewhat complex to use.  **For a detailed,
 //! documented example, see examples/trip.rs.**
@@ -34,6 +36,8 @@ mod saga_action_generic;
 mod saga_exec;
 mod saga_log;
 mod saga_template;
+mod sec;
+mod store;
 
 /*
  * TODO-cleanup The example_provision stuff should probably be in a separate
@@ -55,15 +59,40 @@ pub use saga_action_generic::ActionResult;
 pub use saga_action_generic::SagaType;
 pub use saga_action_generic::UndoResult;
 pub use saga_exec::ActionContext;
+pub use saga_exec::SagaExecManager;
 pub use saga_exec::SagaExecStatus;
-pub use saga_exec::SagaExecutor;
 pub use saga_exec::SagaResult;
 pub use saga_exec::SagaResultErr;
 pub use saga_exec::SagaResultOk;
 pub use saga_log::SagaLog;
-pub use saga_log::SagaLogSerialized;
+pub use saga_log::SagaNodeEvent;
+pub use saga_log::SagaNodeEventType;
+pub use saga_log::SagaNodeId;
 pub use saga_template::SagaId;
 pub use saga_template::SagaTemplate;
 pub use saga_template::SagaTemplateBuilder;
 pub use saga_template::SagaTemplateDot;
+pub use saga_template::SagaTemplateGeneric;
 pub use saga_template::SagaTemplateMetadata;
+pub use sec::sec;
+pub use sec::SagaSerialized;
+pub use sec::SagaStateView;
+pub use sec::SagaView;
+pub use sec::SecClient;
+pub use store::InMemorySecStore;
+pub use store::SagaCachedState;
+pub use store::SagaCreateParams;
+pub use store::SecStore;
+
+/*
+ * TODO-cleanup This ought not to be exposed.  It's here because we expose
+ * SagaTemplateGeneric, which is important, and it has a function that uses this
+ * type.  This ought to be a sealed trait where this function is private or
+ * something.
+ */
+pub use sec::SecExecClient;
+
+#[macro_use]
+extern crate slog;
+#[macro_use]
+extern crate newtype_derive;

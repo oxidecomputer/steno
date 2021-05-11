@@ -6,7 +6,7 @@
 use expectorate::assert_contents;
 use std::env::current_exe;
 use std::path::PathBuf;
-use steno::SagaLogSerialized;
+use steno::SagaSerialized;
 use subprocess::Exec;
 use subprocess::Redirection;
 
@@ -89,7 +89,7 @@ fn cmd_run_recover() {
     assert_contents("tests/test_smoke_run_recover_done.out", &recovery_done);
 
     /* Now try lopping off the last handful of records so there's work to do. */
-    let mut log_parsed: SagaLogSerialized =
+    let mut log_parsed: SagaSerialized =
         serde_json::from_str(&log).expect("failed to parse generated log");
     log_parsed.events.truncate(
         (log_parsed.events.len() - 5).clamp(0, log_parsed.events.len()),
@@ -125,7 +125,7 @@ fn cmd_run_recover_unwind() {
     );
 
     /* Now try lopping off the last handful of records so there's work to do. */
-    let mut log_parsed: SagaLogSerialized =
+    let mut log_parsed: SagaSerialized =
         serde_json::from_str(&log).expect("failed to parse generated log");
     log_parsed.events.truncate(
         (log_parsed.events.len() - 3).clamp(0, log_parsed.events.len()),

@@ -9,12 +9,14 @@ use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
 use crate::saga_template::SagaId;
 use crate::saga_template::SagaTemplateMetadata;
+use crate::sec::SecExecClient;
+use crate::SagaCachedState;
 use crate::SagaLog;
+use crate::SagaNodeEvent;
+use crate::SagaNodeId;
 use crate::SagaTemplate;
 use crate::SagaType;
 use anyhow::anyhow;
-use core::fmt::Debug;
-use core::future::Future;
 use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::lock::Mutex;
@@ -28,10 +30,11 @@ use petgraph::Direction;
 use petgraph::Graph;
 use petgraph::Incoming;
 use petgraph::Outgoing;
-use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::convert::TryFrom;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -42,7 +45,7 @@ use tokio::task::JoinHandle;
  * children (to notify when undone), and to each direction as well?  Then the
  * whole thing is a message passing exercise?
  */
-struct SgnsDone(Arc<JsonValue>);
+struct SgnsDone(Arc<serde_json::Value>);
 struct SgnsFailed(ActionError);
 struct SgnsUndone(UndoMode);
 
@@ -87,13 +90,13 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsDone> {
             /*
              * If we've completed the last node, the saga is done.
              */
-            assert_eq!(live_state.exec_state, SagaState::Running);
+            assert_eq!(live_state.exec_state, SagaCachedState::Running);
             assert_eq!(graph.node_count(), live_state.node_outputs.len());
             live_state.mark_saga_done();
             return;
         }
 
-        if live_state.exec_state == SagaState::Unwinding {
+        if live_state.exec_state == SagaCachedState::Unwinding {
             /*
              * If the saga is currently unwinding, then this node finishing
              * doesn't unblock any other nodes.  However, it potentially
@@ -139,7 +142,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsFailed> {
             .insert(self.node_id, self.state.0.clone())
             .expect_none("node finished twice (storing error)");
 
-        if live_state.exec_state == SagaState::Unwinding {
+        if live_state.exec_state == SagaCachedState::Unwinding {
             /*
              * This node failed while we're already unwinding.  We don't
              * need to kick off unwinding again.  We could in theory
@@ -164,7 +167,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsFailed> {
              * Begin the unwinding process.  Start with the end node: mark
              * it trivially "undone" and propagate that.
              */
-            live_state.exec_state = SagaState::Unwinding;
+            live_state.exec_state = SagaCachedState::Unwinding;
             assert_ne!(self.node_id, exec.saga_metadata.end_node);
             let new_node = SagaNode {
                 node_id: exec.saga_metadata.end_node,
@@ -186,7 +189,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
         live_state: &mut SagaExecLiveState<UserType>,
     ) {
         let graph = &exec.saga_metadata.graph;
-        assert_eq!(live_state.exec_state, SagaState::Unwinding);
+        assert_eq!(live_state.exec_state, SagaCachedState::Unwinding);
         live_state
             .nodes_undone
             .insert(self.node_id, self.state.0)
@@ -216,7 +219,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
                  * flesh out more of the rest of this to better understand how
                  * to manage state.
                  */
-                match live_state.node_exec_state(&parent) {
+                match live_state.node_exec_state(parent) {
                     /*
                      * If the node never started or if it failed, we can
                      * just mark it undone without doing anything else.
@@ -258,7 +261,9 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
                         live_state.queue_undo.push(parent);
                     }
 
-                    NodeExecState::QueuedToUndo | NodeExecState::Undone(_) => {
+                    NodeExecState::QueuedToUndo
+                    | NodeExecState::UndoInProgress
+                    | NodeExecState::Undone(_) => {
                         panic!(
                             "already undoing or undone node \
                             whose child was just now undone"
@@ -268,16 +273,6 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
             }
         }
     }
-}
-
-/**
- * Execution state for the saga overall
- */
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum SagaState {
-    Running,
-    Unwinding,
-    Done,
 }
 
 /**
@@ -309,16 +304,13 @@ struct TaskParams<UserType: SagaType> {
      */
     live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
 
-    // TODO-cleanup should not need a copy here.
-    creator: String,
-
     /** id of the graph node whose action we're running */
     node_id: NodeIndex,
     /** channel over which to send completion message */
     done_tx: mpsc::Sender<TaskCompletion<UserType>>,
     /** Ancestor tree for this node.  See [`ActionContext`]. */
     // TODO-cleanup there's no reason this should be an Arc.
-    ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
+    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
     /** The action itself that we're executing. */
     action: Arc<dyn Action<UserType>>,
 }
@@ -341,8 +333,8 @@ struct TaskParams<UserType: SagaType> {
  * the constructor accepted "E" and stored that, since "E" is already Send +
  * Sync + 'static.  There are two challenges here: (1) There are a bunch of
  * other types that store a reference to E, including TaskParams and
- * ActionContext, the latter of which is exposed to the user.  These would have to
- * store &E, which would be okay, but they'd need to have annoying lifetime
+ * ActionContext, the latter of which is exposed to the user.  These would have
+ * to store &E, which would be okay, but they'd need to have annoying lifetime
  * parameters.  (2) child sagas (and so child saga executors) are a thing.
  * Since there's only one "E", the child would have to reference &E, which means
  * it would need a lifetime parameter on it _and_ that might mean it would have
@@ -351,11 +343,11 @@ struct TaskParams<UserType: SagaType> {
  */
 #[derive(Debug)]
 pub struct SagaExecutor<UserType: SagaType> {
+    log: slog::Logger,
+
     // TODO This could probably be a reference instead.
     saga_template: Arc<SagaTemplate<UserType>>,
     saga_metadata: Arc<SagaTemplateMetadata>,
-
-    creator: String,
 
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
@@ -377,28 +369,29 @@ enum RecoveryDirection {
 impl<UserType: SagaType> SagaExecutor<UserType> {
     /** Create an executor to run the given saga. */
     pub fn new(
-        saga_id: &SagaId,
+        log: slog::Logger,
+        saga_id: SagaId,
         saga_template: Arc<SagaTemplate<UserType>>,
-        creator: &str,
         user_context: Arc<UserType::ExecContextType>,
         user_saga_params: UserType::SagaParamsType,
-    ) -> Result<SagaExecutor<UserType>, ActionError> {
-        let serialized_params = serde_json::to_value(&user_saga_params)
-            .map_err(ActionError::new_serialize)?;
-        let sglog = SagaLog::new(creator, saga_id, serialized_params);
+        sec_hdl: SecExecClient,
+    ) -> SagaExecutor<UserType> {
+        let sglog = SagaLog::new_empty(saga_id);
 
         /*
-         * It would seem simpler to propagate the result from `new_recover()`,
-         * but the reality is that the only errors that can be returned are not
+         * The only errors that can be returned from new_recover() are never
          * expected in this context.
          */
-        Ok(SagaExecutor::new_recover(
+        SagaExecutor::new_recover(
+            log,
+            saga_id,
             saga_template,
-            sglog,
-            creator,
             user_context,
+            user_saga_params,
+            sec_hdl,
+            sglog,
         )
-        .unwrap())
+        .unwrap()
     }
 
     /**
@@ -406,10 +399,13 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
      * started, using the given log events.
      */
     pub fn new_recover(
+        log: slog::Logger,
+        saga_id: SagaId,
         saga_template: Arc<SagaTemplate<UserType>>,
-        sglog: SagaLog,
-        creator: &str,
         user_context: Arc<UserType::ExecContextType>,
+        user_saga_params: UserType::SagaParamsType,
+        sec_hdl: SecExecClient,
+        sglog: SagaLog,
     ) -> Result<SagaExecutor<UserType>, anyhow::Error> {
         /*
          * During recovery, there's a fine line between operational errors and
@@ -421,17 +417,15 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
          * code right here (which walks each node of the graph exactly once),
          * not a result of corrupted database state.
          */
-        let saga_id = sglog.saga_id;
-        let forward = !sglog.unwinding;
-        let user_saga_params =
-            Arc::new(sglog.params_as::<UserType::SagaParamsType>()?);
+        let forward = !sglog.unwinding();
+        let user_saga_params = Arc::new(user_saga_params);
         let mut live_state = SagaExecLiveState {
             saga_template: Arc::clone(&saga_template),
             saga_metadata: Arc::new(saga_template.metadata().clone()),
             exec_state: if forward {
-                SagaState::Running
+                SagaCachedState::Running
             } else {
-                SagaState::Unwinding
+                SagaCachedState::Unwinding
             },
             queue_todo: Vec::new(),
             queue_undo: Vec::new(),
@@ -440,8 +434,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             nodes_undone: BTreeMap::new(),
             node_errors: BTreeMap::new(),
             child_sagas: BTreeMap::new(),
-            sglog: sglog,
+            sglog,
             injected_errors: BTreeSet::new(),
+            sec_hdl,
+            saga_id,
         };
         let mut loaded = BTreeSet::new();
         let saga_metadata = Arc::clone(&live_state.saga_metadata);
@@ -463,7 +459,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         for node_id in graph_nodes {
             let node_status =
-                live_state.sglog.load_status_for_node(node_id.index() as u64);
+                live_state.sglog.load_status_for_node(node_id.into());
 
             /*
              * Validate this node's state against its parent nodes' states.  By
@@ -471,9 +467,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
              * or end node to the current node.
              */
             for parent in graph.neighbors_directed(node_id, Incoming) {
-                let parent_status = live_state
-                    .sglog
-                    .load_status_for_node(parent.index() as u64);
+                let parent_status =
+                    live_state.sglog.load_status_for_node(parent.into());
                 if !recovery_validate_parent(parent_status, node_status) {
                     return Err(anyhow!(
                         "recovery for saga {}: node {:?}: \
@@ -639,13 +634,13 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let (finish_tx, _) = broadcast::channel(1);
 
         Ok(SagaExecutor {
+            log,
             saga_template,
             saga_metadata,
+            finish_tx,
+            saga_id,
             user_context,
             user_saga_params,
-            creator: creator.to_owned(),
-            saga_id,
-            finish_tx,
             live_state: Arc::new(Mutex::new(live_state)),
         })
     }
@@ -661,7 +656,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
      */
     fn make_ancestor_tree(
         &self,
-        tree: &mut BTreeMap<String, Arc<JsonValue>>,
+        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
         include_self: bool,
@@ -680,7 +675,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
     fn make_ancestor_tree_node(
         &self,
-        tree: &mut BTreeMap<String, Arc<JsonValue>>,
+        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
     ) {
@@ -730,8 +725,9 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
              * consumer has run() it (once).
              */
             let live_state = self.live_state.lock().await;
-            if live_state.exec_state == SagaState::Done {
+            if live_state.exec_state == SagaCachedState::Done {
                 self.finish_tx.send(()).expect("failed to send finish message");
+                live_state.sec_hdl.saga_update(SagaCachedState::Done).await;
                 return;
             }
         }
@@ -772,15 +768,31 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             task.await.expect("node task failed unexpectedly");
 
             let mut live_state = self.live_state.lock().await;
+            let prev_state = live_state.exec_state;
             message.node.propagate(&self, &mut live_state);
-            if live_state.exec_state == SagaState::Done {
+            /*
+             * TODO-cleanup This condition ought to be simplified.  We want to
+             * update the saga state when we become Unwinding (which we do here)
+             * and when we become Done (which we do below).  There may be a
+             * better place to put this logic that's less ad hoc.
+             */
+            if live_state.exec_state == SagaCachedState::Unwinding
+                && prev_state != SagaCachedState::Unwinding
+            {
+                live_state
+                    .sec_hdl
+                    .saga_update(SagaCachedState::Unwinding)
+                    .await;
+            }
+            if live_state.exec_state == SagaCachedState::Done {
                 break;
             }
         }
 
         let live_state = self.live_state.try_lock().unwrap();
-        assert_eq!(live_state.exec_state, SagaState::Done);
+        assert_eq!(live_state.exec_state, SagaCachedState::Done);
         self.finish_tx.send(()).expect("failed to send finish message");
+        live_state.sec_hdl.saga_update(SagaCachedState::Done).await;
     }
 
     /*
@@ -846,7 +858,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: sgaction,
-                creator: self.creator.clone(),
                 user_context: Arc::clone(&self.user_context),
                 user_saga_params: Arc::clone(&self.user_saga_params),
             };
@@ -855,7 +866,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             live_state.node_task(node_id, task);
         }
 
-        if live_state.exec_state == SagaState::Running {
+        if live_state.exec_state == SagaCachedState::Running {
             assert!(live_state.queue_undo.is_empty());
             return;
         }
@@ -890,7 +901,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: Arc::clone(sgaction),
-                creator: self.creator.clone(),
                 user_context: Arc::clone(&self.user_context),
                 user_saga_params: Arc::clone(&self.user_saga_params),
             };
@@ -916,11 +926,11 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
              */
             let mut live_state = task_params.live_state.lock().await;
             let load_status =
-                live_state.sglog.load_status_for_node(node_id.index() as u64);
+                live_state.sglog.load_status_for_node(node_id.into());
             match load_status {
                 SagaNodeLoadStatus::NeverStarted => {
                     record_now(
-                        &mut live_state.sglog,
+                        &mut live_state,
                         node_id,
                         SagaNodeEventType::Started,
                     )
@@ -941,7 +951,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             node_id,
             live_state: Arc::clone(&task_params.live_state),
             saga_metadata: Arc::clone(&task_params.saga_metadata),
-            creator: task_params.creator.clone(),
             user_context: Arc::clone(&task_params.user_context),
             user_saga_params: Arc::clone(&task_params.user_saga_params),
         });
@@ -972,11 +981,11 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         {
             let mut live_state = task_params.live_state.lock().await;
             let load_status =
-                live_state.sglog.load_status_for_node(node_id.index() as u64);
+                live_state.sglog.load_status_for_node(node_id.into());
             match load_status {
                 SagaNodeLoadStatus::Succeeded(_) => {
                     record_now(
-                        &mut live_state.sglog,
+                        &mut live_state,
                         node_id,
                         SagaNodeEventType::UndoStarted,
                     )
@@ -997,7 +1006,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             node_id,
             live_state: Arc::clone(&task_params.live_state),
             saga_metadata: Arc::clone(&task_params.saga_metadata),
-            creator: task_params.creator.clone(),
             user_context: Arc::clone(&task_params.user_context),
             user_saga_params: Arc::clone(&task_params.user_saga_params),
         });
@@ -1022,7 +1030,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         {
             let mut live_state = task_params.live_state.lock().await;
-            record_now(&mut live_state.sglog, node_id, event_type).await;
+            record_now(&mut live_state, node_id, event_type).await;
         }
 
         task_params
@@ -1072,7 +1080,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .live_state
             .try_lock()
             .expect("attempted to get result while saga still running?");
-        assert_eq!(live_state.exec_state, SagaState::Done);
+        assert_eq!(live_state.exec_state, SagaCachedState::Done);
 
         if live_state.nodes_undone.contains_key(&self.saga_metadata.start_node)
         {
@@ -1154,21 +1162,22 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             let topo_visitor = Topo::new(graph);
             for node in topo_visitor.iter(graph) {
                 /* Record the current execution state for this node. */
-                node_exec_states
-                    .insert(node, live_state.node_exec_state(&node));
+                node_exec_states.insert(node, live_state.node_exec_state(node));
 
                 /*
                  * If there's a child saga for this node, construct its status.
                  */
-                if let Some(child_execs) = live_state.child_sagas.get(&node) {
+                if let Some(child_ids) = live_state.child_sagas.get(&node) {
                     /*
                      * TODO-correctness check lock order.  This seems okay
                      * because we always take locks from parent -> child and
                      * there cannot be cycles.
                      */
                     let mut statuses = Vec::new();
-                    for c in child_execs {
-                        statuses.push(c.status().await);
+                    for c in child_ids {
+                        let child_view =
+                            live_state.sec_hdl.saga_get(*c).await.unwrap();
+                        statuses.push(child_view.state.status().clone());
                     }
                     child_sagas
                         .insert(node, statuses)
@@ -1217,34 +1226,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 nodes_at_depth,
                 node_exec_states,
                 child_sagas,
+                sglog: live_state.sglog.clone(),
             }
         }
         .boxed()
-    }
-}
-
-/*
- * This trait exists in order to erase the type parameter on SagaExecutor.  In
- * particular, SagaExecutor is necessarily parametrized by the user's SagaType,
- * which includes a bunch of other types that are specific to the user's
- * execution.  However, there are contexts where we don't care about that, and
- * we _do_ need to store a bunch of SagaExecutors that have, for example,
- * different SagaParamsType types.  Namely: a saga can have any number of child
- * sagas with different parameter types, and we want to keep a list of those so
- * that we can get their status.  We use this trait to refer to the child sagas.
- * TODO-cleanup Is there a better way to do this?
- */
-trait SagaExecChild: Send + Sync + 'static {
-    fn status(&self) -> BoxFuture<'_, SagaExecStatus>;
-}
-impl<UserType: SagaType> SagaExecChild for SagaExecutor<UserType> {
-    fn status(&self) -> BoxFuture<'_, SagaExecStatus> {
-        self.status()
-    }
-}
-impl Debug for dyn SagaExecChild {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<SagaExecChild>")
     }
 }
 
@@ -1272,8 +1257,13 @@ struct SagaExecLiveState<UserType: SagaType> {
     saga_template: Arc<SagaTemplate<UserType>>,
     saga_metadata: Arc<SagaTemplateMetadata>,
 
+    /** Unique identifier for this saga (an execution of a saga template) */
+    saga_id: SagaId,
+
+    sec_hdl: SecExecClient,
+
     /** Overall execution state */
-    exec_state: SagaState,
+    exec_state: SagaCachedState,
 
     /** Queue of nodes that have not started but whose deps are satisfied */
     queue_todo: Vec<NodeIndex>,
@@ -1284,14 +1274,14 @@ struct SagaExecLiveState<UserType: SagaType> {
     node_tasks: BTreeMap<NodeIndex, JoinHandle<()>>,
 
     /** Outputs saved by completed actions. */
-    node_outputs: BTreeMap<NodeIndex, Arc<JsonValue>>,
+    node_outputs: BTreeMap<NodeIndex, Arc<serde_json::Value>>,
     /** Set of undone nodes. */
     nodes_undone: BTreeMap<NodeIndex, UndoMode>,
     /** Errors produced by failed actions. */
     node_errors: BTreeMap<NodeIndex, ActionError>,
 
     /** Child sagas created by a node (for status and control) */
-    child_sagas: BTreeMap<NodeIndex, Vec<Arc<dyn SagaExecChild>>>,
+    child_sagas: BTreeMap<NodeIndex, Vec<SagaId>>,
 
     /** Persistent state */
     sglog: SagaLog,
@@ -1300,7 +1290,7 @@ struct SagaExecLiveState<UserType: SagaType> {
     injected_errors: BTreeSet<NodeIndex>,
 }
 
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum NodeExecState {
     Blocked,
     QueuedToRun,
@@ -1308,10 +1298,11 @@ enum NodeExecState {
     Done,
     Failed,
     QueuedToUndo,
+    UndoInProgress,
     Undone(UndoMode),
 }
 
-#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum UndoMode {
     ActionNeverRan,
     ActionUndone,
@@ -1327,6 +1318,7 @@ impl fmt::Display for NodeExecState {
             NodeExecState::Done => "done",
             NodeExecState::Failed => "failed",
             NodeExecState::QueuedToUndo => "queued-undo",
+            NodeExecState::UndoInProgress => "undo-working",
             NodeExecState::Undone(UndoMode::ActionNeverRan) => "abandoned",
             NodeExecState::Undone(UndoMode::ActionUndone) => "undone",
             NodeExecState::Undone(UndoMode::ActionFailed) => "failed",
@@ -1345,28 +1337,30 @@ impl<UserType: SagaType> SagaExecLiveState<UserType> {
      * It's especially questionable to use load_status here -- or is that the
      * way we should go more generally?  See TODO-design in new_recover().
      */
-    fn node_exec_state(&self, node_id: &NodeIndex) -> NodeExecState {
+    fn node_exec_state(&self, node_id: NodeIndex) -> NodeExecState {
         /*
          * This seems like overkill but it seems helpful to validate state.
          */
         let mut set: BTreeSet<NodeExecState> = BTreeSet::new();
-        let load_status =
-            self.sglog.load_status_for_node(node_id.index() as u64);
-        if let Some(undo_mode) = self.nodes_undone.get(node_id) {
+        let load_status = self.sglog.load_status_for_node(node_id.into());
+        if let Some(undo_mode) = self.nodes_undone.get(&node_id) {
             set.insert(NodeExecState::Undone(*undo_mode));
-        } else if self.queue_undo.contains(node_id) {
+        } else if self.queue_undo.contains(&node_id) {
             set.insert(NodeExecState::QueuedToUndo);
         } else if let SagaNodeLoadStatus::Failed(_) = load_status {
-            assert!(self.node_errors.contains_key(node_id));
+            assert!(self.node_errors.contains_key(&node_id));
             set.insert(NodeExecState::Failed);
-        } else if self.node_outputs.contains_key(node_id) {
-            set.insert(NodeExecState::Done);
-        }
-
-        if self.node_tasks.contains_key(node_id) {
+        } else if self.node_outputs.contains_key(&node_id) {
+            if self.node_tasks.contains_key(&node_id) {
+                set.insert(NodeExecState::UndoInProgress);
+            } else {
+                set.insert(NodeExecState::Done);
+            }
+        } else if self.node_tasks.contains_key(&node_id) {
             set.insert(NodeExecState::TaskInProgress);
         }
-        if self.queue_todo.contains(node_id) {
+
+        if self.queue_todo.contains(&node_id) {
             set.insert(NodeExecState::QueuedToRun);
         }
 
@@ -1387,10 +1381,10 @@ impl<UserType: SagaType> SagaExecLiveState<UserType> {
         assert!(self.queue_todo.is_empty());
         assert!(self.queue_undo.is_empty());
         assert!(
-            self.exec_state == SagaState::Running
-                || self.exec_state == SagaState::Unwinding
+            self.exec_state == SagaCachedState::Running
+                || self.exec_state == SagaCachedState::Unwinding
         );
-        self.exec_state = SagaState::Done;
+        self.exec_state = SagaCachedState::Done;
     }
 
     fn node_task(&mut self, node_id: NodeIndex, task: JoinHandle<()>) {
@@ -1403,7 +1397,7 @@ impl<UserType: SagaType> SagaExecLiveState<UserType> {
             .expect("processing task completion with no task present")
     }
 
-    fn node_output(&self, node_id: NodeIndex) -> Arc<JsonValue> {
+    fn node_output(&self, node_id: NodeIndex) -> Arc<serde_json::Value> {
         let output =
             self.node_outputs.get(&node_id).expect("node has no output");
         Arc::clone(output)
@@ -1413,6 +1407,7 @@ impl<UserType: SagaType> SagaExecLiveState<UserType> {
 /**
  * Summarizes the final state of a saga execution
  */
+#[derive(Clone, Debug)]
 pub struct SagaResult {
     pub saga_id: SagaId,
     pub saga_log: SagaLog,
@@ -1422,8 +1417,9 @@ pub struct SagaResult {
 /**
  * Provides access to outputs from a saga that completed successfully
  */
+#[derive(Clone, Debug)]
 pub struct SagaResultOk {
-    node_outputs: BTreeMap<String, Arc<JsonValue>>,
+    node_outputs: BTreeMap<String, Arc<serde_json::Value>>,
 }
 
 impl SagaResultOk {
@@ -1471,6 +1467,7 @@ impl SagaResultOk {
  * the saga to complete.  It's silly to let you get this id while the saga is
  * running, but not after it's failed.)
  */
+#[derive(Clone, Debug)]
 pub struct SagaResultErr {
     pub error_node_name: String,
     pub error_source: ActionError,
@@ -1478,16 +1475,15 @@ pub struct SagaResultErr {
 
 /**
  * Summarizes in-progress execution state of a saga
- *
- * The only thing you can do with this currently is print it using `Display`.
  */
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SagaExecStatus {
     saga_id: SagaId,
     nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>>,
     node_exec_states: BTreeMap<NodeIndex, NodeExecState>,
     child_sagas: BTreeMap<NodeIndex, Vec<SagaExecStatus>>,
     saga_metadata: Arc<SagaTemplateMetadata>,
+    sglog: SagaLog,
 }
 
 impl fmt::Display for SagaExecStatus {
@@ -1497,6 +1493,10 @@ impl fmt::Display for SagaExecStatus {
 }
 
 impl SagaExecStatus {
+    pub fn log(&self) -> &SagaLog {
+        &self.sglog
+    }
+
     fn print(
         &self,
         out: &mut fmt::Formatter<'_>,
@@ -1657,12 +1657,10 @@ fn recovery_validate_parent(
  * have enough state to know which node is invoking the API.
  */
 pub struct ActionContext<UserType: SagaType> {
-    ancestor_tree: Arc<BTreeMap<String, Arc<JsonValue>>>,
+    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
     node_id: NodeIndex,
     saga_metadata: Arc<SagaTemplateMetadata>,
     live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
-    /* TODO-cleanup should not need a copy here */
-    creator: String,
     user_context: Arc<UserType::ExecContextType>,
     user_saga_params: Arc<UserType::SagaParamsType>,
 }
@@ -1692,9 +1690,10 @@ impl<UserType: SagaType> ActionContext<UserType> {
     }
 
     /**
-     * Execute a new saga `sg` within this saga and wait for it to complete.
+     * Execute a new saga based on `template` within this saga and wait for it
+     * to complete
      *
-     * `sg` is considered a "child" saga of the current saga, meaning that
+     * `template` is considered a "child" saga of the current saga, meaning that
      * control actions (like pause) on the current saga will affect the child
      * and status reporting of the current saga will show the status of the
      * child.
@@ -1709,8 +1708,6 @@ impl<UserType: SagaType> ActionContext<UserType> {
      * Saga was constructed what the whole graph looks like, instead of only
      * knowing about child sagas once we start executing the node that
      * creates them.
-     * TODO We probably need to ensure that the child saga is running in the
-     * same SEC.
      * TODO-design The only reason that we require ChildType::ExecContextType ==
      * UserType::ExecContextType is so that we can clone the user_context.  We
      * could just as well have the caller pass in a user context instead here,
@@ -1722,29 +1719,42 @@ impl<UserType: SagaType> ActionContext<UserType> {
      */
     pub async fn child_saga<ChildType>(
         &self,
-        saga_id: &SagaId,
-        sg: Arc<SagaTemplate<ChildType>>,
+        saga_id: SagaId,
+        template: Arc<SagaTemplate<ChildType>>,
+        template_name: String,
         initial_params: ChildType::SagaParamsType,
-    ) -> Result<Arc<SagaExecutor<ChildType>>, ActionError>
+    ) -> Result<BoxFuture<'static, SagaResult>, ActionError>
     where
         ChildType: SagaType<ExecContextType = UserType::ExecContextType>,
     {
-        let e = Arc::new(SagaExecutor::new(
-            saga_id,
-            sg,
-            &self.creator,
-            Arc::clone(&self.user_context),
-            initial_params,
-        )?);
-        /* TODO-correctness Prove the lock ordering is okay here .*/
-        self.live_state
-            .lock()
-            .await
-            .child_sagas
-            .entry(self.node_id)
-            .or_insert_with(Vec::new)
-            .push(Arc::clone(&e) as Arc<dyn SagaExecChild>);
-        Ok(e)
+        /*
+         * TODO-liveness TODO-robustness We probably don't need the live_state
+         * lock held for actually creating the child saga.  In general, it would
+         * be nice not to hold that when we're using the sec_hdl because those
+         * calls can generally hang indefinitely on the database, and our caller
+         * won't be able to even query our state while the lock is held.
+         */
+        let future = {
+            let mut live_state = self.live_state.lock().await;
+            let future = live_state
+                .sec_hdl
+                .child_saga(
+                    saga_id,
+                    Arc::clone(&self.user_context),
+                    template,
+                    template_name,
+                    initial_params,
+                )
+                .await?;
+            live_state
+                .child_sagas
+                .entry(self.node_id)
+                .or_insert_with(Vec::new)
+                .push(saga_id);
+            future
+        };
+
+        Ok(async move { future.await }.boxed())
     }
 
     /**
@@ -1770,22 +1780,94 @@ impl<UserType: SagaType> ActionContext<UserType> {
 }
 
 /**
+ * Converts a NodeIndex (used by the graph representation to identify a node) to
+ * a [`SagaNodeId`] (used elsewhere in this module to identify a node)
+ */
+impl From<NodeIndex> for SagaNodeId {
+    fn from(node_id: NodeIndex) -> SagaNodeId {
+        /*
+         * We (must) verify elsewhere that node indexes fit within a u32.
+         */
+        SagaNodeId::from(u32::try_from(node_id.index()).unwrap())
+    }
+}
+
+/**
  * Wrapper for SagaLog.record_now() that maps internal node indexes to
  * stable node ids.
  */
 // TODO Consider how we do map internal node indexes to stable node ids.
 // TODO clean up this interface
-async fn record_now(
-    sglog: &mut SagaLog,
+async fn record_now<T>(
+    live_state: &mut SagaExecLiveState<T>,
     node: NodeIndex,
     event_type: SagaNodeEventType,
-) {
-    let node_id = node.index() as u64;
+) where
+    T: SagaType,
+{
+    let saga_id = live_state.saga_id;
+    let node_id = node.into();
 
     /*
      * The only possible failure here today is attempting to record an event
      * that's illegal for the current node state.  That's a bug in this
      * program.
      */
-    sglog.record_now(node_id, event_type).await.unwrap();
+    let event = SagaNodeEvent { saga_id, node_id, event_type };
+    live_state.sglog.record(&event).unwrap();
+    live_state.sec_hdl.record(event).await;
+}
+
+/**
+ * Consumer's handle for querying and controlling the execution of a single saga
+ */
+pub trait SagaExecManager: fmt::Debug + Send + Sync {
+    /** Run the saga to completion. */
+    fn run(&self) -> BoxFuture<'_, ()>;
+    /**
+     * Return the result of the saga
+     *
+     * The returned [`SagaResult`] has interfaces for querying saga outputs and
+     * error information.
+     *
+     * # Panics
+     *
+     * If the saga has not finished when this function is called.
+     */
+    fn result(&self) -> SagaResult;
+
+    /**
+     * Returns fine-grained information about saga execution
+     */
+    fn status(&self) -> BoxFuture<'_, SagaExecStatus>;
+
+    /**
+     * Replaces the action at the specified node with one that just generates an
+     * error
+     *
+     * See [`SagaTemplateMetadata::node_for_name`] to get the node_id for a
+     * node.
+     */
+    fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()>;
+}
+
+impl<T> SagaExecManager for SagaExecutor<T>
+where
+    T: SagaType + fmt::Debug,
+{
+    fn run(&self) -> BoxFuture<'_, ()> {
+        self.run().boxed()
+    }
+
+    fn result(&self) -> SagaResult {
+        self.result()
+    }
+
+    fn status(&self) -> BoxFuture<'_, SagaExecStatus> {
+        self.status()
+    }
+
+    fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()> {
+        self.inject_error(node_id).boxed()
+    }
 }
