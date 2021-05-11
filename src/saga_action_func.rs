@@ -10,12 +10,11 @@ use crate::saga_action_generic::ActionResult;
 use crate::saga_action_generic::SagaType;
 use crate::saga_action_generic::UndoResult;
 use crate::saga_exec::ActionContext;
-use async_trait::async_trait;
+use futures::future::BoxFuture;
 use std::any::type_name;
 use std::fmt;
 use std::fmt::Debug;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 /**
@@ -36,96 +35,45 @@ use std::sync::Arc;
 pub type ActionFuncResult<T, E> = Result<T, E>;
 
 /**
+ * Trait that expresses the requirements for async functions to be used with
+ * `ActionFunc`. This exists just to express the relationships between the types
+ * involved in the function, so that they don't have to be repeated everywhere.
+ * You don't need to implement it yourself -- a blanket implementation is
+ * provided.
+ */
+pub trait ActionFn<'c, S: SagaType>: Send + Sync + 'static {
+    /** Type returned when the future finally resolves. */
+    type Output;
+    /** Type of the future returned when the function is called. */
+    type Future: Future<Output = Self::Output> + Send + 'c;
+    /** Call the function. */
+    fn act(&'c self, ctx: ActionContext<S>) -> Self::Future;
+}
+
+/* Blanket impl for Fn types returning futures */
+impl<'c, F, S, FF> ActionFn<'c, S> for F
+where
+    S: SagaType,
+    F: Fn(ActionContext<S>) -> FF + Send + Sync + 'static,
+    FF: std::future::Future + Send + 'c,
+{
+    type Future = FF;
+    type Output = FF::Output;
+    fn act(&'c self, ctx: ActionContext<S>) -> Self::Future {
+        self(ctx)
+    }
+}
+
+/**
  * Implementation of [`Action`] that uses ordinary functions for the action and
  * undo action
  */
-/*
- * The monstrous type parameters here are simpler than they look.  First,
- * `UserType` encapsulates a bunch of types provided by the consumer.  See
- * `SagaType` for more on that.
- *
- * Ultimately, `ActionFunc` just wraps two asynchronous functions.  Both
- * consume an `ActionContext`.  On success, the action function produces a type
- * that impls `ActionData` and the undo function produces nothing.  Because
- * they're asynchronous and because the first function can produce any type that
- * impls `ActionData`, we get this explosion of type parameters and trait
- * bounds.
- */
-pub struct ActionFunc<
-    UserType,
-    ActionFutType,
-    ActionFuncType,
-    ActionFuncOutput,
-    UndoFutType,
-    UndoFuncType,
-> where
-    UserType: SagaType,
-    ActionFuncType:
-        Fn(ActionContext<UserType>) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = ActionFuncResult<ActionFuncOutput, ActionError>>
-        + Send
-        + 'static,
-    ActionFuncOutput: ActionData,
-    UndoFuncType:
-        Fn(ActionContext<UserType>) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = UndoResult> + Send + 'static,
-{
+pub struct ActionFunc<ActionFuncType, UndoFuncType> {
     action_func: ActionFuncType,
     undo_func: UndoFuncType,
-    /*
-     * The PhantomData type parameter below deserves some explanation.  First:
-     * this struct needs to store the above fields of type ActionFuncType and
-     * UndoFuncType.  These are async functions, so we need additional type
-     * parameters and trait bounds to describe the futures that they produce.
-     * But we don't actually use these futures in the struct.  Consumers
-     * implicitly specify them when they specify the corresponding function type
-     * parameters.  So far, this is a typical use case for PhantomData to
-     * reference these type parameters without storing them.
-     *
-     * Like many future types, ActionFutType and UndoFutType will be Send, but
-     * not necessarily Sync.  (We don't want to impose Sync on the caller
-     * because many useful futures are not Sync -- like
-     * hyper::client::ResponseFuture, for example.)  As a result, the obvious
-     * choice of `PhantomData<(ActionFutType, UndoFutType)>` won't be Sync, and
-     * then this struct (ActionFunc) won't be Sync -- and that's bad.  See the
-     * comment on the Action trait for why this must be Sync.
-     *
-     * On the other hand, the type `PhantomData<fn() -> (ActionFutType,
-     * UndoFutType)>` is Sync and also satisfies our need to reference these
-     * type parameters in the struct's contents.
-     */
-    #[allow(clippy::type_complexity)]
-    phantom: PhantomData<fn() -> (UserType, ActionFutType, UndoFutType)>,
 }
 
-impl<
-        UserType,
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    >
-    ActionFunc<
-        UserType,
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    >
-where
-    UserType: SagaType,
-    ActionFuncType:
-        Fn(ActionContext<UserType>) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = ActionFuncResult<ActionFuncOutput, ActionError>>
-        + Send
-        + 'static,
-    ActionFuncOutput: ActionData,
-    UndoFuncType:
-        Fn(ActionContext<UserType>) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = UndoResult> + Send + 'static,
-{
+impl<ActionFuncType, UndoFuncType> ActionFunc<ActionFuncType, UndoFuncType> {
     /**
      * Construct an [`Action`] from a pair of functions, using `action_func` for
      * the action and `undo_func` for the undo action
@@ -135,11 +83,21 @@ where
      * interfaces of its own so there's generally no need to have the specific
      * type.)
      */
-    pub fn new_action(
+    pub fn new_action<UserType, ActionFuncOutput>(
         action_func: ActionFuncType,
         undo_func: UndoFuncType,
-    ) -> Arc<dyn Action<UserType>> {
-        Arc::new(ActionFunc { action_func, undo_func, phantom: PhantomData })
+    ) -> Arc<dyn Action<UserType>>
+    where
+        UserType: SagaType,
+        for<'c> ActionFuncType: ActionFn<
+            'c,
+            UserType,
+            Output = ActionFuncResult<ActionFuncOutput, ActionError>,
+        >,
+        ActionFuncOutput: ActionData,
+        for<'c> UndoFuncType: ActionFn<'c, UserType, Output = UndoResult>,
+    {
+        Arc::new(ActionFunc { action_func, undo_func })
     }
 }
 
@@ -147,113 +105,68 @@ where
  * TODO-cleanup why can't new_action_noop_undo live in the Action namespace?
  */
 
-async fn undo_noop<UserType: SagaType>(
-    _: ActionContext<UserType>,
-) -> UndoResult {
-    // TODO-log
-    Ok(())
-}
-
 /**
  * Given a function `f`, return an `ActionFunc` that uses `f` as the action and
  * provides a no-op undo function (which does nothing and always succeeds).
  */
-pub fn new_action_noop_undo<
-    UserType,
-    ActionFutType,
-    ActionFuncType,
-    ActionFuncOutput,
->(
+pub fn new_action_noop_undo<UserType, ActionFuncType, ActionFuncOutput>(
     f: ActionFuncType,
 ) -> Arc<dyn Action<UserType>>
 where
     UserType: SagaType,
-    ActionFuncType:
-        Fn(ActionContext<UserType>) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = ActionFuncResult<ActionFuncOutput, ActionError>>
-        + Send
-        + 'static,
+    for<'c> ActionFuncType: ActionFn<
+        'c,
+        UserType,
+        Output = ActionFuncResult<ActionFuncOutput, ActionError>,
+    >,
     ActionFuncOutput: ActionData,
 {
-    ActionFunc::new_action(f, undo_noop)
+    // TODO-log
+    ActionFunc::new_action(f, |_| async { Ok(()) })
 }
 
-#[async_trait]
-impl<
-        UserType,
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    > Action<UserType>
-    for ActionFunc<
-        UserType,
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    >
+impl<UserType, ActionFuncType, ActionFuncOutput, UndoFuncType> Action<UserType>
+    for ActionFunc<ActionFuncType, UndoFuncType>
 where
     UserType: SagaType,
-    ActionFuncType:
-        Fn(ActionContext<UserType>) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = ActionFuncResult<ActionFuncOutput, ActionError>>
-        + Send
-        + 'static,
+    for<'c> ActionFuncType: ActionFn<
+        'c,
+        UserType,
+        Output = ActionFuncResult<ActionFuncOutput, ActionError>,
+    >,
     ActionFuncOutput: ActionData,
-    UndoFuncType:
-        Fn(ActionContext<UserType>) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = UndoResult> + Send + 'static,
+    for<'c> UndoFuncType: ActionFn<'c, UserType, Output = UndoResult>,
 {
-    async fn do_it(&self, sgctx: ActionContext<UserType>) -> ActionResult {
-        let fut = { (self.action_func)(sgctx) };
-        /*
-         * Execute the caller's function and translate its type into the generic
-         * serde_json::Value that the framework uses to store action outputs.
-         */
-        fut.await
-            .and_then(|func_output| {
-                serde_json::to_value(func_output)
-                    .map_err(ActionError::new_serialize)
-            })
-            .map(Arc::new)
+    fn do_it(
+        &self,
+        sgctx: ActionContext<UserType>,
+    ) -> BoxFuture<'_, ActionResult> {
+        Box::pin(async move {
+            let fut = self.action_func.act(sgctx);
+            /*
+             * Execute the caller's function and translate its type into the
+             * generic JsonValue that the framework uses to store action
+             * outputs.
+             */
+            fut.await
+                .and_then(|func_output| {
+                    serde_json::to_value(func_output)
+                        .map_err(ActionError::new_serialize)
+                })
+                .map(Arc::new)
+        })
     }
 
-    async fn undo_it(&self, sgctx: ActionContext<UserType>) -> UndoResult {
-        let fut = { (self.undo_func)(sgctx) };
-        fut.await
+    fn undo_it(
+        &self,
+        sgctx: ActionContext<UserType>,
+    ) -> BoxFuture<'_, UndoResult> {
+        Box::pin(self.undo_func.act(sgctx))
     }
 }
 
-impl<
-        UserType,
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    > Debug
-    for ActionFunc<
-        UserType,
-        ActionFutType,
-        ActionFuncType,
-        ActionFuncOutput,
-        UndoFutType,
-        UndoFuncType,
-    >
-where
-    UserType: SagaType,
-    ActionFuncType:
-        Fn(ActionContext<UserType>) -> ActionFutType + Send + Sync + 'static,
-    ActionFutType: Future<Output = ActionFuncResult<ActionFuncOutput, ActionError>>
-        + Send
-        + 'static,
-    ActionFuncOutput: ActionData,
-    UndoFuncType:
-        Fn(ActionContext<UserType>) -> UndoFutType + Send + Sync + 'static,
-    UndoFutType: Future<Output = UndoResult> + Send + 'static,
+impl<ActionFuncType, UndoFuncType> Debug
+    for ActionFunc<ActionFuncType, UndoFuncType>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         /*
