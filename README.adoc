@@ -87,9 +87,9 @@ The terminology used in the original talk seems to come from microservices and d
 |Abort/Aborted
 |"Abort" can be used to mean a bunch of things, like maybe that an action failed, or that it was cancelled while it was still running, or that it was undone.  These are all different things so we chose different terms to avoid confusion.
 
-|Cancel/Cancelled
-|What happens to a node whose action needs to be logically reversed.  This might involve doing nothing (if the action never ran), executing the undo action (if the action previously succeeded), or something a bit more complicated.
 |Undo
+|What happens to a node whose action needs to be logically reversed.  This might involve doing nothing (if the action never ran), executing the undo action (if the action previously succeeded), or something a bit more complicated.
+|Cancel/Cancelled
 |"Cancel" might suggest to a reader that we stopped an action while it was in progress.  That's not what it means here.  Plus, we avoid the awkward "canceled" vs. "cancelled" debate.
 
 |===
