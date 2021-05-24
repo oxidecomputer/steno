@@ -281,11 +281,11 @@ impl<UserType: SagaType> SagaTemplateBuilder<UserType> {
      * [`crate::ActionContext::lookup`].
      */
     pub fn append(
-        &mut self,
+        mut self,
         name: &str,
         label: &str,
         action: Arc<dyn Action<UserType>>,
-    ) {
+    ) -> Self {
         let newnode = self.graph.add_node(label.to_string());
         self.launchers
             .insert(newnode, action)
@@ -302,6 +302,7 @@ impl<UserType: SagaType> SagaTemplateBuilder<UserType> {
         }
 
         self.last_added = vec![newnode];
+        self
     }
 
     /**
@@ -313,9 +314,9 @@ impl<UserType: SagaType> SagaTemplateBuilder<UserType> {
      * [`SagaTemplateBuilder::append`].
      */
     pub fn append_parallel(
-        &mut self,
+        mut self,
         actions: Vec<(&str, &str, Arc<dyn Action<UserType>>)>,
-    ) {
+    ) -> Self {
         let newnodes: Vec<NodeIndex> = actions
             .into_iter()
             .map(|(n, l, a)| {
@@ -356,6 +357,7 @@ impl<UserType: SagaType> SagaTemplateBuilder<UserType> {
         }
 
         self.last_added = newnodes;
+        self
     }
 
     /** Finishes building the saga template */
