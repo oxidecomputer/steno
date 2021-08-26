@@ -69,8 +69,6 @@ jobs:
       run: cargo test --verbose -- --test-threads=1 cmd_run_recover
 
   build-and-test:
-    if: runner.os == 'Windows'
-      needs: windows-debug
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -83,6 +81,17 @@ jobs:
         profile: minimal
         toolchain: stable
         override: true
+    # As these steps are used for database / Diesel integration,
+    # they are heavily inspired from Diesel's own CI:
+    # https://github.com/diesel-rs/diesel/blob/c557ab1f6b14fca96823bd5d829e494304e38a16/.github/workflows/ci.yml#L159-L168
+    - name: Install postgres (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        choco install postgresql12 --force --params '/Password:root'
+        echo "C:\Program Files\PostgreSQL\12\bin" >> $GITHUB_PATH
+        echo "C:\Program Files\PostgreSQL\12\lib" >> $GITHUB_PATH
+        echo "PQ_LIB_DIR=C:\Program Files\PostgreSQL\12\lib" >> $GITHUB_ENV
     - name: Report cargo version
       run: cargo --version
     - name: Build
