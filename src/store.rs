@@ -73,7 +73,16 @@ pub struct SagaCreateParams {
  * See [`SecStore::saga_update`].
  */
 #[derive(
-    AsExpression, FromSqlRow, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
+    AsExpression,
+    FromSqlRow,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 #[sql_type = "sql_types::Text"]
