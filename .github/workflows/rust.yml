@@ -51,6 +51,9 @@ jobs:
         profile: minimal
         toolchain: stable
         override: true
+    # As these steps are used for database / Diesel integration,
+    # they are heavily inspired from Diesel's own CI:
+    # https://github.com/diesel-rs/diesel/blob/c557ab1f6b14fca96823bd5d829e494304e38a16/.github/workflows/ci.yml#L159-L168
     - name: Install postgres (Windows)
       shell: bash
       run: |
@@ -66,6 +69,8 @@ jobs:
       run: cargo test --verbose -- --test-threads=1 cmd_run_recover
 
   build-and-test:
+    if: runner.os == 'Windows'
+      needs: windows-debug
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
