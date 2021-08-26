@@ -96,3 +96,5 @@ pub use sec::SecExecClient;
 extern crate slog;
 #[macro_use]
 extern crate newtype_derive;
+#[macro_use]
+extern crate diesel;

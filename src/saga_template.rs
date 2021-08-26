@@ -7,6 +7,10 @@ use crate::saga_action_generic::ActionStartNode;
 use crate::SagaType;
 use anyhow::anyhow;
 use anyhow::Context;
+use diesel::backend::Backend;
+use diesel::sql_types;
+use diesel::deserialize::{self, FromSql};
+use diesel::serialize::{self, ToSql};
 use petgraph::dot;
 use petgraph::graph::NodeIndex;
 use petgraph::Directed;
@@ -21,6 +25,8 @@ use uuid::Uuid;
 
 /** Unique identifier for a Saga (an execution of a saga template) */
 #[derive(
+    AsExpression,
+    FromSqlRow,
     Clone,
     Copy,
     Deserialize,
@@ -32,7 +38,33 @@ use uuid::Uuid;
     Serialize,
 )]
 #[serde(transparent)]
+#[sql_type = "sql_types::Uuid"]
 pub struct SagaId(pub Uuid);
+
+impl<DB> ToSql<sql_types::Uuid, DB> for SagaId
+where
+    DB: Backend,
+    Uuid: ToSql<sql_types::Uuid, DB>,
+{
+    fn to_sql<W: std::io::Write>(
+        &self,
+        out: &mut serialize::Output<'_, W, DB>,
+    ) -> serialize::Result {
+        (&self.0 as &Uuid).to_sql(out)
+    }
+}
+
+impl<DB> FromSql<sql_types::Uuid, DB> for SagaId
+where
+    DB: Backend,
+    Uuid: FromSql<sql_types::Uuid, DB>,
+{
+    fn from_sql(bytes: Option<&DB::RawValue>) -> deserialize::Result<Self> {
+        let id = Uuid::from_sql(bytes)?;
+        Ok(SagaId(id))
+    }
+}
+
 // TODO-cleanup figure out how to use custom_derive here?
 NewtypeDebug! { () pub struct SagaId(Uuid); }
 /*

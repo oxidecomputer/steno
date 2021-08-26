@@ -6,6 +6,10 @@ use crate::SagaId;
 use crate::SagaNodeEvent;
 use anyhow::Context;
 use async_trait::async_trait;
+use diesel::backend::Backend;
+use diesel::deserialize::{self, FromSql};
+use diesel::serialize::{self, ToSql};
+use diesel::sql_types;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -69,13 +73,39 @@ pub struct SagaCreateParams {
  * See [`SecStore::saga_update`].
  */
 #[derive(
-    Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
+    AsExpression, FromSqlRow, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
+#[sql_type = "sql_types::Text"]
 pub enum SagaCachedState {
     Running,
     Unwinding,
     Done,
+}
+
+impl<DB> ToSql<sql_types::Text, DB> for SagaCachedState
+where
+    DB: Backend,
+    String: ToSql<sql_types::Text, DB>,
+{
+    fn to_sql<W: std::io::Write>(
+        &self,
+        out: &mut serialize::Output<'_, W, DB>,
+    ) -> serialize::Result {
+        (&self.to_string() as &String).to_sql(out)
+    }
+}
+
+impl<DB> FromSql<sql_types::Text, DB> for SagaCachedState
+where
+    DB: Backend,
+    String: FromSql<sql_types::Text, DB>,
+{
+    fn from_sql(bytes: Option<&DB::RawValue>) -> deserialize::Result<Self> {
+        let s = String::from_sql(bytes)?;
+        let state = SagaCachedState::try_from(s.as_str())?;
+        Ok(state)
+    }
 }
 
 impl fmt::Display for SagaCachedState {

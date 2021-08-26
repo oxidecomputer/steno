@@ -4,10 +4,15 @@ use crate::saga_action_error::ActionError;
 use crate::saga_template::SagaId;
 use anyhow::anyhow;
 use anyhow::Context;
+use diesel::backend::Backend;
+use diesel::sql_types;
+use diesel::deserialize::{self, FromSql};
+use diesel::serialize::{self, ToSql};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
@@ -24,6 +29,8 @@ use thiserror::Error;
  */
 // TODO-cleanup figure out how to use custom_derive here?
 #[derive(
+    AsExpression,
+    FromSqlRow,
     Deserialize,
     Clone,
     Copy,
@@ -34,8 +41,34 @@ use thiserror::Error;
     PartialOrd,
     Serialize,
 )]
+#[sql_type = "sql_types::BigInt"]
 #[serde(transparent)]
 pub struct SagaNodeId(u32);
+
+impl<DB> ToSql<sql_types::BigInt, DB> for SagaNodeId
+where
+    DB: Backend,
+    i64: ToSql<sql_types::BigInt, DB>,
+{
+    fn to_sql<W: std::io::Write>(
+        &self,
+        out: &mut serialize::Output<'_, W, DB>,
+    ) -> serialize::Result {
+        (self.0 as i64).to_sql(out)
+    }
+}
+
+impl<DB> FromSql<sql_types::BigInt, DB> for SagaNodeId
+where
+    DB: Backend,
+    i64: FromSql<sql_types::BigInt, DB>,
+{
+    fn from_sql(bytes: Option<&DB::RawValue>) -> deserialize::Result<Self> {
+        let id = u32::try_from(i64::from_sql(bytes)?)?;
+        Ok(SagaNodeId(id))
+    }
+}
+
 NewtypeDebug! { () pub struct SagaNodeId(u32); }
 NewtypeDisplay! { () pub struct SagaNodeId(u32); }
 NewtypeFrom! { () pub struct SagaNodeId(u32); }
