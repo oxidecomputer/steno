@@ -4,7 +4,7 @@ use crate::saga_action_error::ActionError;
 use crate::saga_template::SagaId;
 use anyhow::anyhow;
 use anyhow::Context;
-use diesel::backend::Backend;
+use diesel::backend::{Backend, RawValue};
 use diesel::deserialize::{self, FromSql};
 use diesel::serialize::{self, ToSql};
 use diesel::sql_types;
@@ -63,7 +63,7 @@ where
     DB: Backend,
     i64: FromSql<sql_types::BigInt, DB>,
 {
-    fn from_sql(bytes: Option<&DB::RawValue>) -> deserialize::Result<Self> {
+    fn from_sql(bytes: RawValue<'_, DB>) -> deserialize::Result<Self> {
         let id = u32::try_from(i64::from_sql(bytes)?)?;
         Ok(SagaNodeId(id))
     }

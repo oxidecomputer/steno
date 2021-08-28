@@ -6,7 +6,7 @@ use crate::SagaId;
 use crate::SagaNodeEvent;
 use anyhow::Context;
 use async_trait::async_trait;
-use diesel::backend::Backend;
+use diesel::backend::{Backend, RawValue};
 use diesel::deserialize::{self, FromSql};
 use diesel::serialize::{self, ToSql};
 use diesel::sql_types;
@@ -110,7 +110,7 @@ where
     DB: Backend,
     String: FromSql<sql_types::Text, DB>,
 {
-    fn from_sql(bytes: Option<&DB::RawValue>) -> deserialize::Result<Self> {
+    fn from_sql(bytes: RawValue<'_, DB>) -> deserialize::Result<Self> {
         let s = String::from_sql(bytes)?;
         let state = SagaCachedState::try_from(s.as_str())?;
         Ok(state)

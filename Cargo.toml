@@ -10,7 +10,8 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0.34"
 async-trait = "0.1.42"
-diesel = { version = "1.4.6", features = ["postgres", "uuidv07"] }
+# diesel = { version = "1.4.6", features = ["postgres", "uuidv07"] }
+diesel = { path = "../../diesel/diesel", features = ["postgres", "uuid"] }
 futures = "0.3.8"
 newtype_derive = "0.1.6"
 petgraph = "0.5.1"
