@@ -106,8 +106,7 @@ pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
 
         sec.run().await
     });
-    let client = SecClient { cmd_tx, task: Some(task), shutdown: false };
-    client
+    SecClient { cmd_tx, task: Some(task), shutdown: false }
 }
 
 /**
@@ -125,7 +124,7 @@ pub struct SecClient {
 
 impl SecClient {
     /**
-     * Create a new saga and start it running
+     * Creates a new saga, which may later started with [`Self::saga_start`].
      *
      * This function asynchronously returns a `Future` that can be used to wait
      * for the saga to finish.  It's also safe to cancel (drop) this Future.
@@ -385,9 +384,9 @@ impl SagaStateView {
         }
 
         let which = match run_state {
-            SagaRunState::Ready { exec, .. } => Which::Ready(Arc::clone(&exec)),
+            SagaRunState::Ready { exec, .. } => Which::Ready(Arc::clone(exec)),
             SagaRunState::Running { exec, .. } => {
-                Which::Running(Arc::clone(&exec))
+                Which::Running(Arc::clone(exec))
             }
             SagaRunState::Done { status, result } => {
                 Which::Done(status.clone(), result.clone())
@@ -412,9 +411,9 @@ impl SagaStateView {
     /** Returns the status summary for this saga */
     pub fn status(&self) -> &SagaExecStatus {
         match self {
-            SagaStateView::Ready { status } => &status,
-            SagaStateView::Running { status } => &status,
-            SagaStateView::Done { status, .. } => &status,
+            SagaStateView::Ready { status } => status,
+            SagaStateView::Running { status } => status,
+            SagaStateView::Done { status, .. } => status,
         }
     }
 }
@@ -930,7 +929,7 @@ impl Sec {
         ack_tx: oneshot::Sender<T>,
         value: T,
     ) {
-        if let Err(_) = ack_tx.send(value) {
+        if ack_tx.send(value).is_err() {
             warn!(log, "unexpectedly failed to send response to SEC client");
         }
     }
@@ -974,6 +973,16 @@ impl Sec {
                 waiter: done_tx,
             },
         };
+        if self.sagas.get(&saga_id).is_some() {
+            return Sec::client_respond(
+                &log,
+                ack_tx,
+                Err(anyhow!(
+                    "saga_id {} cannot be inserted; already in use",
+                    saga_id
+                )),
+            );
+        }
         assert!(self.sagas.insert(saga_id, run_state).is_none());
 
         if rec.autostart {
@@ -1025,8 +1034,8 @@ impl Sec {
             saga_id,
             Saga {
                 id: saga_id,
-                log: log,
-                params: params,
+                log,
+                params,
                 run_state: SagaRunState::Running {
                     exec: Arc::clone(&exec),
                     waiter,
@@ -1121,7 +1130,7 @@ impl Sec {
                 self.cmd_saga_get(ack_tx, saga_id);
             }
             SecClientMsg::SagaInjectError { ack_tx, saga_id, node_id } => {
-                self.cmd_saga_inject(ack_tx, saga_id, node_id);
+                self.cmd_saga_inject_error(ack_tx, saga_id, node_id);
             }
             SecClientMsg::Shutdown => self.cmd_shutdown(),
         }
@@ -1288,7 +1297,7 @@ impl Sec {
     ) {
         trace!(&self.log, "saga_get"; "saga_id" => %saga_id);
         let maybe_saga = self.saga_lookup(saga_id);
-        if let Err(_) = maybe_saga {
+        if maybe_saga.is_err() {
             Sec::client_respond(&self.log, ack_tx, Err(()));
             return;
         }
@@ -1303,7 +1312,7 @@ impl Sec {
         self.futures.push(the_fut.boxed());
     }
 
-    fn cmd_saga_inject(
+    fn cmd_saga_inject_error(
         &self,
         ack_tx: oneshot::Sender<Result<(), anyhow::Error>>,
         saga_id: SagaId,
@@ -1323,8 +1332,8 @@ impl Sec {
 
         let saga = maybe_saga.unwrap();
         let exec = match &saga.run_state {
-            SagaRunState::Ready { exec, .. } => Arc::clone(&exec),
-            SagaRunState::Running { exec, .. } => Arc::clone(&exec),
+            SagaRunState::Ready { exec, .. } => Arc::clone(exec),
+            SagaRunState::Running { exec, .. } => Arc::clone(exec),
             SagaRunState::Done { .. } => {
                 Sec::client_respond(
                     &self.log,
@@ -1548,5 +1557,314 @@ impl TryFrom<SagaSerialized> for SagaLog {
     type Error = anyhow::Error;
     fn try_from(s: SagaSerialized) -> Result<SagaLog, anyhow::Error> {
         SagaLog::new_recover(s.saga_id, s.events)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{
+        ActionContext, ActionError, ActionFunc, SagaId, SagaTemplateBuilder,
+    };
+    use serde::{Deserialize, Serialize};
+    use slog::Drain;
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    fn new_log() -> slog::Logger {
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog::LevelFilter(drain, slog::Level::Warning).fuse();
+        let drain = slog_async::Async::new(drain).build().fuse();
+        slog::Logger::root(drain, slog::o!())
+    }
+
+    fn new_sec(log: &slog::Logger) -> SecClient {
+        crate::sec(
+            log.new(slog::o!()),
+            Arc::new(crate::InMemorySecStore::new()),
+        )
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct TestParams;
+
+    // This context object is a dynamically typed bucket of
+    // information for use by the following tests.
+    //
+    // It can be used by tests to monitor:
+    // - Frequency of saga node execution
+    #[derive(Debug)]
+    struct TestContext {
+        counters: Mutex<BTreeMap<String, u32>>,
+    }
+
+    impl TestContext {
+        fn new() -> Self {
+            TestContext { counters: Mutex::new(BTreeMap::new()) }
+        }
+
+        // Identifies that a function `name` has been called.
+        fn call(&self, name: &str) {
+            let mut map = self.counters.lock().unwrap();
+            if let Some(count) = map.get_mut(name) {
+                *count += 1;
+            } else {
+                map.insert(name.to_string(), 1);
+            }
+        }
+
+        // Returns the number of times `name` has been called.
+        fn get_count(&self, name: &str) -> u32 {
+            let map = self.counters.lock().unwrap();
+            if let Some(count) = map.get(name) {
+                *count
+            } else {
+                0
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestSaga;
+    impl SagaType for TestSaga {
+        type SagaParamsType = TestParams;
+        type ExecContextType = TestContext;
+    }
+
+    fn make_test_one_node_saga() -> Arc<SagaTemplate<TestSaga>> {
+        let mut builder = SagaTemplateBuilder::new();
+
+        async fn do_n1(
+            ctx: ActionContext<TestSaga>,
+        ) -> Result<i32, ActionError> {
+            ctx.user_data().call("do_n1");
+            Ok(1)
+        }
+        async fn undo_n1(
+            ctx: ActionContext<TestSaga>,
+        ) -> Result<(), anyhow::Error> {
+            ctx.user_data().call("undo_n1");
+            Ok(())
+        }
+
+        builder.append("n1_out", "n1", ActionFunc::new_action(do_n1, undo_n1));
+        Arc::new(builder.build())
+    }
+
+    // Tests the "normal flow" for a newly created saga: create + start.
+    #[tokio::test]
+    async fn test_saga_create_and_start_executes_saga() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let template = make_test_one_node_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(
+                saga_id,
+                Arc::clone(&context),
+                template,
+                "test-saga".to_string(),
+                TestParams {},
+            )
+            .await
+            .expect("failed to create saga");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga running");
+        let result = saga_future.await;
+        let output = result.kind.unwrap();
+        assert_eq!(output.lookup_output::<i32>("n1_out").unwrap(), 1);
+        assert_eq!(context.get_count("do_n1"), 1);
+        assert_eq!(context.get_count("undo_n1"), 0);
+    }
+
+    // Tests error injection skips execution of the actions, and fails the saga.
+    #[tokio::test]
+    async fn test_saga_fails_after_error_injection() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let template = make_test_one_node_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(
+                saga_id,
+                Arc::clone(&context),
+                template,
+                "test-saga".to_string(),
+                TestParams {},
+            )
+            .await
+            .expect("failed to create saga");
+
+        sec.saga_inject_error(saga_id, NodeIndex::new(1))
+            .await
+            .expect("failed to inject error");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga running");
+        let result = saga_future.await;
+        result.kind.expect_err("should have failed; we injected an error!");
+        assert_eq!(context.get_count("do_n1"), 0);
+        assert_eq!(context.get_count("undo_n1"), 0);
+    }
+
+    // Tests that omitting "start" after creation doesn't execute the saga.
+    #[tokio::test]
+    async fn test_saga_create_without_start_does_not_run_saga() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let template = make_test_one_node_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(
+                saga_id,
+                Arc::clone(&context),
+                template,
+                "test-saga".to_string(),
+                TestParams {},
+            )
+            .await
+            .expect("failed to create saga");
+
+        tokio::select! {
+            _ = saga_future => {
+                panic!("saga_create future shouldn't complete without start");
+            },
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {},
+        }
+        assert_eq!(context.get_count("do_n1"), 0);
+        assert_eq!(context.get_count("undo_n1"), 0);
+    }
+
+    // Tests that resume + start executes the saga. This is the normal flow
+    // for sagas which have been recovered from durable storage across
+    // a reboot.
+    #[tokio::test]
+    async fn test_saga_resume_and_start_executes_saga() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let template = make_test_one_node_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_resume(
+                saga_id,
+                Arc::clone(&context),
+                template,
+                "test-saga".to_string(),
+                serde_json::to_value(TestParams {}).unwrap(),
+                vec![],
+            )
+            .await
+            .expect("failed to resume saga");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga running");
+        let result = saga_future.await;
+        let output = result.kind.unwrap();
+        assert_eq!(output.lookup_output::<i32>("n1_out").unwrap(), 1);
+        assert_eq!(context.get_count("do_n1"), 1);
+        assert_eq!(context.get_count("undo_n1"), 0);
+    }
+
+    // Tests that at *most* one of create + resume should be used for a saga,
+    // or else the saga executor throws an error.
+    #[tokio::test]
+    async fn test_saga_resuming_already_created_saga_fails() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let template = make_test_one_node_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let _ = sec
+            .saga_create(
+                saga_id,
+                Arc::clone(&context),
+                template.clone(),
+                "test-saga".to_string(),
+                TestParams {},
+            )
+            .await
+            .expect("failed to create saga");
+
+        let err = sec
+            .saga_resume(
+                saga_id,
+                Arc::clone(&context),
+                template,
+                "test-saga".to_string(),
+                serde_json::to_value(TestParams {}).unwrap(),
+                vec![],
+            )
+            .await
+            .err()
+            .expect("Resuming the saga should fail");
+
+        assert!(err.to_string().contains("cannot be inserted; already in use"));
+    }
+
+    // Tests that started sagas must have previously been created (or resumed).
+    #[tokio::test]
+    async fn test_saga_start_without_create_fails() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let err = sec
+            .saga_start(saga_id)
+            .await
+            .err()
+            .expect("Starting an uncreated saga should fail");
+
+        assert!(err.to_string().contains("no such saga"));
+    }
+
+    // Tests that sagas can only be started once.
+    #[tokio::test]
+    async fn test_sagas_can_only_be_started_once() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let template = make_test_one_node_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let _ = sec
+            .saga_create(
+                saga_id,
+                Arc::clone(&context),
+                template.clone(),
+                "test-saga".to_string(),
+                TestParams {},
+            )
+            .await
+            .expect("failed to create saga");
+
+        let _ = sec.saga_start(saga_id).await.expect("failed to start saga");
+        let err = sec
+            .saga_start(saga_id)
+            .await
+            .err()
+            .expect("Double starting a saga should fail");
+        assert!(err.to_string().contains("saga not in \"ready\" state"));
     }
 }
