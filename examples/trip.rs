@@ -1,4 +1,3 @@
-//!
 //! Example from the canonical distributed sagas talk: suppose you have existing
 //! functions to book a hotel, book a flight, book a car reservation, and charge
 //! a payment card.  You also have functions to cancel a hotel, flight, or car
@@ -6,7 +5,6 @@
 //! trip" function whose implementation makes sure that you ultimately wind up
 //! with all of these bookings (and having paid for it) or none (and having not
 //! paid for it).
-//!
 
 // Names are given here for clarity, even when they're not needed.
 #![allow(unused_variables)]
@@ -25,12 +23,10 @@ use steno::SagaType;
 use steno::SecClient;
 use uuid::Uuid;
 
-//
 // This is where we're going: this program will collect payment and book a whole
 // trip that includes a hotel, flight, and car.  This will either all succeed or
 // any steps that ran will be undone.  In a real example, you'd persist the saga
 // log and use the saga recovery interface to resume execution after a crash.
-//
 #[tokio::main]
 async fn main() {
     let log = {
@@ -60,27 +56,16 @@ async fn book_trip(
     trip_context: Arc<TripContext>,
     params: TripParams,
 ) {
-    //
     // Build a saga template.  The template describes the actions that are part
     // of the saga (including the functions to be invoked to do each of the
     // steps) and how they depend on each other.  You can create this once and
     // cache it to book many trips.
-    //
     let saga_template = Arc::new(make_trip_saga());
 
-    //
     // Get ready to execute the saga.
-    //
 
     // Each execution needs a new unique id.
     let saga_id = SagaId(Uuid::new_v4());
-
-    //
-    // You can provide a name to this instance of this program.  This will wind
-    // up in the saga log so that if you have multiple instances, you can tell
-    // which instances did what.
-    //
-    let creator = "myself";
 
     // Create the saga.
     let saga_future = sec
@@ -97,7 +82,6 @@ async fn book_trip(
     // Set it running.
     sec.saga_start(saga_id).await.expect("failed to start saga running");
 
-    //
     // Wait for the saga to finish running.  This could take a while, depending
     // on what the saga does!  This traverses the DAG of actions, executing each
     // one.  If one fails, then it's all unwound: any actions that previously
@@ -105,7 +89,6 @@ async fn book_trip(
     //
     // Note that the SEC will run all this regardless of whether you wait for it
     // here.  This is just a handle for you to know when the saga has finished.
-    //
     let result = saga_future.await;
 
     // Print the results.
@@ -141,13 +124,11 @@ async fn book_trip(
 fn make_trip_saga() -> SagaTemplate<TripSaga> {
     let mut builder = SagaTemplateBuilder::new();
 
-    //
     // Somewhat arbitrarily, we're choosing to charge the credit card first,
     // then make all the bookings in parallel.  We could do these all in
     // parallel, or all sequentially, and the saga would still be correct, since
     // Steno guarantees that eventually either all actions will succeed or all
     // executed actions will be undone.
-    //
     builder.append(
         // name of this action's output (can be used in subsequent actions)
         "payment",
@@ -182,14 +163,10 @@ fn make_trip_saga() -> SagaTemplate<TripSaga> {
     builder.build()
 }
 
-//
 // Implementation of the trip saga
-//
 
-//
 // Saga parameters.  Each trip will have a separate set of parameters.  We use
 // plain strings here, but these can be any serializable / deserializable types.
-//
 #[derive(Debug, Deserialize, Serialize)]
 struct TripParams {
     hotel_name: String,
@@ -198,20 +175,16 @@ struct TripParams {
     charge_details: String,
 }
 
-//
 // Application-specific context that we want to provide to every action in the
 // saga.  This can be any object we want.  We'll pass it to Steno when the saga
 // begins execution.  Steno passes it back to us in each action.  This makes it
 // easy for us to access application-specific state, like a logger, HTTP
 // clients, etc.
-//
 #[derive(Debug)]
 struct TripContext;
 
-//
 // Steno uses several type parameters that you specify by impl'ing the SagaType
 // trait.
-//
 #[derive(Debug)]
 struct TripSaga;
 impl SagaType for TripSaga {
@@ -222,11 +195,9 @@ impl SagaType for TripSaga {
     type ExecContextType = Arc<TripContext>;
 }
 
-//
 // Data types emitted by various saga actions.  These must be serializable and
 // deserializable.  This is the only supported way to share data between
 // actions in the same saga.
-//
 
 #[derive(Debug, Deserialize, Serialize)]
 struct HotelReservation(String);
@@ -237,9 +208,7 @@ struct CarReservation(String);
 #[derive(Debug, Deserialize, Serialize)]
 struct PaymentConfirmation(String);
 
-//
 // Saga action implementations
-//
 
 async fn saga_charge_card(
     action_context: ActionContext<TripSaga>,
@@ -253,11 +222,9 @@ async fn saga_charge_card(
 async fn saga_refund_card(
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
-    //
     // Fetch the payment confirmation.  The undo function is only ever invoked
     // after the action function has succeeded.  This node is called "payment",
     // so we fetch our own action's output by looking up the data for "payment".
-    //
     let trip_context = action_context.user_data();
     let p: PaymentConfirmation = action_context.lookup("payment")?;
     // ... (make request to another service -- must not fail)
