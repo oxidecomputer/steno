@@ -290,24 +290,17 @@ impl SecClient {
     }
 }
 
-/*
- * TODO-cleanup Is this necessary?  Correct?
- * TODO-correctness Sending messages to the SEC can fail if it panicked.  What
- * do we want to do here?
- */
 impl Drop for SecClient {
     fn drop(&mut self) {
         if !self.shutdown {
             /*
-             * If we get here, there must be no outstanding requests on this
-             * channel.  Thus, there must be buffer space, and try_send() ought
-             * not to fail for running out of space.  It also ought not to fail
-             * because the other side is closed either.  See shutdown() for
-             * details.
+             * If we get here, there should be no outstanding requests on this
+             * channel, in which case there must be buffer space and try_send()
+             * ought not to fail for running out of space.  It may fail if the
+             * other side is closed, but that should only happen if the SEC task
+             * panicked.
              */
-            self.cmd_tx.try_send(SecClientMsg::Shutdown).unwrap_or_else(
-                |error| panic!("failed to send message to SEC: {:#}", error),
-            );
+            let _ = self.cmd_tx.try_send(SecClientMsg::Shutdown);
         }
     }
 }
