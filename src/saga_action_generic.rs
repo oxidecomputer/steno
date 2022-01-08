@@ -111,7 +111,7 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
      *
      * As an example, generating a UUID to represent an object is a common saga
      * action: if called repeatedly, it may generate different results, but it
-     * has the no side effects on the rest of the system. Similarly, using a
+     * has no side effects on the rest of the system. Similarly, using a
      * generated UUID in a subsequent action to create an object may help ensure
      * that the side effects appear the same, regardless of how many times the
      * action has been invoked.
