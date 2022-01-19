@@ -65,7 +65,7 @@ pub enum ActionError {
 
     /// The framework failed to deserialize the saga parameters, an action's
     /// successful result, or an action's error.
-    #[error("failed to serialize action's result")]
+    #[error("deserialize failed: {message}")]
     DeserializeFailed { message: String },
 
     /// The consumer requested that an error be injected instead of running a
@@ -75,7 +75,7 @@ pub enum ActionError {
 
     /// The framework failed to serialize the saga parameters, an action's
     /// successful result, or an action's error.
-    #[error("failed to serialize action's result")]
+    #[error("serialize failed: {message}")]
     SerializeFailed { message: String },
 
     /// The framework failed to create the requested subsaga
