@@ -346,9 +346,6 @@ pub struct SagaExecutor<UserType: SagaType> {
     #[allow(dead_code)]
     log: slog::Logger,
 
-    // TODO This could probably be a reference instead.
-    #[allow(dead_code)]
-    saga_template: Arc<SagaTemplate<UserType>>,
     saga_metadata: Arc<SagaTemplateMetadata>,
 
     /** Channel for monitoring execution completion */
@@ -637,7 +634,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         Ok(SagaExecutor {
             log,
-            saga_template,
             saga_metadata,
             finish_tx,
             saga_id,
