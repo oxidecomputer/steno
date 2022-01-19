@@ -53,13 +53,8 @@ pub struct ExampleParams {
     pub instance_name: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ExampleContext;
-impl Default for ExampleContext {
-    fn default() -> ExampleContext {
-        ExampleContext {}
-    }
-}
 
 type SagaExampleContext = ActionContext<ExampleSagaType>;
 
