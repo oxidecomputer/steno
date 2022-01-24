@@ -105,7 +105,18 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
     /**
      * Executes the action for this saga node, whatever that is.  Actions
      * function like requests in distributed sagas: critically, they must be
-     * idempotent.  They should be very careful in using interfaces outside of
+     * idempotent. This means that multiple calls to the action have the
+     * same result on the system as a single call, although the action is not
+     * necessarily required to return the same result.
+     *
+     * As an example, generating a UUID to represent an object is a common saga
+     * action: if called repeatedly, it may generate different results, but it
+     * has no side effects on the rest of the system. Similarly, using a
+     * generated UUID in a subsequent action to create an object may help ensure
+     * that the side effects appear the same, regardless of how many times the
+     * action has been invoked.
+     *
+     * Actions should be very careful in using interfaces outside of
      * [`ActionContext`] -- we want them to be as self-contained as possible to
      * ensure idempotence and to minimize versioning issues.
      *
