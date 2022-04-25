@@ -38,7 +38,7 @@ version = "1"
 features = [ "full" ]
 
 [dependencies.uuid]
-version = "0.8.1"
+version = "1.0.0"
 features = [ "serde", "v4" ]
 
 [dev-dependencies]
