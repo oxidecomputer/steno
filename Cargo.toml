@@ -22,8 +22,8 @@ version = "0.4"
 features = [ "serde" ]
 
 [dependencies.schemars]
-version = "0.8"
-features = [ "chrono", "uuid" ]
+version = "0.8.9"
+features = [ "chrono", "uuid1" ]
 
 [dependencies.serde]
 version = "1.0"
