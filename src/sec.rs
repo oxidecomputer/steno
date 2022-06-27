@@ -17,6 +17,37 @@
  *   communicate back to the Sec (to communicate progress, record persistent
  *   state, etc.)
  *
+ * The control flow of these components and their messages is shown in the
+ * below diagram:
+ *
+ *  +---------+
+ *  |  Saga   |
+ *  |Consumer |--+
+ *  +---------+  |
+ *               |
+ *           Saga API
+ *               |
+ *               |   +-------------+                  +-------------+
+ *               |   |             |                  |             |
+ *               |   |     SEC     |                  |     SEC     |
+ *               +-->|   Client    |----------------->|   (task)    |
+ *                   |             |   SecClientMsg   |             |
+ *                   |             |                  |             |
+ *                   +-------------+                  +-------------+
+ *                                                           ^
+ *                                                           |
+ *                                                           |
+ *                                                       SecExecMsg
+ *                                                           |
+ *                                                           |
+ *                                                    +-------------+
+ *                                                    |             |
+ *                                                    | SagaExecutor|
+ *                                                    |  (future)   |
+ *                                                    |             |
+ *                                                    |             |
+ *                                                    +-------------+
+ *
  * The Steno consumer is responsible for implementing an `SecStore` to store
  * persistent state.  There's an [`crate::InMemorySecStore`] to play around
  * with.
