@@ -30,6 +30,7 @@
 
 mod example_provision;
 mod rust_features;
+mod saga;
 mod saga_action_error;
 mod saga_action_func;
 mod saga_action_generic;
