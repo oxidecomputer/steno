@@ -114,12 +114,15 @@ pub struct Dag {
     name: SagaName,
     graph: Graph<Node, ()>,
     create_params: Arc<serde_json::Value>,
+    pub(crate) start_node: NodeIndex,
+    pub(crate) end_node: NodeIndex,
 }
 
 #[derive(Debug)]
 pub struct DagBuilder {
     name: SagaName,
     graph: Graph<Node, ()>,
+    root: NodeIndex,
     create_params: Arc<serde_json::Value>,
     last_added: Vec<NodeIndex>,
 }
@@ -231,6 +234,8 @@ impl DagBuilder {
             name: self.name,
             graph: self.graph,
             create_params: self.create_params,
+            start_node: self.root,
+            end_node: newnode,
         }
     }
 }

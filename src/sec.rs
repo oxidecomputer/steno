@@ -520,26 +520,14 @@ impl fmt::Debug for SecClientMsg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SecClientMsg::")?;
         match self {
-            SecClientMsg::SagaCreate {
-                saga_id,
-                template_params,
-                template_name,
-                ..
-            } => f
+            SecClientMsg::SagaCreate { saga_id, template_params, .. } => f
                 .debug_struct("SagaCreate")
                 .field("saga_id", saga_id)
                 .field("template_params", template_params)
-                .field("template_name", template_name)
                 .finish(),
-            SecClientMsg::SagaResume {
-                saga_id,
-                template_params,
-                template_name,
-                ..
-            } => f
+            SecClientMsg::SagaResume { saga_id, template_params, .. } => f
                 .debug_struct("SagaResume")
                 .field("saga_id", saga_id)
-                .field("template_name", template_name)
                 .field("template_params", template_params)
                 .finish(),
             SecClientMsg::SagaList { .. } => f.write_str("SagaList"),
@@ -582,7 +570,7 @@ trait TemplateParams: Send + fmt::Debug {
  */
 #[derive(Debug)]
 struct TemplateParamsForCreate<UserType: SagaType + fmt::Debug> {
-    dag: Dag,
+    dag: Arc<Dag>,
     registry: Arc<ActionRegistry<UserType>>,
     params: UserType::SagaParamsType,
     uctx: Arc<UserType::ExecContextType>,
@@ -601,7 +589,8 @@ where
         Ok(Arc::new(SagaExecutor::new(
             log,
             saga_id,
-            self.template,
+            dag: self.dag,
+            registry: self.registry,
             self.uctx,
             self.params,
             sec_hdl,
@@ -687,43 +676,6 @@ impl SecExecClient {
         .await
     }
 
-    /**
-     * Create or resume the requested child saga
-     */
-    pub async fn child_saga<ChildType>(
-        &self,
-        child_saga_id: SagaId,
-        uctx: Arc<ChildType::ExecContextType>,
-        template: Arc<SagaTemplate<ChildType>>,
-        template_name: String,
-        params: ChildType::SagaParamsType,
-    ) -> Result<BoxFuture<'static, SagaResult>, ActionError>
-    where
-        ChildType: SagaType + fmt::Debug,
-    {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let serialized_params = serde_json::to_value(&params)
-            .map_err(ActionError::new_serialize)?;
-        let template_params =
-            Box::new(TemplateParamsForCreate { template, params, uctx })
-                as Box<dyn TemplateParams>;
-        self.sec_send(
-            ack_rx,
-            SecExecMsg::CreateChildSaga(SagaCreateChildData {
-                parent_saga_id: self.saga_id,
-                create_params: SagaCreateData {
-                    ack_tx,
-                    saga_id: child_saga_id,
-                    template_params,
-                    template_name,
-                    serialized_params,
-                },
-            }),
-        )
-        .await
-        .map_err(ActionError::new_subsaga)
-    }
-
     pub async fn saga_get(&self, saga_id: SagaId) -> Result<SagaView, ()> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sec_send(
@@ -760,9 +712,6 @@ enum SecExecMsg {
 
     /** Update the cached state of a saga */
     UpdateCachedState(SagaUpdateCacheData),
-
-    /** Create a child saga */
-    CreateChildSaga(SagaCreateChildData),
 }
 
 /** See [`SecExecMsg::SagaGet`] */
@@ -793,15 +742,6 @@ struct SagaUpdateCacheData {
     saga_id: SagaId,
     /** updated state */
     updated_state: SagaCachedState,
-}
-
-/** See [`SecExecMsg::CreateChildSaga`] */
-#[derive(Debug)]
-struct SagaCreateChildData {
-    /** parent saga */
-    parent_saga_id: SagaId,
-    /** child saga creation details */
-    create_params: SagaCreateData,
 }
 
 /* TODO-cleanup commonize with SecClientMessage */
@@ -1381,9 +1321,6 @@ impl Sec {
                     Sec::executor_update(log, store, update_data).boxed(),
                 );
             }
-            SecExecMsg::CreateChildSaga(child_data) => {
-                self.executor_child_saga(child_data)
-            }
             SecExecMsg::SagaGet(get_data) => {
                 self.executor_saga_get(get_data);
             }
@@ -1417,35 +1354,6 @@ impl Sec {
         store.saga_update(update_data.saga_id, update_data.updated_state).await;
         Sec::client_respond(&log, ack_tx, ());
         None
-    }
-
-    fn executor_child_saga(&mut self, child: SagaCreateChildData) {
-        info!(&self.log, "create child saga";
-            "parent_saga_id" => child.parent_saga_id.to_string(),
-        );
-
-        /*
-         * TODO-robustness TODO-correctness This implementation assumes that the
-         * child saga does not already exist, but it might!  Would it be correct
-         * to look up the saga in our state and return an appropriate Future if
-         * we find it?  At the very least, this relies on the consumer having
-         * completed recovery already, which isn't a given.
-         *
-         * If the saga alredy does exist, presumably this operation will fail
-         * with an error saying so.  But that raises another issue: how will the
-         * consumer have created a SagaId for this saga?  It needs to be
-         * deterministic.
-         */
-        let params = child.create_params;
-        let saga_id = params.saga_id;
-        self.do_saga_create(
-            params.ack_tx,
-            saga_id,
-            params.template_params,
-            params.template_name,
-            params.serialized_params,
-            true,
-        );
     }
 
     fn executor_saga_get(&self, get_data: SagaGetData) {

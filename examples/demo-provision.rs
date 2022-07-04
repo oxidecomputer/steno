@@ -18,6 +18,7 @@ use steno::SagaId;
 use steno::SagaLog;
 use steno::SagaSerialized;
 use steno::SagaTemplateGeneric;
+use steno::{make_example_action_registry, make_example_provision_dag};
 use structopt::StructOpt;
 use uuid::Uuid;
 
@@ -180,8 +181,7 @@ struct RunArgs {
 async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let log = make_log();
     let sec = make_sec(&log);
-    let saga_template = make_example_provision_saga();
-    let template_name = "example-template".to_string();
+    let registry = make_example_action_registry();
     let uctx = Arc::new(ExampleContext::default());
     let (saga_id, future) = if let Some(input_log_path) = &args.recover_from {
         if !args.quiet {
@@ -213,16 +213,12 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         }
         (saga_id, future)
     } else {
+        let params =
+            ExampleParams { instance_name: "fake-o instance".to_string() };
+        let dag = make_example_provision_dag(&params);
         let saga_id = make_saga_id();
-        let future = sec
-            .saga_create(
-                saga_id,
-                uctx,
-                saga_template.clone(),
-                template_name,
-                ExampleParams { instance_name: "fake-o instance".to_string() },
-            )
-            .await?;
+        let future =
+            sec.saga_create(saga_id, params, uctx, dag, registry).await?;
         (saga_id, future)
     };
 

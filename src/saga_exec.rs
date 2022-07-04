@@ -1,5 +1,6 @@
 //! Manages execution of a saga
 
+use crate::dag::Node;
 use crate::rust_features::ExpectNone;
 use crate::saga_action_error::ActionError;
 use crate::saga_action_generic::Action;
@@ -10,6 +11,8 @@ use crate::saga_log::SagaNodeLoadStatus;
 use crate::saga_template::SagaId;
 use crate::saga_template::SagaTemplateMetadata;
 use crate::sec::SecExecClient;
+use crate::ActionRegistry;
+use crate::Dag;
 use crate::SagaCachedState;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
@@ -292,7 +295,8 @@ struct TaskCompletion<UserType: SagaType> {
  * Context provided to the (tokio) task that executes an action
  */
 struct TaskParams<UserType: SagaType> {
-    saga_metadata: Arc<SagaTemplateMetadata>,
+    dag: Dag,
+    action_registry: ActionRegistry<UserType>,
     user_context: Arc<UserType::ExecContextType>,
     user_saga_params: Arc<UserType::SagaParamsType>,
 
@@ -346,7 +350,7 @@ pub struct SagaExecutor<UserType: SagaType> {
     #[allow(dead_code)]
     log: slog::Logger,
 
-    saga_metadata: Arc<SagaTemplateMetadata>,
+    dag: Arc<Dag>,
 
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
@@ -370,7 +374,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     pub fn new(
         log: slog::Logger,
         saga_id: SagaId,
-        saga_template: Arc<SagaTemplate<UserType>>,
+        dag: Arc<Dag>,
+        registry: ActionRegistry<UserType>,
         user_context: Arc<UserType::ExecContextType>,
         user_saga_params: UserType::SagaParamsType,
         sec_hdl: SecExecClient,
@@ -384,7 +389,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         SagaExecutor::new_recover(
             log,
             saga_id,
-            saga_template,
+            dag,
+            registry,
             user_context,
             user_saga_params,
             sec_hdl,
@@ -400,7 +406,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     pub fn new_recover(
         log: slog::Logger,
         saga_id: SagaId,
-        saga_template: Arc<SagaTemplate<UserType>>,
+        dag: Arc<Dag>,
+        registry: Arc<ActionRegistry<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
         user_saga_params: UserType::SagaParamsType,
         sec_hdl: SecExecClient,
@@ -419,8 +426,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let forward = !sglog.unwinding();
         let user_saga_params = Arc::new(user_saga_params);
         let mut live_state = SagaExecLiveState {
-            saga_template: Arc::clone(&saga_template),
-            saga_metadata: Arc::new(saga_template.metadata().clone()),
+            dag: Arc::clone(&dag),
+            registry: Arc::clone(&registry),
             exec_state: if forward {
                 SagaCachedState::Running
             } else {
@@ -439,8 +446,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             saga_id,
         };
         let mut loaded = BTreeSet::new();
-        let saga_metadata = Arc::clone(&live_state.saga_metadata);
-        let graph = &saga_metadata.graph;
+        let graph = &dag.graph;
 
         /*
          * Iterate in the direction of current execution: for normal execution,
@@ -634,7 +640,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         Ok(SagaExecutor {
             log,
-            saga_metadata,
+            dag,
             finish_tx,
             saga_id,
             user_context,
@@ -1252,8 +1258,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
  */
 #[derive(Debug)]
 struct SagaExecLiveState<UserType: SagaType> {
-    saga_template: Arc<SagaTemplate<UserType>>,
-    saga_metadata: Arc<SagaTemplateMetadata>,
+    dag: Arc<Dag>,
+    registry: Arc<ActionRegistry<UserType>>,
 
     /** Unique identifier for this saga (an execution of a saga template) */
     saga_id: SagaId,
