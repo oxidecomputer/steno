@@ -4,7 +4,9 @@
 
 //! Construction and Recovery of sagas
 
-use crate::saga_action_generic::{Action, ActionData, ActionStartNode};
+use crate::saga_action_generic::{
+    Action, ActionData, ActionEndNode, ActionStartNode,
+};
 use crate::SagaType;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
@@ -17,10 +19,22 @@ use std::sync::Arc;
 )]
 pub struct ActionName(String);
 
+impl ActionName {
+    pub fn new(name: &str) -> ActionName {
+        ActionName(name.to_string())
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
 pub struct SagaName(String);
+
+impl SagaName {
+    pub fn new(name: &str) -> SagaName {
+        SagaName(name.to_string())
+    }
+}
 
 pub enum ActionRegistryError {
     NotFound,
@@ -51,6 +65,13 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
             Arc::new(ActionStartNode {});
         let name = ActionName("__steno_action_start_node__".to_string());
         actions.insert(name, action).unwrap();
+
+        // Insert the default end action for a saga
+        let action: Arc<dyn Action<UserType> + 'static> =
+            Arc::new(ActionEndNode {});
+        let name = ActionName("__steno_action_end_node__".to_string());
+        actions.insert(name, action).unwrap();
+
         ActionRegistry { actions }
     }
 
@@ -87,21 +108,29 @@ pub struct Node {
     action: ActionName,
 }
 
+// A Dag describing a saga
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dag {
+    name: SagaName,
+    graph: Graph<Node, ()>,
+    create_params: Arc<serde_json::Value>,
+}
+
 #[derive(Debug)]
-pub struct SagaBuilder {
+pub struct DagBuilder {
     name: SagaName,
     graph: Graph<Node, ()>,
     create_params: Arc<serde_json::Value>,
     last_added: Vec<NodeIndex>,
 }
 
-impl SagaBuilder {
-    /// Create a new Saga
+impl DagBuilder {
+    /// Create a new DAG for a Saga
     ///
-    /// Creation of a saga results in the automatic creation of a "start" node.
+    /// Creation of a DAG results in the automatic creation of a "start" node.
     /// The output of this node is the `create_params`. This allows descendant nodes
     /// to lookup the creation parameters via [`crate::ActionContext::lookup`].
-    pub fn new<C>(name: SagaName, create_params: C) -> SagaBuilder
+    pub fn new<C>(name: SagaName, create_params: &C) -> DagBuilder
     where
         C: ActionData,
     {
@@ -115,7 +144,7 @@ impl SagaBuilder {
         let create_params =
             Arc::new(serde_json::to_value(create_params).unwrap());
 
-        SagaBuilder { name, graph, create_params, last_added: vec![root] }
+        DagBuilder { name, graph, create_params, last_added: vec![root] }
     }
 
     /// Adds a new node to the graph
@@ -180,6 +209,29 @@ impl SagaBuilder {
         }
 
         self.last_added = newnodes;
+    }
+
+    /// Return the constructed DAG
+    ///
+    /// Building the DAG automatically creates an "end" node
+    pub fn build(mut self) -> Dag {
+        // Append an "end" node so that we can easily tell when the saga has
+        // completed.
+        let newnode = self.graph.add_node(Node {
+            name: "__EndNode__".to_string(),
+            label: "EndNode".to_string(),
+            action: ActionName("__steno_action_end_node__".to_string()),
+        });
+
+        for node in &self.last_added {
+            self.graph.add_edge(*node, newnode, ());
+        }
+
+        Dag {
+            name: self.name,
+            graph: self.graph,
+            create_params: self.create_params,
+        }
     }
 }
 

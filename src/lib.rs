@@ -28,9 +28,9 @@
  */
 #![allow(unstable_name_collisions)]
 
+mod dag;
 mod example_provision;
 mod rust_features;
-mod saga;
 mod saga_action_error;
 mod saga_action_func;
 mod saga_action_generic;
@@ -46,10 +46,18 @@ mod store;
  * interfaces.  However, the "steno" crate wants to have an example that uses
  * this crate, hence our problem.
  */
+pub use example_provision::make_example_action_registry;
+pub use example_provision::make_example_provision_dag;
 pub use example_provision::make_example_provision_saga;
 pub use example_provision::ExampleContext;
 pub use example_provision::ExampleParams;
 
+pub use dag::ActionName;
+pub use dag::ActionRegistry;
+pub use dag::ActionRegistryError;
+pub use dag::Dag;
+pub use dag::DagBuilder;
+pub use dag::SagaName;
 pub use saga_action_error::ActionError;
 pub use saga_action_func::new_action_noop_undo;
 pub use saga_action_func::ActionFunc;

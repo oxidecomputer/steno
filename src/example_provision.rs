@@ -6,7 +6,12 @@ use crate::new_action_noop_undo;
 use crate::ActionContext;
 use crate::ActionError;
 use crate::ActionFuncResult;
+use crate::ActionName;
+use crate::ActionRegistry;
+use crate::Dag;
+use crate::DagBuilder;
 use crate::SagaId;
+use crate::SagaName;
 use crate::SagaTemplate;
 use crate::SagaTemplateBuilder;
 use crate::SagaType;
@@ -71,6 +76,39 @@ impl From<ExampleError> for ActionError {
     fn from(t: ExampleError) -> ActionError {
         ActionError::action_failed(t)
     }
+}
+
+/// Create an ActionRegistry for use with the Saga DAG
+pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
+    let mut registry = ActionRegistry::new();
+    registry.register(
+        ActionName::new("instance_create"),
+        new_action_noop_undo(demo_prov_instance_create),
+    );
+    registry.register(
+        ActionName::new("vpc_alloc_ip"),
+        new_action_noop_undo(demo_prov_vpc_alloc_ip),
+    );
+    registry.register(
+        ActionName::new("volume_create"),
+        new_action_noop_undo(demo_prov_volume_create),
+    );
+
+    Arc::new(registry)
+}
+
+/// Create a dag that describes a saga
+pub fn make_example_provision_dag(params: &ExampleParams) -> Arc<Dag> {
+    let name = SagaName::new("DemoVmProvision");
+    let mut d = DagBuilder::new(name, params);
+    d.append(
+        "instance_id",
+        "instanceCreate",
+        ActionName::new("instance_create"),
+    );
+    d.append("instance_ip", "VpcAllocIp", ActionName::new("vpc_alloc_ip"));
+    d.append("volume_id", "VolumeCreate", ActionName::new("volume_create"));
+    Arc::new(d.build())
 }
 
 /**

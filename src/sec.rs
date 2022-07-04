@@ -60,6 +60,8 @@ use crate::store::SagaCachedState;
 use crate::store::SagaCreateParams;
 use crate::store::SecStore;
 use crate::ActionError;
+use crate::ActionRegistry;
+use crate::Dag;
 use crate::SagaExecManager;
 use crate::SagaExecStatus;
 use crate::SagaId;
@@ -163,30 +165,24 @@ impl SecClient {
     pub async fn saga_create<UserType>(
         &self,
         saga_id: SagaId,
-        uctx: Arc<UserType::ExecContextType>,
-        template: Arc<SagaTemplate<UserType>>,
-        template_name: String,
         params: UserType::SagaParamsType,
+        uctx: Arc<UserType::ExecContextType>,
+        dag: Dag,
+        registry: Arc<ActionRegistry<UserType>>,
     ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
         UserType: SagaType + fmt::Debug,
     {
         let (ack_tx, ack_rx) = oneshot::channel();
-        let serialized_params = serde_json::to_value(&params)
+        let serialized_dag = serde_json::to_value(&dag)
             .map_err(ActionError::new_serialize)
-            .context("serializing new saga parameters")?;
+            .context("serializing new saga dag")?;
         let template_params =
-            Box::new(TemplateParamsForCreate { template, params, uctx })
+            Box::new(TemplateParamsForCreate { dag, registry, params, uctx })
                 as Box<dyn TemplateParams>;
         self.sec_cmd(
             ack_rx,
-            SecClientMsg::SagaCreate {
-                ack_tx,
-                saga_id,
-                template_params,
-                template_name,
-                serialized_params,
-            },
+            SecClientMsg::SagaCreate { ack_tx, saga_id, template_params },
         )
         .await
     }
@@ -207,9 +203,7 @@ impl SecClient {
         &self,
         saga_id: SagaId,
         uctx: Arc<T>,
-        template: Arc<dyn SagaTemplateGeneric<T>>,
-        template_name: String,
-        params: serde_json::Value,
+        dag: Dag,
         log_events: Vec<SagaNodeEvent>,
     ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
@@ -218,21 +212,12 @@ impl SecClient {
         let (ack_tx, ack_rx) = oneshot::channel();
         let saga_log = SagaLog::new_recover(saga_id, log_events)
             .context("recovering log")?;
-        let template_params = Box::new(TemplateParamsForRecover {
-            template,
-            params: params.clone(),
-            uctx,
-            saga_log,
-        }) as Box<dyn TemplateParams>;
+        let template_params =
+            Box::new(TemplateParamsForRecover { dag, uctx, saga_log })
+                as Box<dyn TemplateParams>;
         self.sec_cmd(
             ack_rx,
-            SecClientMsg::SagaResume {
-                ack_tx,
-                saga_id,
-                template_params,
-                template_name,
-                serialized_params: params,
-            },
+            SecClientMsg::SagaResume { ack_tx, saga_id, template_params },
         )
         .await
     }
@@ -469,10 +454,6 @@ enum SecClientMsg {
         saga_id: SagaId,
         /** user-type-specific parameters */
         template_params: Box<dyn TemplateParams>,
-        /** name of the template used to create this saga */
-        template_name: String,
-        /** serialized saga parameters */
-        serialized_params: serde_json::Value,
     },
 
     /**
@@ -490,10 +471,6 @@ enum SecClientMsg {
         saga_id: SagaId,
         /** user-type-specific parameters */
         template_params: Box<dyn TemplateParams>,
-        /** name of the template used to resume this saga */
-        template_name: String,
-        /** serialized saga parameters */
-        serialized_params: serde_json::Value,
     },
 
     /** Start (or resume) running a saga */
@@ -585,6 +562,7 @@ impl fmt::Debug for SecClientMsg {
 /**
  * This trait erases the type parameters on a [`SagaTemplate`], user context,
  * and user parameters so that we can more easily pass it through a channel.
+ * TODO(AJS) - rename since template no longer exists?
  */
 trait TemplateParams: Send + fmt::Debug {
     fn into_exec(
@@ -604,7 +582,8 @@ trait TemplateParams: Send + fmt::Debug {
  */
 #[derive(Debug)]
 struct TemplateParamsForCreate<UserType: SagaType + fmt::Debug> {
-    template: Arc<SagaTemplate<UserType>>,
+    dag: Dag,
+    registry: Arc<ActionRegistry<UserType>>,
     params: UserType::SagaParamsType,
     uctx: Arc<UserType::ExecContextType>,
 }
@@ -640,8 +619,7 @@ where
  */
 #[derive(Debug)]
 struct TemplateParamsForRecover<T: Send + Sync + fmt::Debug> {
-    template: Arc<dyn SagaTemplateGeneric<T>>,
-    params: serde_json::Value,
+    dag: Dag,
     uctx: Arc<T>,
     saga_log: SagaLog,
 }
