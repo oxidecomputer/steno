@@ -56,6 +56,7 @@ pub use dag::ActionRegistry;
 pub use dag::ActionRegistryError;
 pub use dag::Dag;
 pub use dag::DagBuilder;
+pub use dag::Node;
 pub use dag::SagaId;
 pub use dag::SagaName;
 pub use saga_action_error::ActionError;

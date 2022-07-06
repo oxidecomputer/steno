@@ -10,6 +10,7 @@ use crate::ActionName;
 use crate::ActionRegistry;
 use crate::Dag;
 use crate::DagBuilder;
+use crate::Node;
 use crate::SagaName;
 use crate::SagaType;
 use serde::Deserialize;
@@ -77,6 +78,14 @@ impl From<ExampleError> for ActionError {
 /// Create an ActionRegistry for use with the Saga DAG
 pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
     let mut registry = ActionRegistry::new();
+
+    // Create a start action that is capable of returning the saga parameters
+    // for an instance creation saga. Each saga or subsaga needs one of these.
+    registry.register(
+        ActionName::new("instance_create_params"),
+        new_action_noop_undo(demo_prov_instance_create_params),
+    );
+
     registry.register(
         ActionName::new("instance_create"),
         new_action_noop_undo(demo_prov_instance_create),
@@ -95,15 +104,37 @@ pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
 
 /// Create a dag that describes a saga
 pub fn make_example_provision_dag(params: &ExampleParams) -> Arc<Dag> {
+    // The saga instance Id (not related to VM instance)
+    // TODO(AJS): Name this something else?
+    let saga_instance_id = 0;
     let name = SagaName::new("DemoVmProvision");
-    let mut d = DagBuilder::new(name, params);
-    d.append(
-        "instance_id",
-        "instanceCreate",
-        ActionName::new("instance_create"),
+    let root = Node::new_root(
+        "instance_create_params",
+        saga_instance_id,
+        "InstanceCreateStart",
+        ActionName::new("instance_create_params"),
+        params,
     );
-    d.append("instance_ip", "VpcAllocIp", ActionName::new("vpc_alloc_ip"));
-    d.append("volume_id", "VolumeCreate", ActionName::new("volume_create"));
+    let mut d = DagBuilder::new(name, root);
+
+    d.append(Node::new_child(
+        "instance_id",
+        saga_instance_id,
+        "InstanceCreate",
+        ActionName::new("instance_create"),
+    ));
+    d.append(Node::new_child(
+        "instance_ip",
+        saga_instance_id,
+        "VpcAllocIp",
+        ActionName::new("vpc_alloc_ip"),
+    ));
+    d.append(Node::new_child(
+        "volume_id",
+        saga_instance_id,
+        "VolumeCreate",
+        ActionName::new("volume_create"),
+    ));
     Arc::new(d.build())
 }
 
@@ -159,13 +190,30 @@ pub fn make_example_provision_dag(params: &ExampleParams) -> Arc<Dag> {
 //    Arc::new(w.build())
 //}
 
-async fn demo_prov_instance_create(
+// This action takes the parameters from the node and outputs them so they
+// can be looked up by subsequent nodes.
+async fn demo_prov_instance_create_params(
     sgctx: SagaExampleContext,
-) -> ExFuncResult<u64> {
+) -> ExFuncResult<ExampleParams> {
+    let params = sgctx.create_params::<ExampleParams>()?;
+
     eprintln!(
         "running action: {} (instance name: {})",
         sgctx.node_label(),
-        sgctx.saga_params().instance_name
+        params.instance_name
+    );
+
+    Ok(params)
+}
+
+async fn demo_prov_instance_create(
+    sgctx: SagaExampleContext,
+) -> ExFuncResult<u64> {
+    let params = sgctx.lookup::<ExampleParams>("instance_create_params", 0)?;
+    eprintln!(
+        "running action: {} (instance name: {})",
+        sgctx.node_label(),
+        params.instance_name
     );
     /* exercise saga parameters */
     /* make up an instance ID */
@@ -178,7 +226,7 @@ async fn demo_prov_vpc_alloc_ip(
 ) -> ExFuncResult<String> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using some data from a previous node */
-    let instance_id = sgctx.lookup::<u64>("instance_id")?;
+    let instance_id = sgctx.lookup::<u64>("instance_id", 0)?;
     assert_eq!(instance_id, 1211);
     /* make up an IP (simulate allocation) */
     let ip = String::from("10.120.121.122");
@@ -248,86 +296,87 @@ type SubsagaExampleContext = ActionContext<ExampleSubsagaType>;
 //    }
 //}
 //
-#[derive(Debug, Deserialize, Serialize)]
-struct ServerAllocResult {
-    server_id: u64,
-}
-
-async fn demo_prov_server_pick(
-    sgctx: SubsagaExampleContext,
-) -> ExFuncResult<u64> {
-    eprintln!("running action: {}", sgctx.node_label());
-    /* exercise subsaga parameters */
-    assert_eq!(sgctx.saga_params().number_of_things, 1);
-    /* make up ("allocate") a new server id */
-    let server_id = 1212u64;
-    Ok(server_id)
-}
-
-async fn demo_prov_server_reserve(
-    sgctx: SubsagaExampleContext,
-) -> ExFuncResult<ServerAllocResult> {
-    eprintln!("running action: {}", sgctx.node_label());
-    /* exercise subsaga parameters */
-    assert_eq!(sgctx.saga_params().number_of_things, 1);
-    /* exercise using data from previous nodes */
-    let server_id = sgctx.lookup::<u64>("server_id")?;
-    assert_eq!(server_id, 1212);
-    /* package this up for downstream consumers */
-    Ok(ServerAllocResult { server_id })
-}
-
-async fn demo_prov_volume_create(
-    sgctx: SagaExampleContext,
-) -> ExFuncResult<u64> {
-    eprintln!("running action: {}", sgctx.node_label());
-    /* exercise using data from previous nodes */
-    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
-    /* make up ("allocate") a volume id */
-    let volume_id = 1213u64;
-    Ok(volume_id)
-}
-async fn demo_prov_instance_configure(
-    sgctx: SagaExampleContext,
-) -> ExFuncResult<()> {
-    eprintln!("running action: {}", sgctx.node_label());
-    /* exercise using data from previous nodes */
-    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
-    assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
-    Ok(())
-}
-async fn demo_prov_volume_attach(
-    sgctx: SagaExampleContext,
-) -> ExFuncResult<()> {
-    eprintln!("running action: {}", sgctx.node_label());
-    /* exercise using data from previous nodes */
-    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
-    assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
-    Ok(())
-}
-async fn demo_prov_instance_boot(
-    sgctx: SagaExampleContext,
-) -> ExFuncResult<()> {
-    eprintln!("running action: {}", sgctx.node_label());
-    /* exercise using data from previous nodes */
-    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
-    assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
-    Ok(())
-}
-
-async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<()> {
-    eprintln!("running action: {}", sgctx.node_label());
-    eprintln!("printing final state:");
-    let instance_id = sgctx.lookup::<u64>("instance_id")?;
-    eprintln!("  instance id: {}", instance_id);
-    let ip = sgctx.lookup::<String>("instance_ip")?;
-    eprintln!("  IP address: {}", ip);
-    let volume_id = sgctx.lookup::<u64>("volume_id")?;
-    eprintln!("  volume id: {}", volume_id);
-    let server_id = sgctx.lookup::<u64>("server_id")?;
-    eprintln!("  server id: {}", server_id);
-    Ok(())
-}
+//#[derive(Debug, Deserialize, Serialize)]
+//struct ServerAllocResult {
+//    server_id: u64,
+//}
+//
+//async fn demo_prov_server_pick(
+//    sgctx: SubsagaExampleContext,
+//) -> ExFuncResult<u64> {
+//    eprintln!("running action: {}", sgctx.node_label());
+//    /* exercise subsaga parameters */
+//    assert_eq!(sgctx.saga_params().number_of_things, 1);
+//    /* make up ("allocate") a new server id */
+//    let server_id = 1212u64;
+//    Ok(server_id)
+//}
+//
+//async fn demo_prov_server_reserve(
+//    sgctx: SubsagaExampleContext,
+//) -> ExFuncResult<ServerAllocResult> {
+//    eprintln!("running action: {}", sgctx.node_label());
+//    /* exercise subsaga parameters */
+//    assert_eq!(sgctx.saga_params().number_of_things, 1);
+//    /* exercise using data from previous nodes */
+//    let server_id = sgctx.lookup::<u64>("server_id")?;
+//    assert_eq!(server_id, 1212);
+//    /* package this up for downstream consumers */
+//    Ok(ServerAllocResult { server_id })
+//}
+//
+//async fn demo_prov_volume_create(
+//    sgctx: SagaExampleContext,
+//) -> ExFuncResult<u64> {
+//    eprintln!("running action: {}", sgctx.node_label());
+//    /* exercise using data from previous nodes */
+//    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
+//    /* make up ("allocate") a volume id */
+//    let volume_id = 1213u64;
+//    Ok(volume_id)
+//}
+//async fn demo_prov_instance_configure(
+//    sgctx: SagaExampleContext,
+//) -> ExFuncResult<()> {
+//    eprintln!("running action: {}", sgctx.node_label());
+//    /* exercise using data from previous nodes */
+//    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
+//    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+//    assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
+//    Ok(())
+//}
+//async fn demo_prov_volume_attach(
+//    sgctx: SagaExampleContext,
+//) -> ExFuncResult<()> {
+//    eprintln!("running action: {}", sgctx.node_label());
+//    /* exercise using data from previous nodes */
+//    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
+//    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+//    assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
+//    Ok(())
+//}
+//async fn demo_prov_instance_boot(
+//    sgctx: SagaExampleContext,
+//) -> ExFuncResult<()> {
+//    eprintln!("running action: {}", sgctx.node_label());
+//    /* exercise using data from previous nodes */
+//    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
+//    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+//    assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
+//    Ok(())
+//}
+//
+//async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<()> {
+//    eprintln!("running action: {}", sgctx.node_label());
+//    eprintln!("printing final state:");
+//    let instance_id = sgctx.lookup::<u64>("instance_id")?;
+//    eprintln!("  instance id: {}", instance_id);
+//    let ip = sgctx.lookup::<String>("instance_ip")?;
+//    eprintln!("  IP address: {}", ip);
+//    let volume_id = sgctx.lookup::<u64>("volume_id")?;
+//    eprintln!("  volume id: {}", volume_id);
+//    let server_id = sgctx.lookup::<u64>("server_id")?;
+//    eprintln!("  server id: {}", server_id);
+//    Ok(())
+//}
+//

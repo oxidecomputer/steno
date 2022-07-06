@@ -163,7 +163,6 @@ impl SecClient {
     pub async fn saga_create<UserType>(
         &self,
         saga_id: SagaId,
-        params: UserType::SagaParamsType,
         uctx: Arc<UserType::ExecContextType>,
         dag: Arc<Dag>,
         registry: Arc<ActionRegistry<UserType>>,
@@ -176,7 +175,7 @@ impl SecClient {
             .map_err(ActionError::new_serialize)
             .context("serializing new saga dag")?;
         let template_params =
-            Box::new(TemplateParamsForCreate { dag, registry, params, uctx })
+            Box::new(TemplateParamsForCreate { dag, registry, uctx })
                 as Box<dyn TemplateParams>;
         self.sec_cmd(
             ack_rx,
@@ -190,23 +189,17 @@ impl SecClient {
      *
      * This function asynchronously returns a `Future` that can be used to wait
      * for the saga to finish.  It's also safe to cancel (drop) this Future.
-     *
-     * Unlike `saga_create`, this function is not parametrized by a [`SagaType`]
-     * because the assumption is that the caller doesn't statically know what
-     * that type is.  (The caller would usually have obtained a
-     * [`SagaTemplateGeneric`] by looking it up in a table that contains various
-     * different saga templates with varying SagaTypes.)
      */
-    pub async fn saga_resume<T>(
+    pub async fn saga_resume<UserType>(
         &self,
         saga_id: SagaId,
-        uctx: Arc<T>,
+        uctx: Arc<UserType::ExecContextType>,
         dag: Dag,
-        registry: Arc<T>,
+        registry: Arc<ActionRegistry<UserType>>,
         log_events: Vec<SagaNodeEvent>,
     ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
-        T: Send + Sync + fmt::Debug + 'static,
+        UserType: SagaType + fmt::Debug,
     {
         let (ack_tx, ack_rx) = oneshot::channel();
         let saga_log = SagaLog::new_recover(saga_id, log_events)
@@ -564,7 +557,7 @@ trait TemplateParams: Send + fmt::Debug {
 }
 
 /**
- * Stores a template, saga parameters, and user context in a way where the
+ * Stores a template and user context in a way where the
  * user-defined types can be erased with [`TemplateParams`]
  *
  * This version is for the "create" case, where we know the specific
@@ -574,7 +567,6 @@ trait TemplateParams: Send + fmt::Debug {
 struct TemplateParamsForCreate<UserType: SagaType + fmt::Debug> {
     dag: Arc<Dag>,
     registry: Arc<ActionRegistry<UserType>>,
-    params: UserType::SagaParamsType,
     uctx: Arc<UserType::ExecContextType>,
 }
 
@@ -594,7 +586,6 @@ where
             self.dag,
             self.registry,
             self.uctx,
-            self.params,
             sec_hdl,
         )))
     }
@@ -609,16 +600,16 @@ where
  * this case.  See [`SecClient::saga_resume()`].
  */
 #[derive(Debug)]
-struct TemplateParamsForRecover<T: Send + Sync + fmt::Debug> {
+struct TemplateParamsForRecover<UserType: SagaType + fmt::Debug> {
     dag: Arc<Dag>,
-    registry: Arc<ActionRegistry<T>>,
-    uctx: Arc<T>,
+    registry: Arc<ActionRegistry<UserType>>,
+    uctx: Arc<UserType::ExecContextType>,
     saga_log: SagaLog,
 }
 
-impl<T> TemplateParams for TemplateParamsForRecover<T>
+impl<UserType> TemplateParams for TemplateParamsForRecover<UserType>
 where
-    T: Send + Sync + fmt::Debug,
+    UserType: SagaType + fmt::Debug,
 {
     fn into_exec(
         self: Box<Self>,
@@ -626,14 +617,15 @@ where
         saga_id: SagaId,
         sec_hdl: SecExecClient,
     ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
-        self.dag.recover(
-            self.registry,
+        Ok(Arc::new(SagaExecutor::new_recover(
             log,
             saga_id,
+            self.dag,
+            self.registry,
             self.uctx,
             sec_hdl,
             self.saga_log,
-        )
+        )?))
     }
 }
 

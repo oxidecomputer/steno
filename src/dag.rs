@@ -4,11 +4,8 @@
 
 //! Construction and Recovery of sagas
 
-use crate::saga_action_generic::{
-    Action, ActionData, ActionEndNode, ActionStartNode,
-};
+use crate::saga_action_generic::{Action, ActionData, ActionEndNode};
 use crate::SagaType;
-use anyhow::Context;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
 use schemars::JsonSchema;
@@ -91,11 +88,6 @@ pub struct ActionRegistry<UserType: SagaType> {
 impl<UserType: SagaType> ActionRegistry<UserType> {
     pub fn new() -> ActionRegistry<UserType> {
         let mut actions = BTreeMap::new();
-        // Insert the default start action for a saga
-        let action: Arc<dyn Action<UserType> + 'static> =
-            Arc::new(ActionStartNode {});
-        let name = ActionName("__steno_action_start_node__".to_string());
-        actions.insert(name, action).unwrap();
 
         // Insert the default end action for a saga
         let action: Arc<dyn Action<UserType> + 'static> =
@@ -132,11 +124,63 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
 /// each node that allows us to recreate the Saga. Note that we don't store
 /// the execution state of the saga here. That continues to reside in saga log
 /// consisting of `SagaNodeEvent`s.
+///
+/// There can be multiple subsagas with nodes that run the same actions. In order
+/// to distinguish the action outputs we tag each one with an `instance_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
     pub name: String,
+    pub instance_id: u16,
     pub label: String,
     pub action: ActionName,
+
+    /// Each node may be the start of the outer saga, or a subsaga. We store
+    /// the creation parameters for the saga or subsaga as output of the first
+    /// node so that it can be retrieved by child nodes. In order to feed the
+    /// output of the node execution, the params themselves must be stored
+    /// as input to the DAG, and so we store them here. We only store these
+    /// parameters for the first node of a saga or child saga.
+    pub create_params: Option<Arc<serde_json::Value>>,
+}
+
+impl Node {
+    /// Create a new child node for a saga or subsaga
+    pub fn new_child(
+        name: &str,
+        instance_id: u16,
+        label: &str,
+        action: ActionName,
+    ) -> Node {
+        Node {
+            name: name.to_string(),
+            instance_id,
+            label: label.to_string(),
+            action,
+            create_params: None,
+        }
+    }
+
+    /// Create a new root node for a saga or subsaga
+    ///
+    /// The first node in a subsaga is always a root node even though it is
+    /// technically a child node of the outer saga.
+    pub fn new_root<T: ActionData>(
+        name: &str,
+        instance_id: u16,
+        label: &str,
+        action: ActionName,
+        create_params: &T,
+    ) -> Node {
+        let create_params =
+            Arc::new(serde_json::to_value(create_params).unwrap());
+        Node {
+            name: name.to_string(),
+            instance_id,
+            label: label.to_string(),
+            action,
+            create_params: Some(create_params),
+        }
+    }
 }
 
 /// A DAG describing a saga
@@ -146,7 +190,6 @@ pub struct Node {
 pub struct Dag {
     name: SagaName,
     pub(crate) graph: Graph<Node, ()>,
-    create_params: Arc<serde_json::Value>,
     pub(crate) start_node: NodeIndex,
     pub(crate) end_node: NodeIndex,
 }
@@ -155,65 +198,23 @@ impl Dag {
     pub fn get(&self, node_index: NodeIndex) -> Option<&Node> {
         self.graph.node_weight(node_index)
     }
-
-    pub fn recover<ST>(
-        self: Arc<Dag>,
-        registry: Arc<ActionRegistry<ST>>,
-        log: slog::Logger,
-        saga_id: crate::SagaId,
-        user_context: Arc<ST::ExecContextType>,
-        sec: crate::sec::SecExecClient,
-        sglog: crate::SagaLog,
-    ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>
-    where
-        ST: SagaType,
-    {
-        let params_deserialized =
-            serde_json::from_value::<ST::SagaParamsType>(*self.create_params)
-                .context("deserializing saga parameters")?;
-        Ok(Arc::new(crate::saga_exec::SagaExecutor::new_recover(
-            log,
-            saga_id,
-            self,
-            registry,
-            user_context,
-            params_deserialized,
-            sec,
-            sglog,
-        )?))
-    }
 }
 
 #[derive(Debug)]
 pub struct DagBuilder {
     name: SagaName,
     graph: Graph<Node, ()>,
-    root: NodeIndex,
-    create_params: Arc<serde_json::Value>,
+    root: Option<NodeIndex>,
     last_added: Vec<NodeIndex>,
 }
 
 impl DagBuilder {
     /// Create a new DAG for a Saga
-    ///
-    /// Creation of a DAG results in the automatic creation of a "start" node.
-    /// The output of this node is the `create_params`. This allows descendant nodes
-    /// to lookup the creation parameters via [`crate::ActionContext::lookup`].
-    pub fn new<C>(name: SagaName, create_params: &C) -> DagBuilder
-    where
-        C: ActionData,
-    {
+    pub fn new(name: SagaName, root: Node) -> DagBuilder {
         let mut graph = Graph::new();
-        let root = graph.add_node(Node {
-            name: "__StartNode__".to_string(),
-            label: "StartNode".to_string(),
-            action: ActionName("__steno_action_start_node__".to_string()),
-        });
+        let root = graph.add_node(root);
 
-        let create_params =
-            Arc::new(serde_json::to_value(create_params).unwrap());
-
-        DagBuilder { name, graph, root, create_params, last_added: vec![root] }
+        DagBuilder { name, graph, root, last_added: vec![root] }
     }
 
     /// Adds a new node to the graph
@@ -224,15 +225,17 @@ impl DagBuilder {
     ///
     /// `action` will be used when this node is being executed.
     ///
-    /// The node is called `name`.  This name is used for storing the output of
-    /// the action so that descendant nodes can access it using
-    /// [`crate::ActionContext::lookup`].
-    pub fn append(&mut self, name: &str, label: &str, action: ActionName) {
-        let newnode = self.graph.add_node(Node {
-            name: name.to_string(),
-            label: label.to_string(),
-            action,
-        });
+    /// The node is called `name`. This name is used along with `instance_id`
+    /// for storing the output of the action so that descendant nodes can
+    /// access it using [`crate::ActionContext::lookup`].
+    ///
+    /// The instance id is useful because there may be many subsagas of the same
+    /// type that run as part of the main saga. Each one of nodes in each subsaga
+    /// will only want to access data from its own nodes, and a common name for those nodes
+    /// is not enough to distinguish them across sagas. Furthermore, instance ids allow
+    /// the parent saga to identify data generated from different subsagas.
+    pub fn append(&mut self, node: Node) {
+        let newnode = self.graph.add_node(node);
         for node in &self.last_added {
             self.graph.add_edge(*node, newnode, ());
         }
@@ -246,17 +249,9 @@ impl DagBuilder {
     /// were added in the last call to `append` or `append_parallel`.  `actions`
     /// is a vector of `(name, action)` tuples analogous to the arguments to
     /// [`SagaTemplateBuilder::append`].
-    pub fn append_parallel(&mut self, actions: Vec<(&str, &str, ActionName)>) {
-        let newnodes: Vec<NodeIndex> = actions
-            .into_iter()
-            .map(|(n, l, a)| {
-                self.graph.add_node(Node {
-                    name: n.to_string(),
-                    label: l.to_string(),
-                    action: a,
-                })
-            })
-            .collect();
+    pub fn append_parallel(&mut self, actions: Vec<Node>) {
+        let newnodes: Vec<NodeIndex> =
+            actions.into_iter().map(|node| self.graph.add_node(node)).collect();
 
         // TODO-design For this exploration, we assume that any nodes appended
         // after a parallel set are intended to depend on _all_ nodes in the
@@ -286,11 +281,12 @@ impl DagBuilder {
     pub fn build(mut self) -> Dag {
         // Append an "end" node so that we can easily tell when the saga has
         // completed.
-        let newnode = self.graph.add_node(Node {
-            name: "__EndNode__".to_string(),
-            label: "EndNode".to_string(),
-            action: ActionName("__steno_action_end_node__".to_string()),
-        });
+        let newnode = self.graph.add_node(Node::new_child(
+            "__EndNode__",
+            0,
+            "EndNode".to_string(),
+            ActionName::new("__steno_action_end_node__"),
+        ));
 
         for node in &self.last_added {
             self.graph.add_edge(*node, newnode, ());
@@ -299,7 +295,6 @@ impl DagBuilder {
         Dag {
             name: self.name,
             graph: self.graph,
-            create_params: self.create_params,
             start_node: self.root,
             end_node: newnode,
         }

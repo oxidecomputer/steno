@@ -22,18 +22,6 @@ use std::sync::Arc;
  */
 pub trait SagaType: Debug + 'static {
     /**
-     * Type for a saga's input parameters
-     *
-     * When consumers begin execution of a saga with
-     * [`crate::SecClient::saga_create()`], they can specify parameters for the
-     * saga.  The collection of parameters has this type.  These parameters are
-     * recorded to the saga's persistent representation.  They're subsequently
-     * made available to the saga's actions via
-     * [`crate::ActionContext::saga_params()`].
-     */
-    type SagaParamsType: ActionData;
-
-    /**
      * Type for the consumer's context object
      *
      * When beginning execution of a saga with
@@ -128,6 +116,7 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
      */
     fn do_it(
         &self,
+        instance_id: u16,
         sgctx: ActionContext<UserType>,
     ) -> BoxFuture<'_, ActionResult>;
 
@@ -136,6 +125,7 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
      */
     fn undo_it(
         &self,
+        instance_id: u16,
         sgctx: ActionContext<UserType>,
     ) -> BoxFuture<'_, UndoResult>;
 }
@@ -143,25 +133,6 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
 /*
  * Action implementations
  */
-
-/** Represents the start node in a graph */
-#[derive(Debug)]
-pub struct ActionStartNode {}
-
-impl<UserType> Action<UserType> for ActionStartNode
-where
-    UserType: SagaType,
-{
-    fn do_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, ActionResult> {
-        // TODO-log
-        Box::pin(futures::future::ok(Arc::new(serde_json::Value::Null)))
-    }
-
-    fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
-        // TODO-log
-        Box::pin(futures::future::ok(()))
-    }
-}
 
 /** Represents the end node in a graph */
 #[derive(Debug)]

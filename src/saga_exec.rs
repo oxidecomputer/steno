@@ -296,7 +296,6 @@ struct TaskParams<UserType: SagaType> {
     dag: Arc<Dag>,
     action_registry: Arc<ActionRegistry<UserType>>,
     user_context: Arc<UserType::ExecContextType>,
-    user_saga_params: Arc<UserType::SagaParamsType>,
 
     /**
      * Handle to the saga's live state
@@ -312,7 +311,7 @@ struct TaskParams<UserType: SagaType> {
     done_tx: mpsc::Sender<TaskCompletion<UserType>>,
     /** Ancestor tree for this node.  See [`ActionContext`]. */
     // TODO-cleanup there's no reason this should be an Arc.
-    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
+    ancestor_tree: Arc<BTreeMap<(String, u16), Arc<serde_json::Value>>>,
     /** The action itself that we're executing. */
     action: Arc<dyn Action<UserType>>,
 }
@@ -358,7 +357,6 @@ pub struct SagaExecutor<UserType: SagaType> {
 
     live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
     user_context: Arc<UserType::ExecContextType>,
-    user_saga_params: Arc<UserType::SagaParamsType>,
 }
 
 #[derive(Debug)]
@@ -375,7 +373,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         dag: Arc<Dag>,
         registry: Arc<ActionRegistry<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
-        user_saga_params: UserType::SagaParamsType,
         sec_hdl: SecExecClient,
     ) -> SagaExecutor<UserType> {
         let sglog = SagaLog::new_empty(saga_id);
@@ -390,7 +387,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             dag,
             registry,
             user_context,
-            user_saga_params,
             sec_hdl,
             sglog,
         )
@@ -407,7 +403,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         dag: Arc<Dag>,
         registry: Arc<ActionRegistry<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
-        user_saga_params: UserType::SagaParamsType,
         sec_hdl: SecExecClient,
         sglog: SagaLog,
     ) -> Result<SagaExecutor<UserType>, anyhow::Error> {
@@ -422,7 +417,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
          * not a result of corrupted database state.
          */
         let forward = !sglog.unwinding();
-        let user_saga_params = Arc::new(user_saga_params);
         let mut live_state = SagaExecLiveState {
             dag: Arc::clone(&dag),
             action_registry: Arc::clone(&registry),
@@ -642,7 +636,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             finish_tx,
             saga_id,
             user_context,
-            user_saga_params,
             live_state: Arc::new(Mutex::new(live_state)),
         })
     }
@@ -658,7 +651,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
      */
     fn make_ancestor_tree(
         &self,
-        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
+        tree: &mut BTreeMap<(String, u16), Arc<serde_json::Value>>,
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
         include_self: bool,
@@ -676,7 +669,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
     fn make_ancestor_tree_node(
         &self,
-        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
+        tree: &mut BTreeMap<(String, u16), Arc<serde_json::Value>>,
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
     ) {
@@ -692,9 +685,11 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
          * on to one of the undoing states, then that implies we've already
          * finished undoing descendants, which would include the current node.
          */
-        let name = self.dag.get(node).unwrap().name.clone();
+        let dag_node = self.dag.get(node).unwrap();
+        let name = dag_node.name.clone();
+        let instance_id = dag_node.instance_id;
         let output = live_state.node_output(node);
-        tree.insert(name, output);
+        tree.insert((name, instance_id), output);
         self.make_ancestor_tree(tree, live_state, node, false);
     }
 
@@ -859,7 +854,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: sgaction,
                 user_context: Arc::clone(&self.user_context),
-                user_saga_params: Arc::clone(&self.user_saga_params),
             };
 
             let task = tokio::spawn(SagaExecutor::exec_node(task_params));
@@ -904,7 +898,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 ancestor_tree: Arc::new(ancestor_tree),
                 action: sgaction,
                 user_context: Arc::clone(&self.user_context),
-                user_saga_params: Arc::clone(&self.user_saga_params),
             };
 
             let task = tokio::spawn(SagaExecutor::undo_node(task_params));
@@ -954,7 +947,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             live_state: Arc::clone(&task_params.live_state),
             dag: Arc::clone(&task_params.dag),
             user_context: Arc::clone(&task_params.user_context),
-            user_saga_params: Arc::clone(&task_params.user_saga_params),
         });
         let result = exec_future.await;
         let node: Box<dyn SagaNodeRest<UserType>> = match result {
@@ -1009,7 +1001,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             live_state: Arc::clone(&task_params.live_state),
             dag: Arc::clone(&task_params.dag),
             user_context: Arc::clone(&task_params.user_context),
-            user_saga_params: Arc::clone(&task_params.user_saga_params),
         });
         /*
          * TODO-robustness We have to figure out what it means to fail here and
@@ -1650,18 +1641,20 @@ fn recovery_validate_parent(
  * have enough state to know which node is invoking the API.
  */
 pub struct ActionContext<UserType: SagaType> {
-    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
+    ancestor_tree: Arc<BTreeMap<(String, u16), Arc<serde_json::Value>>>,
     node_id: NodeIndex,
     dag: Arc<Dag>,
     live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
     user_context: Arc<UserType::ExecContextType>,
-    user_saga_params: Arc<UserType::SagaParamsType>,
 }
 
 impl<UserType: SagaType> ActionContext<UserType> {
     /**
      * Retrieves a piece of data stored by a previous (ancestor) node in the
-     * current saga.  The data is identified by `name`.
+     * current saga.  The data is identified by `name` and `instance_id`.
+     *
+     * The instance id is necessary to identify the output of the same action
+     * from different subsagas.
      *
      *
      * # Panics
@@ -1672,14 +1665,31 @@ impl<UserType: SagaType> ActionContext<UserType> {
     pub fn lookup<T: ActionData + 'static>(
         &self,
         name: &str,
+        instance_id: u16,
     ) -> Result<T, ActionError> {
         let item = self
             .ancestor_tree
-            .get(name)
+            .get((name, instance_id))
             .unwrap_or_else(|| panic!("no ancestor called \"{}\"", name));
         // TODO-cleanup double-asterisk seems ridiculous
         serde_json::from_value((**item).clone())
             .map_err(ActionError::new_deserialize)
+    }
+
+    /**
+     * Returns the create parameters if the current node is a (sub)saga start node.
+     *
+     * # Panics
+     *
+     * This function panics if the node does not have create parameters.
+     */
+    pub fn create_params<T: ActionData + 'static>(
+        &self,
+    ) -> Result<T, ActionError> {
+        serde_json::from_value(
+            self.dag.get(self.node_id).unwrap().create_params.unwrap(),
+        )
+        .map_err(ActionError::new_deserialize)
     }
 
     /**
@@ -1694,13 +1704,6 @@ impl<UserType: SagaType> ActionContext<UserType> {
      */
     pub fn user_data(&self) -> &UserType::ExecContextType {
         &self.user_context
-    }
-
-    /**
-     * Returns the consumer-provided parameters for the current saga
-     */
-    pub fn saga_params(&self) -> &UserType::SagaParamsType {
-        &self.user_saga_params
     }
 }
 
