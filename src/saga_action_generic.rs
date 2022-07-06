@@ -134,6 +134,32 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
  * Action implementations
  */
 
+/** Represents the start node in a graph */
+#[derive(Debug)]
+pub struct ActionStartNode {}
+
+impl<UserType> Action<UserType> for ActionStartNode
+where
+    UserType: SagaType,
+{
+    fn do_it(
+        &self,
+        _: u16,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'_, ActionResult> {
+        // TODO-log
+        Box::pin(futures::future::ok(Arc::new(serde_json::Value::Null)))
+    }
+
+    fn undo_it(
+        &self,
+        _: u16,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'_, UndoResult> {
+        // TODO-log
+        Box::pin(futures::future::ok(()))
+    }
+}
 /** Represents the end node in a graph */
 #[derive(Debug)]
 pub struct ActionEndNode {}

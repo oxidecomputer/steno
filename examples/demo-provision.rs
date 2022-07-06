@@ -11,14 +11,13 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use steno::make_example_provision_saga;
+use steno::make_example_action_registry;
+use steno::make_example_provision_dag;
 use steno::ExampleContext;
 use steno::ExampleParams;
 use steno::SagaId;
 use steno::SagaLog;
 use steno::SagaSerialized;
-use steno::SagaTemplateGeneric;
-use steno::{make_example_action_registry, make_example_provision_dag};
 use structopt::StructOpt;
 use uuid::Uuid;
 
@@ -100,8 +99,10 @@ fn read_saga_state<R: io::Read>(
  */
 
 async fn cmd_dot() -> Result<(), anyhow::Error> {
-    let saga_template = make_example_provision_saga();
-    println!("{}", saga_template.metadata().dot());
+    let params = ExampleParams { instance_name: "fake-o-instance".to_string() };
+    let saga_template = make_example_provision_dag(&params);
+    // TODO(AJS) -actually print the dots
+    // println!("{}", saga_template.metadata().dot());
     Ok(())
 }
 
@@ -110,7 +111,7 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
  */
 
 async fn cmd_info() -> Result<(), anyhow::Error> {
-    let log = make_log();
+    /*    let log = make_log();
     let sec = make_sec(&log);
 
     let saga_template = make_example_provision_saga();
@@ -133,6 +134,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     let saga = sec.saga_get(saga_id).await.unwrap();
     let status = saga.state.status();
     println!("{}", status);
+    */
     Ok(())
 }
 
@@ -183,7 +185,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let sec = make_sec(&log);
     let registry = make_example_action_registry();
     let uctx = Arc::new(ExampleContext::default());
-    let (saga_id, future) = if let Some(input_log_path) = &args.recover_from {
+    /*    let (saga_id, future) = if let Some(input_log_path) = &args.recover_from {
         if !args.quiet {
             println!("recovering from log: {}", input_log_path.display());
         }
@@ -213,16 +215,15 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         }
         (saga_id, future)
     } else {
-        let params =
-            ExampleParams { instance_name: "fake-o instance".to_string() };
-        let dag = make_example_provision_dag(&params);
-        let saga_id = make_saga_id();
-        let future =
-            sec.saga_create(saga_id, params, uctx, dag, registry).await?;
-        (saga_id, future)
-    };
+        */
+    let params = ExampleParams { instance_name: "fake-o instance".to_string() };
+    let dag = make_example_provision_dag(&params);
+    let saga_id = make_saga_id();
+    let future = sec.saga_create(saga_id, uctx, dag, registry).await?;
+    //        (saga_id, future)
+    //    };
 
-    for node_name in &args.inject_error {
+    /*    for node_name in &args.inject_error {
         let node_id =
             saga_template.metadata().node_for_name(&node_name).with_context(
                 || format!("bad argument for --inject-error: {:?}", node_name),
@@ -234,6 +235,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             println!("will inject error at node \"{}\"", node_name);
         }
     }
+    */
 
     if !args.quiet {
         println!("*** running saga ***");

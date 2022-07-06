@@ -1681,10 +1681,12 @@ impl<UserType: SagaType> ActionContext<UserType> {
     ) -> Result<T, ActionError> {
         // TODO: Remove this unnecessary allocation via `Borrow/Cow`
         let key = (name.to_string(), instance_id);
-        let item = self
-            .ancestor_tree
-            .get(&key)
-            .unwrap_or_else(|| panic!("no ancestor called \"{}\"", name));
+        let item = self.ancestor_tree.get(&key).unwrap_or_else(|| {
+            panic!(
+                "no ancestor called \"{}\" with instance id: {}",
+                name, instance_id
+            )
+        });
         // TODO-cleanup double-asterisk seems ridiculous
         serde_json::from_value((**item).clone())
             .map_err(ActionError::new_deserialize)

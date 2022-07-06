@@ -4,7 +4,9 @@
 
 //! Construction and Recovery of sagas
 
-use crate::saga_action_generic::{Action, ActionData, ActionEndNode};
+use crate::saga_action_generic::{
+    Action, ActionData, ActionEndNode, ActionStartNode,
+};
 use crate::SagaType;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
@@ -105,11 +107,19 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
     pub fn new() -> ActionRegistry<UserType> {
         let mut actions = BTreeMap::new();
 
+        // Insert the default start action for a saga
+        let action: Arc<dyn Action<UserType> + 'static> =
+            Arc::new(ActionStartNode {});
+        let name = ActionName("__steno_action_start_node__".to_string());
+        let already_inserted = actions.insert(name, action);
+        assert!(already_inserted.is_none());
+
         // Insert the default end action for a saga
         let action: Arc<dyn Action<UserType> + 'static> =
             Arc::new(ActionEndNode {});
         let name = ActionName("__steno_action_end_node__".to_string());
-        actions.insert(name, action).unwrap();
+        let already_inserted = actions.insert(name, action);
+        assert!(already_inserted.is_none());
 
         ActionRegistry { actions }
     }
@@ -227,9 +237,16 @@ pub struct DagBuilder {
 
 impl DagBuilder {
     /// Create a new DAG for a Saga
-    pub fn new(name: SagaName, root: Node) -> DagBuilder {
+    pub fn new(name: SagaName) -> DagBuilder {
         let mut graph = Graph::new();
-        let root = graph.add_node(root);
+
+        // Append a default "start" node.
+        let root = graph.add_node(Node::new_child(
+            "__StartNode__",
+            0,
+            "StartNode",
+            ActionName::new("__steno_action_start_node__"),
+        ));
 
         DagBuilder { name, graph, root, last_added: vec![root] }
     }

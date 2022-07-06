@@ -105,16 +105,17 @@ pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
 pub fn make_example_provision_dag(params: &ExampleParams) -> Arc<Dag> {
     // The saga instance Id (not related to VM instance)
     // TODO(AJS): Name this something else?
-    let saga_instance_id = 0;
     let name = SagaName::new("DemoVmProvision");
-    let root = Node::new_root(
+    let mut d = DagBuilder::new(name);
+
+    let saga_instance_id = 0;
+    d.append(Node::new_root(
         "instance_create_params",
         saga_instance_id,
         "InstanceCreateStart",
         ActionName::new("instance_create_params"),
         params,
-    );
-    let mut d = DagBuilder::new(name, root);
+    ));
 
     d.append(Node::new_child(
         "instance_id",
