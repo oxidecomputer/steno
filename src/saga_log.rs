@@ -1,7 +1,7 @@
 //! Persistent state for sagas
 
 use crate::saga_action_error::ActionError;
-use crate::saga_template::SagaId;
+use crate::SagaId;
 use anyhow::anyhow;
 use anyhow::Context;
 use schemars::JsonSchema;

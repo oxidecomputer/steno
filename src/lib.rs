@@ -10,7 +10,8 @@
 //!
 //! * Write some functions that will be used as _actions_ and _undo actions_ for
 //!   your saga.  Package these up with [`ActionFunc::new_action()`].
-//! * Use [`SagaTemplateBuilder`] to construct a graph of these actions.
+//! * Add these actions to an [`ActionRegistry`]
+//! * Use [`DagBuilder`] to construct a graph of these actions.
 //! * Construct a saga execution coordinator with [`sec()`] and use that to run
 //!   the saga.  You can start with an [`InMemorySecStore`] or impl your own
 //!   [`SecStore`].
@@ -36,7 +37,6 @@ mod saga_action_func;
 mod saga_action_generic;
 mod saga_exec;
 mod saga_log;
-mod saga_template;
 mod sec;
 mod store;
 
@@ -48,7 +48,6 @@ mod store;
  */
 pub use example_provision::make_example_action_registry;
 pub use example_provision::make_example_provision_dag;
-pub use example_provision::make_example_provision_saga;
 pub use example_provision::ExampleContext;
 pub use example_provision::ExampleParams;
 
@@ -57,6 +56,7 @@ pub use dag::ActionRegistry;
 pub use dag::ActionRegistryError;
 pub use dag::Dag;
 pub use dag::DagBuilder;
+pub use dag::SagaId;
 pub use dag::SagaName;
 pub use saga_action_error::ActionError;
 pub use saga_action_func::new_action_noop_undo;
@@ -77,12 +77,6 @@ pub use saga_log::SagaLog;
 pub use saga_log::SagaNodeEvent;
 pub use saga_log::SagaNodeEventType;
 pub use saga_log::SagaNodeId;
-pub use saga_template::SagaId;
-pub use saga_template::SagaTemplate;
-pub use saga_template::SagaTemplateBuilder;
-pub use saga_template::SagaTemplateDot;
-pub use saga_template::SagaTemplateGeneric;
-pub use saga_template::SagaTemplateMetadata;
 pub use sec::sec;
 pub use sec::SagaSerialized;
 pub use sec::SagaStateView;

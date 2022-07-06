@@ -68,8 +68,6 @@ use crate::SagaId;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
 use crate::SagaResult;
-use crate::SagaTemplate;
-use crate::SagaTemplateGeneric;
 use crate::SagaType;
 use anyhow::anyhow;
 use anyhow::Context;
@@ -167,7 +165,7 @@ impl SecClient {
         saga_id: SagaId,
         params: UserType::SagaParamsType,
         uctx: Arc<UserType::ExecContextType>,
-        dag: Dag,
+        dag: Arc<Dag>,
         registry: Arc<ActionRegistry<UserType>>,
     ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
@@ -204,6 +202,7 @@ impl SecClient {
         saga_id: SagaId,
         uctx: Arc<T>,
         dag: Dag,
+        registry: Arc<T>,
         log_events: Vec<SagaNodeEvent>,
     ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
@@ -212,9 +211,12 @@ impl SecClient {
         let (ack_tx, ack_rx) = oneshot::channel();
         let saga_log = SagaLog::new_recover(saga_id, log_events)
             .context("recovering log")?;
-        let template_params =
-            Box::new(TemplateParamsForRecover { dag, uctx, saga_log })
-                as Box<dyn TemplateParams>;
+        let template_params = Box::new(TemplateParamsForRecover {
+            dag,
+            registry,
+            uctx,
+            saga_log,
+        }) as Box<dyn TemplateParams>;
         self.sec_cmd(
             ack_rx,
             SecClientMsg::SagaResume { ack_tx, saga_id, template_params },
@@ -589,8 +591,8 @@ where
         Ok(Arc::new(SagaExecutor::new(
             log,
             saga_id,
-            dag: self.dag,
-            registry: self.registry,
+            self.dag,
+            self.registry,
             self.uctx,
             self.params,
             sec_hdl,
@@ -608,7 +610,8 @@ where
  */
 #[derive(Debug)]
 struct TemplateParamsForRecover<T: Send + Sync + fmt::Debug> {
-    dag: Dag,
+    dag: Arc<Dag>,
+    registry: Arc<ActionRegistry<T>>,
     uctx: Arc<T>,
     saga_log: SagaLog,
 }
@@ -623,11 +626,11 @@ where
         saga_id: SagaId,
         sec_hdl: SecExecClient,
     ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
-        self.template.recover(
+        self.dag.recover(
+            self.registry,
             log,
             saga_id,
             self.uctx,
-            self.params,
             sec_hdl,
             self.saga_log,
         )

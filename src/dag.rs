@@ -8,11 +8,40 @@ use crate::saga_action_generic::{
     Action, ActionData, ActionEndNode, ActionStartNode,
 };
 use crate::SagaType;
+use anyhow::Context;
 use petgraph::graph::NodeIndex;
 use petgraph::Graph;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use uuid::Uuid;
+
+/** Unique identifier for a Saga (an execution of a saga template) */
+#[derive(
+    Clone,
+    Copy,
+    Deserialize,
+    Eq,
+    JsonSchema,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+)]
+#[serde(transparent)]
+pub struct SagaId(pub Uuid);
+// TODO-cleanup figure out how to use custom_derive here?
+NewtypeDebug! { () pub struct SagaId(Uuid); }
+/*
+ * TODO-design In the Oxide consumer, we probably want to have the serialized
+ * form of ids have a prefix describing the type.  This seems consumer-specific,
+ * though.  Is there a good way to do support that?  Maybe the best way to do
+ * this is to have the consumer have their own enum or trait that impls Display
+ * using the various ids provided by consumers.
+ */
+NewtypeDisplay! { () pub struct SagaId(Uuid); }
+NewtypeFrom! { () pub struct SagaId(Uuid); }
 
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
@@ -36,6 +65,7 @@ impl SagaName {
     }
 }
 
+#[derive(Debug)]
 pub enum ActionRegistryError {
     NotFound,
 }
@@ -53,6 +83,7 @@ pub enum ActionRegistryError {
 /// across sagas so we can dynamically construct and restore sagas.
 ///
 /// TODO: How do we handle actions wtih different saga types?
+#[derive(Debug)]
 pub struct ActionRegistry<UserType: SagaType> {
     actions: BTreeMap<ActionName, Arc<dyn Action<UserType>>>,
 }
@@ -103,19 +134,54 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
 /// consisting of `SagaNodeEvent`s.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
-    name: String,
-    label: String,
-    action: ActionName,
+    pub name: String,
+    pub label: String,
+    pub action: ActionName,
 }
 
-// A Dag describing a saga
+/// A DAG describing a saga
+//
+// TODO(AJS) - Create a separate metadata type?
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dag {
     name: SagaName,
-    graph: Graph<Node, ()>,
+    pub(crate) graph: Graph<Node, ()>,
     create_params: Arc<serde_json::Value>,
     pub(crate) start_node: NodeIndex,
     pub(crate) end_node: NodeIndex,
+}
+
+impl Dag {
+    pub fn get(&self, node_index: NodeIndex) -> Option<&Node> {
+        self.graph.node_weight(node_index)
+    }
+
+    pub fn recover<ST>(
+        self: Arc<Dag>,
+        registry: Arc<ActionRegistry<ST>>,
+        log: slog::Logger,
+        saga_id: crate::SagaId,
+        user_context: Arc<ST::ExecContextType>,
+        sec: crate::sec::SecExecClient,
+        sglog: crate::SagaLog,
+    ) -> Result<Arc<dyn crate::SagaExecManager>, anyhow::Error>
+    where
+        ST: SagaType,
+    {
+        let params_deserialized =
+            serde_json::from_value::<ST::SagaParamsType>(*self.create_params)
+                .context("deserializing saga parameters")?;
+        Ok(Arc::new(crate::saga_exec::SagaExecutor::new_recover(
+            log,
+            saga_id,
+            self,
+            registry,
+            user_context,
+            params_deserialized,
+            sec,
+            sglog,
+        )?))
+    }
 }
 
 #[derive(Debug)]
@@ -147,7 +213,7 @@ impl DagBuilder {
         let create_params =
             Arc::new(serde_json::to_value(create_params).unwrap());
 
-        DagBuilder { name, graph, create_params, last_added: vec![root] }
+        DagBuilder { name, graph, root, create_params, last_added: vec![root] }
     }
 
     /// Adds a new node to the graph

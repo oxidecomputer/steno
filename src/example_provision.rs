@@ -10,16 +10,12 @@ use crate::ActionName;
 use crate::ActionRegistry;
 use crate::Dag;
 use crate::DagBuilder;
-use crate::SagaId;
 use crate::SagaName;
-use crate::SagaTemplate;
-use crate::SagaTemplateBuilder;
 use crate::SagaType;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
 use thiserror::Error;
-use uuid::Uuid;
 
 /*
  * Demo provision saga:
@@ -119,49 +115,49 @@ pub fn make_example_provision_dag(params: &ExampleParams) -> Arc<Dag> {
  * nodes.  The intent is just to exercise the API.  You can interact with this
  * using the `demo-provision` example.
  */
-pub fn make_example_provision_saga() -> Arc<SagaTemplate<ExampleSagaType>> {
-    let mut w = SagaTemplateBuilder::new();
-
-    w.append(
-        "instance_id",
-        "InstanceCreate",
-        new_action_noop_undo(demo_prov_instance_create),
-    );
-    w.append_parallel(vec![
-        (
-            "instance_ip",
-            "VpcAllocIp",
-            new_action_noop_undo(demo_prov_vpc_alloc_ip),
-        ),
-        (
-            "volume_id",
-            "VolumeCreate",
-            new_action_noop_undo(demo_prov_volume_create),
-        ),
-        (
-            "server_id",
-            "ServerAlloc (subsaga)",
-            new_action_noop_undo(demo_prov_server_alloc),
-        ),
-    ]);
-    w.append(
-        "instance_configure",
-        "InstanceConfigure",
-        new_action_noop_undo(demo_prov_instance_configure),
-    );
-    w.append(
-        "volume_attach",
-        "VolumeAttach",
-        new_action_noop_undo(demo_prov_volume_attach),
-    );
-    w.append(
-        "instance_boot",
-        "InstanceBoot",
-        new_action_noop_undo(demo_prov_instance_boot),
-    );
-    w.append("print", "Print", new_action_noop_undo(demo_prov_print));
-    Arc::new(w.build())
-}
+//pub fn make_example_provision_saga() -> Arc<SagaTemplate<ExampleSagaType>> //{
+//    let mut w = SagaTemplateBuilder::new();
+//
+//    w.append(
+//        "instance_id",
+//        "InstanceCreate",
+//        new_action_noop_undo(demo_prov_instance_create),
+//    );
+//    w.append_parallel(vec![
+//        (
+//            "instance_ip",
+//            "VpcAllocIp",
+//            new_action_noop_undo(demo_prov_vpc_alloc_ip),
+//        ),
+//        (
+//            "volume_id",
+//            "VolumeCreate",
+//            new_action_noop_undo(demo_prov_volume_create),
+//        ),
+//        (
+//            "server_id",
+//            "ServerAlloc (subsaga)",
+//            new_action_noop_undo(demo_prov_server_alloc),
+//        ),
+//    ]);
+//    w.append(
+//        "instance_configure",
+//        "InstanceConfigure",
+//        new_action_noop_undo(demo_prov_instance_configure),
+//    );
+//    w.append(
+//        "volume_attach",
+//        "VolumeAttach",
+//        new_action_noop_undo(demo_prov_volume_attach),
+//    );
+//    w.append(
+//        "instance_boot",
+//        "InstanceBoot",
+//        new_action_noop_undo(demo_prov_instance_boot),
+//    );
+//    w.append("print", "Print", new_action_noop_undo(demo_prov_print));
+//    Arc::new(w.build())
+//}
 
 async fn demo_prov_instance_create(
     sgctx: SagaExampleContext,
@@ -206,52 +202,52 @@ struct ExampleSubsagaParams {
 
 type SubsagaExampleContext = ActionContext<ExampleSubsagaType>;
 
-async fn demo_prov_server_alloc(
-    sgctx: SagaExampleContext,
-) -> ExFuncResult<u64> {
-    eprintln!("running action: {}", sgctx.node_label());
-
-    let mut w = SagaTemplateBuilder::new();
-    w.append(
-        "server_id",
-        "ServerPick",
-        new_action_noop_undo(demo_prov_server_pick),
-    );
-    w.append(
-        "server_reserve",
-        "ServerReserve",
-        new_action_noop_undo(demo_prov_server_reserve),
-    );
-    let sg = Arc::new(w.build());
-
-    /*
-     * The uuid here is deterministic solely for the smoke tests.  It would
-     * probably be better to have a way to get uuids from the ActionContext, and
-     * have a mode where those come from a seeded random number generator (or
-     * some other controlled source for testing).
-     */
-    let saga_id = SagaId(
-        Uuid::parse_str("bcf32552-2b54-485b-bf13-b316daa7d1d4").unwrap(),
-    );
-    let fut = sgctx
-        .child_saga::<ExampleSubsagaType>(
-            saga_id,
-            sg,
-            "server_alloc".to_string(),
-            ExampleSubsagaParams { number_of_things: 1 },
-        )
-        .await?;
-    let result = fut.await;
-    match result.kind {
-        Ok(success) => {
-            let server_allocated: Arc<ServerAllocResult> =
-                success.lookup_output("server_reserve")?;
-            Ok(server_allocated.server_id)
-        }
-        Err(failure) => Err(failure.error_source),
-    }
-}
-
+//async fn demo_prov_server_alloc(
+//    sgctx: SagaExampleContext,
+//) -> ExFuncResult<u64> {
+//    eprintln!("running action: {}", sgctx.node_label());
+//
+//    let mut w = SagaTemplateBuilder::new();
+//    w.append(
+//        "server_id",
+//        "ServerPick",
+//        new_action_noop_undo(demo_prov_server_pick),
+//    );
+//    w.append(
+//        "server_reserve",
+//        "ServerReserve",
+//        new_action_noop_undo(demo_prov_server_reserve),
+//    );
+//    let sg = Arc::new(w.build());
+//
+//    /*
+//     * The uuid here is deterministic solely for the smoke tests.  It would
+//     * probably be better to have a way to get uuids from the ActionContext, and
+//     * have a mode where those come from a seeded random number generator (or
+//     * some other controlled source for testing).
+//     */
+//    let saga_id = SagaId(
+//        Uuid::parse_str("bcf32552-2b54-485b-bf13-b316daa7d1d4").unwrap(),
+//    );
+//    let fut = sgctx
+//        .child_saga::<ExampleSubsagaType>(
+//            saga_id,
+//            sg,
+//            "server_alloc".to_string(),
+//            ExampleSubsagaParams { number_of_things: 1 },
+//        )
+//        .await?;
+//    let result = fut.await;
+//    match result.kind {
+//        Ok(success) => {
+//            let server_allocated: Arc<ServerAllocResult> =
+//                success.lookup_output("server_reserve")?;
+//            Ok(server_allocated.server_id)
+//        }
+//        Err(failure) => Err(failure.error_source),
+//    }
+//}
+//
 #[derive(Debug, Deserialize, Serialize)]
 struct ServerAllocResult {
     server_id: u64,
