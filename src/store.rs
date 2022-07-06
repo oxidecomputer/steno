@@ -2,6 +2,7 @@
  * [`SecStore`] trait, related types, and built-in implementations
  */
 
+use crate::Dag;
 use crate::SagaId;
 use crate::SagaNodeEvent;
 use anyhow::Context;
@@ -58,8 +59,7 @@ pub trait SecStore: fmt::Debug + Send + Sync {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SagaCreateParams {
     pub id: SagaId,
-    pub template_name: String,
-    pub saga_params: serde_json::Value,
+    pub dag: serde_json::Value,
     pub state: SagaCachedState,
 }
 

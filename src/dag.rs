@@ -41,7 +41,15 @@ NewtypeDisplay! { () pub struct SagaId(Uuid); }
 NewtypeFrom! { () pub struct SagaId(Uuid); }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    JsonSchema,
 )]
 pub struct ActionName(String);
 
@@ -52,9 +60,17 @@ impl ActionName {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    JsonSchema,
 )]
-pub struct SagaName(String);
+pub struct SagaName(pub String);
 
 impl SagaName {
     pub fn new(name: &str) -> SagaName {
@@ -127,7 +143,7 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
 ///
 /// There can be multiple subsagas with nodes that run the same actions. In order
 /// to distinguish the action outputs we tag each one with an `instance_id`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Node {
     pub name: String,
     pub instance_id: u16,
@@ -140,7 +156,7 @@ pub struct Node {
     /// output of the node execution, the params themselves must be stored
     /// as input to the DAG, and so we store them here. We only store these
     /// parameters for the first node of a saga or child saga.
-    pub create_params: Option<Arc<serde_json::Value>>,
+    pub create_params: Option<serde_json::Value>,
 }
 
 impl Node {
@@ -171,8 +187,7 @@ impl Node {
         action: ActionName,
         create_params: &T,
     ) -> Node {
-        let create_params =
-            Arc::new(serde_json::to_value(create_params).unwrap());
+        let create_params = serde_json::to_value(create_params).unwrap();
         Node {
             name: name.to_string(),
             instance_id,
@@ -185,10 +200,12 @@ impl Node {
 
 /// A DAG describing a saga
 //
+// Note: This doesn't implement JSON schema because of Graph and NodeIndex
 // TODO(AJS) - Create a separate metadata type?
+//
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dag {
-    name: SagaName,
+    pub(crate) name: SagaName,
     pub(crate) graph: Graph<Node, ()>,
     pub(crate) start_node: NodeIndex,
     pub(crate) end_node: NodeIndex,
@@ -204,7 +221,7 @@ impl Dag {
 pub struct DagBuilder {
     name: SagaName,
     graph: Graph<Node, ()>,
-    root: Option<NodeIndex>,
+    root: NodeIndex,
     last_added: Vec<NodeIndex>,
 }
 
@@ -284,7 +301,7 @@ impl DagBuilder {
         let newnode = self.graph.add_node(Node::new_child(
             "__EndNode__",
             0,
-            "EndNode".to_string(),
+            "EndNode",
             ActionName::new("__steno_action_end_node__"),
         ));
 

@@ -139,12 +139,20 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
 pub struct ActionEndNode {}
 
 impl<UserType: SagaType> Action<UserType> for ActionEndNode {
-    fn do_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, ActionResult> {
+    fn do_it(
+        &self,
+        _: u16,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'_, ActionResult> {
         // TODO-log
         Box::pin(futures::future::ok(Arc::new(serde_json::Value::Null)))
     }
 
-    fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
+    fn undo_it(
+        &self,
+        _: u16,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'_, UndoResult> {
         /*
          * We should not run compensation actions for nodes that have not
          * started.  We should never start this node unless all other actions
@@ -160,12 +168,20 @@ impl<UserType: SagaType> Action<UserType> for ActionEndNode {
 pub struct ActionInjectError {}
 
 impl<UserType: SagaType> Action<UserType> for ActionInjectError {
-    fn do_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, ActionResult> {
+    fn do_it(
+        &self,
+        _: u16,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'_, ActionResult> {
         // TODO-log
         Box::pin(futures::future::err(ActionError::InjectedError))
     }
 
-    fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
+    fn undo_it(
+        &self,
+        _: u16,
+        _: ActionContext<UserType>,
+    ) -> BoxFuture<'_, UndoResult> {
         /* We should never undo an action that failed. */
         unimplemented!();
     }

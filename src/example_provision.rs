@@ -47,7 +47,6 @@ use thiserror::Error;
 pub struct ExampleSagaType {}
 impl SagaType for ExampleSagaType {
     type ExecContextType = ExampleContext;
-    type SagaParamsType = ExampleParams;
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -193,6 +192,7 @@ pub fn make_example_provision_dag(params: &ExampleParams) -> Arc<Dag> {
 // This action takes the parameters from the node and outputs them so they
 // can be looked up by subsequent nodes.
 async fn demo_prov_instance_create_params(
+    _instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<ExampleParams> {
     let params = sgctx.create_params::<ExampleParams>()?;
@@ -207,9 +207,11 @@ async fn demo_prov_instance_create_params(
 }
 
 async fn demo_prov_instance_create(
+    instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<u64> {
-    let params = sgctx.lookup::<ExampleParams>("instance_create_params", 0)?;
+    let params =
+        sgctx.lookup::<ExampleParams>("instance_create_params", instance_id)?;
     eprintln!(
         "running action: {} (instance name: {})",
         sgctx.node_label(),
@@ -222,11 +224,12 @@ async fn demo_prov_instance_create(
 }
 
 async fn demo_prov_vpc_alloc_ip(
+    instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<String> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using some data from a previous node */
-    let instance_id = sgctx.lookup::<u64>("instance_id", 0)?;
+    let instance_id = sgctx.lookup::<u64>("instance_id", instance_id)?;
     assert_eq!(instance_id, 1211);
     /* make up an IP (simulate allocation) */
     let ip = String::from("10.120.121.122");
@@ -240,7 +243,6 @@ async fn demo_prov_vpc_alloc_ip(
 struct ExampleSubsagaType {}
 impl SagaType for ExampleSubsagaType {
     type ExecContextType = ExampleContext;
-    type SagaParamsType = ExampleSubsagaParams;
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -325,16 +327,17 @@ type SubsagaExampleContext = ActionContext<ExampleSubsagaType>;
 //    Ok(ServerAllocResult { server_id })
 //}
 //
-//async fn demo_prov_volume_create(
-//    sgctx: SagaExampleContext,
-//) -> ExFuncResult<u64> {
-//    eprintln!("running action: {}", sgctx.node_label());
-//    /* exercise using data from previous nodes */
-//    assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
-//    /* make up ("allocate") a volume id */
-//    let volume_id = 1213u64;
-//    Ok(volume_id)
-//}
+async fn demo_prov_volume_create(
+    instance_id: u16,
+    sgctx: SagaExampleContext,
+) -> ExFuncResult<u64> {
+    eprintln!("running action: {}", sgctx.node_label());
+    /* exercise using data from previous nodes */
+    assert_eq!(sgctx.lookup::<u64>("instance_id", instance_id)?, 1211);
+    /* make up ("allocate") a volume id */
+    let volume_id = 1213u64;
+    Ok(volume_id)
+}
 //async fn demo_prov_instance_configure(
 //    sgctx: SagaExampleContext,
 //) -> ExFuncResult<()> {

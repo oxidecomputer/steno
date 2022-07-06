@@ -941,13 +941,19 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             }
         }
 
-        let exec_future = task_params.action.do_it(ActionContext {
-            ancestor_tree: Arc::clone(&task_params.ancestor_tree),
-            node_id,
-            live_state: Arc::clone(&task_params.live_state),
-            dag: Arc::clone(&task_params.dag),
-            user_context: Arc::clone(&task_params.user_context),
-        });
+        let dag_node = task_params.dag.get(node_id).unwrap();
+        let instance_id = dag_node.instance_id;
+
+        let exec_future = task_params.action.do_it(
+            instance_id,
+            ActionContext {
+                ancestor_tree: Arc::clone(&task_params.ancestor_tree),
+                node_id,
+                live_state: Arc::clone(&task_params.live_state),
+                dag: Arc::clone(&task_params.dag),
+                user_context: Arc::clone(&task_params.user_context),
+            },
+        );
         let result = exec_future.await;
         let node: Box<dyn SagaNodeRest<UserType>> = match result {
             Ok(output) => {
@@ -995,13 +1001,19 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             }
         }
 
-        let exec_future = task_params.action.undo_it(ActionContext {
-            ancestor_tree: Arc::clone(&task_params.ancestor_tree),
-            node_id,
-            live_state: Arc::clone(&task_params.live_state),
-            dag: Arc::clone(&task_params.dag),
-            user_context: Arc::clone(&task_params.user_context),
-        });
+        let dag_node = task_params.dag.get(node_id).unwrap();
+        let instance_id = dag_node.instance_id;
+
+        let exec_future = task_params.action.undo_it(
+            instance_id,
+            ActionContext {
+                ancestor_tree: Arc::clone(&task_params.ancestor_tree),
+                node_id,
+                live_state: Arc::clone(&task_params.live_state),
+                dag: Arc::clone(&task_params.dag),
+                user_context: Arc::clone(&task_params.user_context),
+            },
+        );
         /*
          * TODO-robustness We have to figure out what it means to fail here and
          * what we want to do about it.
@@ -1667,9 +1679,11 @@ impl<UserType: SagaType> ActionContext<UserType> {
         name: &str,
         instance_id: u16,
     ) -> Result<T, ActionError> {
+        // TODO: Remove this unnecessary allocation via `Borrow/Cow`
+        let key = (name.to_string(), instance_id);
         let item = self
             .ancestor_tree
-            .get((name, instance_id))
+            .get(&key)
             .unwrap_or_else(|| panic!("no ancestor called \"{}\"", name));
         // TODO-cleanup double-asterisk seems ridiculous
         serde_json::from_value((**item).clone())
@@ -1687,7 +1701,7 @@ impl<UserType: SagaType> ActionContext<UserType> {
         &self,
     ) -> Result<T, ActionError> {
         serde_json::from_value(
-            self.dag.get(self.node_id).unwrap().create_params.unwrap(),
+            self.dag.get(self.node_id).unwrap().create_params.clone().unwrap(),
         )
         .map_err(ActionError::new_deserialize)
     }
