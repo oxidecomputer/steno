@@ -294,7 +294,6 @@ struct TaskCompletion<UserType: SagaType> {
  */
 struct TaskParams<UserType: SagaType> {
     dag: Arc<Dag>,
-    action_registry: Arc<ActionRegistry<UserType>>,
     user_context: Arc<UserType::ExecContextType>,
 
     /**
@@ -847,7 +846,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
             let task_params = TaskParams {
                 dag: Arc::clone(&self.dag),
-                action_registry: Arc::clone(&live_state.action_registry),
                 live_state: Arc::clone(&self.live_state),
                 node_id,
                 done_tx: tx.clone(),
@@ -891,7 +889,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
             let task_params = TaskParams {
                 dag: Arc::clone(&self.dag),
-                action_registry: Arc::clone(&live_state.action_registry),
                 live_state: Arc::clone(&self.live_state),
                 node_id,
                 done_tx: tx.clone(),
@@ -949,7 +946,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             ActionContext {
                 ancestor_tree: Arc::clone(&task_params.ancestor_tree),
                 node_id,
-                live_state: Arc::clone(&task_params.live_state),
                 dag: Arc::clone(&task_params.dag),
                 user_context: Arc::clone(&task_params.user_context),
             },
@@ -1009,7 +1005,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             ActionContext {
                 ancestor_tree: Arc::clone(&task_params.ancestor_tree),
                 node_id,
-                live_state: Arc::clone(&task_params.live_state),
                 dag: Arc::clone(&task_params.dag),
                 user_context: Arc::clone(&task_params.user_context),
             },
@@ -1656,7 +1651,6 @@ pub struct ActionContext<UserType: SagaType> {
     ancestor_tree: Arc<BTreeMap<(String, u16), Arc<serde_json::Value>>>,
     node_id: NodeIndex,
     dag: Arc<Dag>,
-    live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
     user_context: Arc<UserType::ExecContextType>,
 }
 

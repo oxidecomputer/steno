@@ -124,7 +124,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     println!("*** initial state ***");
     let saga_id = make_saga_id();
     let uctx = Arc::new(ExampleContext::default());
-    let future = sec.saga_create(saga_id, uctx, dag, registry).await?;
+    let _ = sec.saga_create(saga_id, uctx, dag, registry).await?;
 
     let saga = sec.saga_get(saga_id).await.unwrap();
     let status = saga.state.status();

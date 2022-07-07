@@ -2,7 +2,6 @@
  * [`SecStore`] trait, related types, and built-in implementations
  */
 
-use crate::Dag;
 use crate::SagaId;
 use crate::SagaNodeEvent;
 use anyhow::Context;
