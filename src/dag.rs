@@ -370,24 +370,3 @@ impl DagBuilder {
         }
     }
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct TestParams;
-
-    #[derive(Debug)]
-    struct TestContext {}
-
-    #[derive(Debug)]
-    struct TestUserData;
-    impl SagaType for TestUserData {
-        type SagaParamsType = TestParams;
-        type ExecContextType = TestContext;
-    }
-
-    #[test]
-    fn test_saga_registry() {}
-}

@@ -112,7 +112,7 @@ fn cmd_run_recover_unwind() {
         exec.arg("run")
             .arg("--dump-to=-")
             .arg("--quiet")
-            .arg("--inject-error=instance_boot")
+            .arg("--inject-error=volume_id")
     });
 
     /* First, try recovery without having changed anything. */

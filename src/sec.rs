@@ -1447,7 +1447,8 @@ impl TryFrom<SagaSerialized> for SagaLog {
 mod test {
     use super::*;
     use crate::{
-        ActionContext, ActionError, ActionFunc, SagaId, SagaTemplateBuilder,
+        ActionContext, ActionError, ActionFunc, ActionName, DagBuilder, Node,
+        SagaId, SagaName,
     };
     use serde::{Deserialize, Serialize};
     use slog::Drain;
@@ -1514,24 +1515,38 @@ mod test {
         type ExecContextType = TestContext;
     }
 
-    fn make_test_one_node_saga() -> Arc<SagaTemplate<TestSaga>> {
-        let mut builder = SagaTemplateBuilder::new();
-
+    fn make_test_one_node_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<Dag>) {
         async fn do_n1(
+            _instance_id: u16,
             ctx: ActionContext<TestSaga>,
         ) -> Result<i32, ActionError> {
             ctx.user_data().call("do_n1");
             Ok(1)
         }
         async fn undo_n1(
+            _instance_id: u16,
             ctx: ActionContext<TestSaga>,
         ) -> Result<(), anyhow::Error> {
             ctx.user_data().call("undo_n1");
             Ok(())
         }
 
-        builder.append("n1_out", "n1", ActionFunc::new_action(do_n1, undo_n1));
-        Arc::new(builder.build())
+        let mut registry = ActionRegistry::new();
+        registry.register(
+            ActionName::new("n1_out"),
+            ActionFunc::new_action(do_n1, undo_n1),
+        );
+
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::new_root(
+            "n1_out",
+            0,
+            "n1",
+            ActionName::new("n1_out"),
+            &TestParams {},
+        ));
+
+        (Arc::new(registry), Arc::new(builder.build()))
     }
 
     // Tests the "normal flow" for a newly created saga: create + start.
@@ -1540,19 +1555,13 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
         let saga_future = sec
-            .saga_create(
-                saga_id,
-                Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                TestParams {},
-            )
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
 
@@ -1570,19 +1579,13 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
         let saga_future = sec
-            .saga_create(
-                saga_id,
-                Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                TestParams {},
-            )
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
 
@@ -1603,19 +1606,13 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
         let saga_future = sec
-            .saga_create(
-                saga_id,
-                Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                TestParams {},
-            )
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
 
@@ -1637,7 +1634,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
@@ -1646,9 +1643,8 @@ mod test {
             .saga_resume(
                 saga_id,
                 Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                serde_json::to_value(TestParams {}).unwrap(),
+                serde_json::to_value(Arc::try_unwrap(dag).unwrap()).unwrap(),
+                registry,
                 vec![],
             )
             .await
@@ -1669,7 +1665,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
@@ -1678,9 +1674,8 @@ mod test {
             .saga_create(
                 saga_id,
                 Arc::clone(&context),
-                template.clone(),
-                "test-saga".to_string(),
-                TestParams {},
+                dag.clone(),
+                registry.clone(),
             )
             .await
             .expect("failed to create saga");
@@ -1689,9 +1684,8 @@ mod test {
             .saga_resume(
                 saga_id,
                 Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                serde_json::to_value(TestParams {}).unwrap(),
+                serde_json::to_value((*dag).clone()).unwrap(),
+                registry,
                 vec![],
             )
             .await
@@ -1725,19 +1719,13 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
         let _ = sec
-            .saga_create(
-                saga_id,
-                Arc::clone(&context),
-                template.clone(),
-                "test-saga".to_string(),
-                TestParams {},
-            )
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
 
