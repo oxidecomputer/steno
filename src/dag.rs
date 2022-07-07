@@ -175,6 +175,53 @@ pub struct Node {
     pub create_params: Option<serde_json::Value>,
 }
 
+/// A specification for creating a node. This allows dynamic creation of nodes
+/// for subsagas with different instance_ids and creation parameters.
+pub struct NodeSpec<'a> {
+    pub name: &'a str,
+    pub label: &'a str,
+    pub action: &'a str,
+}
+
+/// An abstract description of the shape of node execution
+///
+/// TODO: Do we want to allow arbitrary recursion here?
+pub enum NodeConcurrency<'a> {
+    Linear(Vec<NodeSpec<'a>>),
+    Parallel(Vec<NodeSpec<'a>>),
+}
+
+/// An abstract specification for a subsaga that can be used by a Dag
+/// to generate and append saga nodes.
+///
+/// An example implementation is shown below:
+///
+/// ```
+/// fn create_disk_subsaga<'a>() -> SubsagaSpec<'a> {
+///     SubSagaSpec(
+///         // The root node is always the first one. It contains the saga
+///         // parameters.
+///         NodeSpec {
+///             name: "disk_create_params",
+///             label: "ReturnDiskCreateParams",
+///             action: "disk_create_params",
+///         },
+///         vec![
+///             NodeConcurrency::Linear(vec![NodeSpec {
+///                 name: "disk_id",
+///                 label: "GenerateDiskId",
+///                 action: "saga_generate_uuid",
+///             }]),
+///             NodeConcurrency::Parallel(vec![NodeSpec {...}, NodeSpec {...}]),
+///         ],
+///     )
+/// }
+/// ```
+///
+///
+/// TODO: Semantic validation (actions exist in registry, etc...)
+pub struct SubsagaSpec<'a>(pub NodeSpec<'a>, pub Vec<NodeConcurrency<'a>>);
+
 impl Node {
     /// Create a new child node for a saga or subsaga
     pub fn new_child(
@@ -319,9 +366,9 @@ impl DagBuilder {
     /// were added in the last call to `append` or `append_parallel`.  `actions`
     /// is a vector of `(name, action)` tuples analogous to the arguments to
     /// [`SagaTemplateBuilder::append`].
-    pub fn append_parallel(&mut self, actions: Vec<Node>) {
+    pub fn append_parallel(&mut self, nodes: Vec<Node>) {
         let newnodes: Vec<NodeIndex> =
-            actions.into_iter().map(|node| self.graph.add_node(node)).collect();
+            nodes.into_iter().map(|node| self.graph.add_node(node)).collect();
 
         // TODO-design For this exploration, we assume that any nodes appended
         // after a parallel set are intended to depend on _all_ nodes in the
@@ -343,6 +390,60 @@ impl DagBuilder {
         }
 
         self.last_added = newnodes;
+    }
+
+    /// Take a subsaga spec describing nodes, create the nodes,
+    /// and append them to the existing Dag.
+    ///
+    /// TODO: We probably want an `append_parallel_subsaga` that allows us to link all subsagas
+    /// to the `last_added` nodes in a parallel fashion.
+    pub fn append_subsaga<'a, T>(
+        &mut self,
+        spec: &SubsagaSpec<'a>,
+        instance_id: u16,
+        params: &T,
+    ) where
+        T: ActionData,
+    {
+        // Append the root of the subsaga
+        let root = &spec.0;
+        self.append(Node::new_root(
+            root.name,
+            instance_id,
+            root.label,
+            ActionName::new(root.action),
+            params,
+        ));
+
+        // Walk the rest of the nodes and append them.
+        for concurrency in &spec.1 {
+            match concurrency {
+                NodeConcurrency::Linear(specs) => {
+                    for spec in specs {
+                        self.append(Node::new_child(
+                            spec.name,
+                            instance_id,
+                            spec.label,
+                            ActionName::new(spec.action),
+                        ));
+                    }
+                }
+                NodeConcurrency::Parallel(specs) => {
+                    let nodes = specs
+                        .iter()
+                        .map(|spec| {
+                            Node::new_child(
+                                spec.name,
+                                instance_id,
+                                spec.label,
+                                ActionName::new(spec.action),
+                            )
+                        })
+                        .collect();
+                    self.append_parallel(nodes);
+                }
+            }
+        }
     }
 
     /// Return the constructed DAG
