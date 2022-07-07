@@ -193,7 +193,7 @@ impl SecClient {
         &self,
         saga_id: SagaId,
         uctx: Arc<UserType::ExecContextType>,
-        dag: Arc<Dag>,
+        dag: serde_json::Value,
         registry: Arc<ActionRegistry<UserType>>,
         log_events: Vec<SagaNodeEvent>,
     ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
@@ -203,6 +203,10 @@ impl SecClient {
         let (ack_tx, ack_rx) = oneshot::channel();
         let saga_log = SagaLog::new_recover(saga_id, log_events)
             .context("recovering log")?;
+        let dag: Arc<Dag> = Arc::new(
+            serde_json::from_value(dag)
+                .map_err(ActionError::new_deserialize)?,
+        );
         let template_params = Box::new(TemplateParamsForRecover {
             dag: dag.clone(),
             registry,

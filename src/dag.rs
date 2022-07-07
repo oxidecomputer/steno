@@ -4,15 +4,21 @@
 
 //! Construction and Recovery of sagas
 
-use crate::saga_action_generic::{
-    Action, ActionData, ActionEndNode, ActionStartNode,
-};
+use crate::saga_action_generic::Action;
+use crate::saga_action_generic::ActionData;
+use crate::saga_action_generic::ActionEndNode;
+use crate::saga_action_generic::ActionStartNode;
 use crate::SagaType;
+use anyhow::anyhow;
+use petgraph::dot;
 use petgraph::graph::NodeIndex;
+use petgraph::Directed;
 use petgraph::Graph;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -222,8 +228,38 @@ pub struct Dag {
 }
 
 impl Dag {
+    /// Return a node given its index
     pub fn get(&self, node_index: NodeIndex) -> Option<&Node> {
         self.graph.node_weight(node_index)
+    }
+
+    /// Return the index for a given node name
+    pub fn get_index(&self, name: &str) -> Result<NodeIndex, anyhow::Error> {
+        self.graph
+            .node_indices()
+            .find(|i| self.graph[*i].name == name)
+            .ok_or_else(|| anyhow!("saga has no node named \"{}\"", name))
+    }
+
+    /// Returns an object that can be used to print a graphiz-format
+    /// representation of the underlying node graph.
+    pub fn dot(&self) -> DagDot<'_> {
+        DagDot(&self.graph)
+    }
+}
+
+/// Graphviz-formatted view of a saga graph
+///
+/// Use the `Display` impl to print a representation suitable as input to
+/// the `dot` command.  You could put this into a file `graph.out` and run
+/// something like `dot -Tpng -o graph.png graph.out` to produce `graph.png`, a
+/// visual representation of the saga graph.
+pub struct DagDot<'a>(&'a Graph<Node, (), Directed, u32>);
+impl<'a> fmt::Display for DagDot<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let config = &[dot::Config::EdgeNoLabel];
+        let dot = dot::Dot::with_config(&self.0, config);
+        write!(f, "{:?}", dot)
     }
 }
 

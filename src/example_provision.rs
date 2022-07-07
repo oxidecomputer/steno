@@ -123,18 +123,20 @@ pub fn make_example_provision_dag(params: &ExampleParams) -> Arc<Dag> {
         "InstanceCreate",
         ActionName::new("instance_create"),
     ));
-    d.append(Node::new_child(
-        "instance_ip",
-        saga_instance_id,
-        "VpcAllocIp",
-        ActionName::new("vpc_alloc_ip"),
-    ));
-    d.append(Node::new_child(
-        "volume_id",
-        saga_instance_id,
-        "VolumeCreate",
-        ActionName::new("volume_create"),
-    ));
+    d.append_parallel(vec![
+        Node::new_child(
+            "instance_ip",
+            saga_instance_id,
+            "VpcAllocIp",
+            ActionName::new("vpc_alloc_ip"),
+        ),
+        Node::new_child(
+            "volume_id",
+            saga_instance_id,
+            "VolumeCreate",
+            ActionName::new("volume_create"),
+        ),
+    ]);
     Arc::new(d.build())
 }
 

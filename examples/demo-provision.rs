@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use steno::make_example_action_registry;
 use steno::make_example_provision_dag;
+use steno::Dag;
 use steno::ExampleContext;
 use steno::ExampleParams;
 use steno::SagaId;
@@ -100,9 +101,8 @@ fn read_saga_state<R: io::Read>(
 
 async fn cmd_dot() -> Result<(), anyhow::Error> {
     let params = ExampleParams { instance_name: "fake-o-instance".to_string() };
-    let saga_template = make_example_provision_dag(&params);
-    // TODO(AJS) -actually print the dots
-    // println!("{}", saga_template.metadata().dot());
+    let dag = make_example_provision_dag(&params);
+    println!("{}", dag.dot());
     Ok(())
 }
 
@@ -111,30 +111,25 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
  */
 
 async fn cmd_info() -> Result<(), anyhow::Error> {
-    /*    let log = make_log();
+    let log = make_log();
     let sec = make_sec(&log);
 
-    let saga_template = make_example_provision_saga();
-    println!("*** saga template definition ***");
-    println!("saga template graph: ");
-    println!("{}", saga_template.metadata().dot());
+    let registry = make_example_action_registry();
+    let params = ExampleParams { instance_name: "fake-o instance".to_string() };
+    let dag = make_example_provision_dag(&params);
+    println!("*** saga dag definition ***");
+    println!("saga graph: ");
+    println!("{}", dag.dot());
 
     println!("*** initial state ***");
     let saga_id = make_saga_id();
-    sec.saga_create(
-        saga_id,
-        Arc::new(ExampleContext::default()),
-        saga_template,
-        "demo-provision".to_string(),
-        ExampleParams { instance_name: "fake-o instance".to_string() },
-    )
-    .await
-    .unwrap();
+    let uctx = Arc::new(ExampleContext::default());
+    let future = sec.saga_create(saga_id, uctx, dag, registry).await?;
 
     let saga = sec.saga_get(saga_id).await.unwrap();
     let status = saga.state.status();
     println!("{}", status);
-    */
+
     Ok(())
 }
 
@@ -185,49 +180,50 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let sec = make_sec(&log);
     let registry = make_example_action_registry();
     let uctx = Arc::new(ExampleContext::default());
-    /*    let (saga_id, future) = if let Some(input_log_path) = &args.recover_from {
-        if !args.quiet {
-            println!("recovering from log: {}", input_log_path.display());
-        }
+    let (saga_id, future, dag) =
+        if let Some(input_log_path) = &args.recover_from {
+            if !args.quiet {
+                println!("recovering from log: {}", input_log_path.display());
+            }
 
-        let file = reader_for_log_input(input_log_path)?;
-        let saga_recovered = read_saga_state(file)?;
-        let saga_id = saga_recovered.saga_id;
-        let future = sec
-            .saga_resume(
-                saga_id,
-                uctx,
-                saga_template.clone() as Arc<dyn SagaTemplateGeneric<_>>,
-                template_name,
-                saga_recovered.params,
-                saga_recovered.events,
-            )
-            .await
-            .context("resuming saga")?;
-        let saga = sec
-            .saga_get(saga_id)
-            .await
-            .map_err(|_: ()| anyhow!("failed to fetch newly-created saga"))?;
-        if !args.quiet {
-            print!("recovered state\n");
-            println!("{}", saga.state.status());
-            println!("");
-        }
-        (saga_id, future)
-    } else {
-        */
-    let params = ExampleParams { instance_name: "fake-o instance".to_string() };
-    let dag = make_example_provision_dag(&params);
-    let saga_id = make_saga_id();
-    let future = sec.saga_create(saga_id, uctx, dag, registry).await?;
-    //        (saga_id, future)
-    //    };
+            let file = reader_for_log_input(input_log_path)?;
+            let saga_recovered = read_saga_state(file)?;
+            let saga_id = saga_recovered.saga_id;
+            let future = sec
+                .saga_resume(
+                    saga_id,
+                    uctx,
+                    saga_recovered.dag.clone(),
+                    registry,
+                    saga_recovered.events,
+                )
+                .await
+                .context("resuming saga")?;
+            let saga = sec.saga_get(saga_id).await.map_err(|_: ()| {
+                anyhow!("failed to fetch newly-created saga")
+            })?;
+            if !args.quiet {
+                print!("recovered state\n");
+                println!("{}", saga.state.status());
+                println!("");
+            }
+            let dag: Arc<Dag> =
+                Arc::new(serde_json::from_value(saga_recovered.dag)?);
+            (saga_id, future, dag)
+        } else {
+            let params =
+                ExampleParams { instance_name: "fake-o instance".to_string() };
+            let dag = make_example_provision_dag(&params);
+            let saga_id = make_saga_id();
+            let future =
+                sec.saga_create(saga_id, uctx, dag.clone(), registry).await?;
+            (saga_id, future, dag)
+        };
 
-    /*    for node_name in &args.inject_error {
-        let node_id =
-            saga_template.metadata().node_for_name(&node_name).with_context(
-                || format!("bad argument for --inject-error: {:?}", node_name),
-            )?;
+    for node_name in &args.inject_error {
+        let node_id = dag.get_index(node_name).with_context(|| {
+            format!("bad argument for --inject-error: {:?}", node_name)
+        })?;
         sec.saga_inject_error(saga_id, node_id)
             .await
             .context("injecting error")?;
@@ -235,7 +231,6 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             println!("will inject error at node \"{}\"", node_name);
         }
     }
-    */
 
     if !args.quiet {
         println!("*** running saga ***");
