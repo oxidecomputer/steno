@@ -4,8 +4,15 @@ recovered state
 +-- stage  1: done: InstanceCreateStart (produces "instance_create_params")
 +-- stage  2: done: InstanceCreate (produces "instance_id")
 +-- stage  3: + (actions in parallel)
-              +-- queued-todo: VpcAllocIp (produces "instance_ip")
-              +-- queued-todo: VolumeCreate (produces "volume_id")
+              +-- done: VpcAllocIp (produces "instance_ip")
+              +-- done: VolumeCreate (produces "volume_id")
++-- stage  4: done: ReturnServerAllocParams (produces "server_alloc_params")
++-- stage  5: done: ServerPick (produces "server_id")
++-- stage  6: done: ServerReserve (produces "server_reserve")
++-- stage  7: done: InstanceConfigure (produces "instance_configure")
++-- stage  8: done: VolumeAttach (produces "volume_attach")
++-- stage  9: queued-todo: InstanceBoot (produces "instance_boot")
++-- stage 10: blocked: Print (produces "print")
 
 
 *** running saga ***
@@ -18,4 +25,11 @@ recovered state
 +-- stage  3: + (actions in parallel)
               +-- done: VpcAllocIp (produces "instance_ip")
               +-- done: VolumeCreate (produces "volume_id")
++-- stage  4: done: ReturnServerAllocParams (produces "server_alloc_params")
++-- stage  5: done: ServerPick (produces "server_id")
++-- stage  6: done: ServerReserve (produces "server_reserve")
++-- stage  7: done: InstanceConfigure (produces "instance_configure")
++-- stage  8: done: VolumeAttach (produces "volume_attach")
++-- stage  9: done: InstanceBoot (produces "instance_boot")
++-- stage 10: done: Print (produces "print")
 

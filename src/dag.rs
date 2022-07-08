@@ -196,7 +196,7 @@ pub enum NodeConcurrency<'a> {
 ///
 /// An example implementation is shown below:
 ///
-/// ```
+/// ```ignore
 /// fn create_disk_subsaga<'a>() -> SubsagaSpec<'a> {
 ///     SubSagaSpec(
 ///         // The root node is always the first one. It contains the saga

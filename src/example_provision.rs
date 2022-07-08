@@ -55,6 +55,7 @@ impl SagaType for ExampleSagaType {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ExampleParams {
     pub instance_name: String,
+    pub number_of_instances: u16,
 }
 
 #[derive(Debug, Default)]
@@ -69,6 +70,22 @@ enum ExampleError {
 }
 
 type ExFuncResult<T> = ActionFuncResult<T, ActionError>;
+
+#[derive(Debug)]
+struct ExampleSubsagaType {}
+impl SagaType for ExampleSubsagaType {
+    type ExecContextType = ExampleContext;
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ExampleSubsagaParams {
+    number_of_things: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ServerAllocResult {
+    server_id: u64,
+}
 
 /* TODO-cleanup can we implement this generically? */
 impl From<ExampleError> for ActionError {
@@ -135,6 +152,29 @@ pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
     Arc::new(registry)
 }
 
+// Create a subsaga for server allocation
+pub fn server_alloc_subsaga<'a>() -> SubsagaSpec<'a> {
+    SubsagaSpec(
+        NodeSpec {
+            name: "server_alloc_params",
+            label: "ReturnServerAllocParams",
+            action: "server_alloc_params",
+        },
+        vec![NodeConcurrency::Linear(vec![
+            NodeSpec {
+                name: "server_id",
+                label: "ServerPick",
+                action: "server_pick",
+            },
+            NodeSpec {
+                name: "server_reserve",
+                label: "ServerReserve",
+                action: "server_reserve",
+            },
+        ])],
+    )
+}
+
 /// Create a dag that describes a "VM Provision" Saga
 ///
 /// The actions in this saga do essentially nothing. They print out what
@@ -142,11 +182,11 @@ pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
 /// from previous nodes. The intent is just to exercise the API. You can
 /// interact with this  using the `demo-provision` example.
 pub fn make_example_provision_dag(params: &ExampleParams) -> Arc<Dag> {
-    // The saga instance Id (not related to VM instance)
-    // TODO(AJS): Name this something else?
     let name = SagaName::new("DemoVmProvision");
     let mut d = DagBuilder::new(name);
 
+    // The saga instance Id (not related to VM instance)
+    // TODO(AJS): Name this something else?
     let saga_instance_id = 0;
     d.append(Node::new_root(
         "instance_create_params",
@@ -266,44 +306,6 @@ async fn demo_prov_vpc_alloc_ip(
     Ok(ip)
 }
 
-#[derive(Debug)]
-struct ExampleSubsagaType {}
-impl SagaType for ExampleSubsagaType {
-    type ExecContextType = ExampleContext;
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ExampleSubsagaParams {
-    number_of_things: usize,
-}
-
-pub fn server_alloc_subsaga<'a>() -> SubsagaSpec<'a> {
-    SubsagaSpec(
-        NodeSpec {
-            name: "server_alloc_params",
-            label: "ReturnServerAllocParams",
-            action: "server_alloc_params",
-        },
-        vec![NodeConcurrency::Linear(vec![
-            NodeSpec {
-                name: "server_id",
-                label: "ServerPick",
-                action: "server_pick",
-            },
-            NodeSpec {
-                name: "server_reserve",
-                label: "ServerReserve",
-                action: "server_reserve",
-            },
-        ])],
-    )
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ServerAllocResult {
-    server_id: u64,
-}
-
 // The root subsaga action. It takes the parameters from the Dag node and
 // outputs them.
 async fn demo_prov_server_alloc_params(
@@ -321,10 +323,8 @@ async fn demo_prov_server_pick(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
-    let params = sgctx.lookup::<ExampleSubsagaParams>(
-        "instance_create_params",
-        instance_id,
-    )?;
+    let params = sgctx
+        .lookup::<ExampleSubsagaParams>("server_alloc_params", instance_id)?;
     /* exercise subsaga parameters */
     assert_eq!(params.number_of_things, 1);
     /* make up ("allocate") a new server id */
@@ -338,10 +338,8 @@ async fn demo_prov_server_reserve(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<ServerAllocResult> {
     eprintln!("running action: {}", sgctx.node_label());
-    let params = sgctx.lookup::<ExampleSubsagaParams>(
-        "instance_create_params",
-        instance_id,
-    )?;
+    let params = sgctx
+        .lookup::<ExampleSubsagaParams>("server_alloc_params", instance_id)?;
 
     /* exercise subsaga parameters */
     assert_eq!(params.number_of_things, 1);
@@ -371,7 +369,16 @@ async fn demo_prov_instance_configure(
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id", instance_id)?, 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id", instance_id)?, 1212);
+
+    let params =
+        sgctx.lookup::<ExampleParams>("instance_create_params", instance_id)?;
+    assert_eq!(params.number_of_instances, 1);
+    // Allocated by the subsaga. We know there is only one instance by looking
+    // at the params. In cases with more subsagas we could loop over them. For
+    // this example we decided to start the counting at 1 just to differentiate
+    // the instance ids of the parent and child sagas.
+    assert_eq!(sgctx.lookup::<u64>("server_id", 1)?, 1212);
+
     assert_eq!(sgctx.lookup::<u64>("volume_id", instance_id)?, 1213);
     Ok(())
 }
@@ -382,8 +389,10 @@ async fn demo_prov_volume_attach(
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id", instance_id)?, 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id", instance_id)?, 1212);
     assert_eq!(sgctx.lookup::<u64>("volume_id", instance_id)?, 1213);
+
+    // We know there is only one instance of the subsaga that created a server id
+    assert_eq!(sgctx.lookup::<u64>("server_id", 1)?, 1212);
     Ok(())
 }
 async fn demo_prov_instance_boot(
@@ -393,8 +402,10 @@ async fn demo_prov_instance_boot(
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id", instance_id)?, 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id", instance_id)?, 1212);
     assert_eq!(sgctx.lookup::<u64>("volume_id", instance_id)?, 1213);
+
+    // We know there is only one instance of the subsaga that created a server id
+    assert_eq!(sgctx.lookup::<u64>("server_id", 1)?, 1212);
     Ok(())
 }
 
@@ -410,7 +421,7 @@ async fn demo_prov_print(
     eprintln!("  IP address: {}", ip);
     let volume_id = sgctx.lookup::<u64>("volume_id", instance_id)?;
     eprintln!("  volume id: {}", volume_id);
-    let server_id = sgctx.lookup::<u64>("server_id", instance_id)?;
+    let server_id = sgctx.lookup::<u64>("server_id", 1)?;
     eprintln!("  server id: {}", server_id);
     Ok(())
 }

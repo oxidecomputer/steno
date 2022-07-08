@@ -100,7 +100,10 @@ fn read_saga_state<R: io::Read>(
  */
 
 async fn cmd_dot() -> Result<(), anyhow::Error> {
-    let params = ExampleParams { instance_name: "fake-o-instance".to_string() };
+    let params = ExampleParams {
+        instance_name: "fake-o-instance".to_string(),
+        number_of_instances: 1,
+    };
     let dag = make_example_provision_dag(&params);
     println!("{}", dag.dot());
     Ok(())
@@ -115,7 +118,10 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     let sec = make_sec(&log);
 
     let registry = make_example_action_registry();
-    let params = ExampleParams { instance_name: "fake-o instance".to_string() };
+    let params = ExampleParams {
+        instance_name: "fake-o instance".to_string(),
+        number_of_instances: 1,
+    };
     let dag = make_example_provision_dag(&params);
     println!("*** saga dag definition ***");
     println!("saga graph: ");
@@ -211,8 +217,10 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
                 Arc::new(serde_json::from_value(saga_recovered.dag)?);
             (saga_id, future, dag)
         } else {
-            let params =
-                ExampleParams { instance_name: "fake-o instance".to_string() };
+            let params = ExampleParams {
+                instance_name: "fake-o instance".to_string(),
+                number_of_instances: 1,
+            };
             let dag = make_example_provision_dag(&params);
             let saga_id = make_saga_id();
             let future =

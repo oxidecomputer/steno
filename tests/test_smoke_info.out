@@ -2,17 +2,31 @@
 saga graph: 
 digraph {
     0 [ label = "Node { name: \"__StartNode__\", instance_id: 0, label: \"StartNode\", action: ActionName(\"__steno_action_start_node__\"), create_params: None }" ]
-    1 [ label = "Node { name: \"instance_create_params\", instance_id: 0, label: \"InstanceCreateStart\", action: ActionName(\"instance_create_params\"), create_params: Some(Object({\"instance_name\": String(\"fake-o instance\")})) }" ]
+    1 [ label = "Node { name: \"instance_create_params\", instance_id: 0, label: \"InstanceCreateStart\", action: ActionName(\"instance_create_params\"), create_params: Some(Object({\"instance_name\": String(\"fake-o instance\"), \"number_of_instances\": Number(1)})) }" ]
     2 [ label = "Node { name: \"instance_id\", instance_id: 0, label: \"InstanceCreate\", action: ActionName(\"instance_create\"), create_params: None }" ]
     3 [ label = "Node { name: \"instance_ip\", instance_id: 0, label: \"VpcAllocIp\", action: ActionName(\"vpc_alloc_ip\"), create_params: None }" ]
     4 [ label = "Node { name: \"volume_id\", instance_id: 0, label: \"VolumeCreate\", action: ActionName(\"volume_create\"), create_params: None }" ]
-    5 [ label = "Node { name: \"__EndNode__\", instance_id: 0, label: \"EndNode\", action: ActionName(\"__steno_action_end_node__\"), create_params: None }" ]
+    5 [ label = "Node { name: \"server_alloc_params\", instance_id: 1, label: \"ReturnServerAllocParams\", action: ActionName(\"server_alloc_params\"), create_params: Some(Object({\"number_of_things\": Number(1)})) }" ]
+    6 [ label = "Node { name: \"server_id\", instance_id: 1, label: \"ServerPick\", action: ActionName(\"server_pick\"), create_params: None }" ]
+    7 [ label = "Node { name: \"server_reserve\", instance_id: 1, label: \"ServerReserve\", action: ActionName(\"server_reserve\"), create_params: None }" ]
+    8 [ label = "Node { name: \"instance_configure\", instance_id: 0, label: \"InstanceConfigure\", action: ActionName(\"instance_configure\"), create_params: None }" ]
+    9 [ label = "Node { name: \"volume_attach\", instance_id: 0, label: \"VolumeAttach\", action: ActionName(\"volume_attach\"), create_params: None }" ]
+    10 [ label = "Node { name: \"instance_boot\", instance_id: 0, label: \"InstanceBoot\", action: ActionName(\"instance_boot\"), create_params: None }" ]
+    11 [ label = "Node { name: \"print\", instance_id: 0, label: \"Print\", action: ActionName(\"print\"), create_params: None }" ]
+    12 [ label = "Node { name: \"__EndNode__\", instance_id: 0, label: \"EndNode\", action: ActionName(\"__steno_action_end_node__\"), create_params: None }" ]
     0 -> 1 [ ]
     1 -> 2 [ ]
     2 -> 3 [ ]
     2 -> 4 [ ]
     3 -> 5 [ ]
     4 -> 5 [ ]
+    5 -> 6 [ ]
+    6 -> 7 [ ]
+    7 -> 8 [ ]
+    8 -> 9 [ ]
+    9 -> 10 [ ]
+    10 -> 11 [ ]
+    11 -> 12 [ ]
 }
 
 *** initial state ***
@@ -22,4 +36,11 @@ digraph {
 +-- stage  3: + (actions in parallel)
               +-- blocked: VpcAllocIp (produces "instance_ip")
               +-- blocked: VolumeCreate (produces "volume_id")
++-- stage  4: blocked: ReturnServerAllocParams (produces "server_alloc_params")
++-- stage  5: blocked: ServerPick (produces "server_id")
++-- stage  6: blocked: ServerReserve (produces "server_reserve")
++-- stage  7: blocked: InstanceConfigure (produces "instance_configure")
++-- stage  8: blocked: VolumeAttach (produces "volume_attach")
++-- stage  9: blocked: InstanceBoot (produces "instance_boot")
++-- stage 10: blocked: Print (produces "print")
 
