@@ -47,20 +47,20 @@ pub trait ActionFn<'c, S: SagaType>: Send + Sync + 'static {
     /** Type of the future returned when the function is called. */
     type Future: Future<Output = Self::Output> + Send + 'c;
     /** Call the function. */
-    fn act(&'c self, instance_id: u16, ctx: ActionContext<S>) -> Self::Future;
+    fn act(&'c self, ctx: ActionContext<S>) -> Self::Future;
 }
 
 /* Blanket impl for Fn types returning futures */
 impl<'c, F, S, FF> ActionFn<'c, S> for F
 where
     S: SagaType,
-    F: Fn(u16, ActionContext<S>) -> FF + Send + Sync + 'static,
+    F: Fn(ActionContext<S>) -> FF + Send + Sync + 'static,
     FF: std::future::Future + Send + 'c,
 {
     type Future = FF;
     type Output = FF::Output;
-    fn act(&'c self, instance_id: u16, ctx: ActionContext<S>) -> Self::Future {
-        self(instance_id, ctx)
+    fn act(&'c self, ctx: ActionContext<S>) -> Self::Future {
+        self(ctx)
     }
 }
 
@@ -122,7 +122,7 @@ where
     ActionFuncOutput: ActionData,
 {
     // TODO-log
-    ActionFunc::new_action(f, |_, _| async { Ok(()) })
+    ActionFunc::new_action(f, |_| async { Ok(()) })
 }
 
 impl<UserType, ActionFuncType, ActionFuncOutput, UndoFuncType> Action<UserType>
@@ -139,11 +139,10 @@ where
 {
     fn do_it(
         &self,
-        instance_id: u16,
         sgctx: ActionContext<UserType>,
     ) -> BoxFuture<'_, ActionResult> {
         Box::pin(async move {
-            let fut = self.action_func.act(instance_id, sgctx);
+            let fut = self.action_func.act(sgctx);
             /*
              * Execute the caller's function and translate its type into the
              * generic JsonValue that the framework uses to store action
@@ -160,10 +159,9 @@ where
 
     fn undo_it(
         &self,
-        instance_id: u16,
         sgctx: ActionContext<UserType>,
     ) -> BoxFuture<'_, UndoResult> {
-        Box::pin(self.undo_func.act(instance_id, sgctx))
+        Box::pin(self.undo_func.act(sgctx))
     }
 }
 

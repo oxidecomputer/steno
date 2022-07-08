@@ -938,18 +938,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             }
         }
 
-        let dag_node = task_params.dag.get(node_id).unwrap();
-        let instance_id = dag_node.instance_id;
-
-        let exec_future = task_params.action.do_it(
-            instance_id,
-            ActionContext {
-                ancestor_tree: Arc::clone(&task_params.ancestor_tree),
-                node_id,
-                dag: Arc::clone(&task_params.dag),
-                user_context: Arc::clone(&task_params.user_context),
-            },
-        );
+        let exec_future = task_params.action.do_it(ActionContext {
+            ancestor_tree: Arc::clone(&task_params.ancestor_tree),
+            node_id,
+            dag: Arc::clone(&task_params.dag),
+            user_context: Arc::clone(&task_params.user_context),
+        });
         let result = exec_future.await;
         let node: Box<dyn SagaNodeRest<UserType>> = match result {
             Ok(output) => {
@@ -997,18 +991,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             }
         }
 
-        let dag_node = task_params.dag.get(node_id).unwrap();
-        let instance_id = dag_node.instance_id;
-
-        let exec_future = task_params.action.undo_it(
-            instance_id,
-            ActionContext {
-                ancestor_tree: Arc::clone(&task_params.ancestor_tree),
-                node_id,
-                dag: Arc::clone(&task_params.dag),
-                user_context: Arc::clone(&task_params.user_context),
-            },
-        );
+        let exec_future = task_params.action.undo_it(ActionContext {
+            ancestor_tree: Arc::clone(&task_params.ancestor_tree),
+            node_id,
+            dag: Arc::clone(&task_params.dag),
+            user_context: Arc::clone(&task_params.user_context),
+        });
         /*
          * TODO-robustness We have to figure out what it means to fail here and
          * what we want to do about it.
@@ -1714,6 +1702,14 @@ impl<UserType: SagaType> ActionContext<UserType> {
      */
     pub fn user_data(&self) -> &UserType::ExecContextType {
         &self.user_context
+    }
+
+    /**
+     * Return the instance_id of the current node
+     *
+     */
+    pub fn instance_id(&self) -> u16 {
+        self.dag.get(self.node_id).unwrap().instance_id
     }
 }
 

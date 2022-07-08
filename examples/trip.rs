@@ -262,7 +262,6 @@ struct PaymentConfirmation(String);
 // Saga action implementations
 
 async fn saga_trip_params(
-    _: u16,
     action_context: ActionContext<TripSaga>,
 ) -> Result<TripParams, ActionError> {
     let params = action_context.create_params::<TripParams>()?;
@@ -270,19 +269,17 @@ async fn saga_trip_params(
 }
 
 async fn saga_charge_card(
-    instance_id: u16,
     action_context: ActionContext<TripSaga>,
 ) -> Result<PaymentConfirmation, ActionError> {
     let trip_context = action_context.user_data();
-    let params =
-        action_context.lookup::<TripParams>("trip_params", instance_id)?;
+    let params = action_context
+        .lookup::<TripParams>("trip_params", action_context.instance_id())?;
     let charge_details = &params.charge_details;
     // ... (make request to another service)
     Ok(PaymentConfirmation(String::from("123")))
 }
 
 async fn saga_refund_card(
-    instance_id: u16,
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
     // Fetch the payment confirmation.  The undo function is only ever invoked
@@ -290,82 +287,76 @@ async fn saga_refund_card(
     // so we fetch our own action's output by looking up the data for "payment".
     let trip_context = action_context.user_data();
     let p: PaymentConfirmation =
-        action_context.lookup("payment", instance_id)?;
+        action_context.lookup("payment", action_context.instance_id())?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
 
 async fn saga_book_hotel(
-    instance_id: u16,
     action_context: ActionContext<TripSaga>,
 ) -> Result<HotelReservation, ActionError> {
     /* ... */
     let trip_context = action_context.user_data();
-    let params =
-        action_context.lookup::<TripParams>("trip_params", instance_id)?;
+    let params = action_context
+        .lookup::<TripParams>("trip_params", action_context.instance_id())?;
     let hotel_name = &params.hotel_name;
     // ... (make request to another service)
     Ok(HotelReservation(String::from("123")))
 }
 
 async fn saga_cancel_hotel(
-    instance_id: u16,
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
     /* ... */
     let trip_context = action_context.user_data();
     let confirmation: HotelReservation =
-        action_context.lookup("hotel", instance_id)?;
+        action_context.lookup("hotel", action_context.instance_id())?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
 
 async fn saga_book_flight(
-    instance_id: u16,
     action_context: ActionContext<TripSaga>,
 ) -> Result<FlightReservation, ActionError> {
     /* ... */
     let trip_context = action_context.user_data();
-    let params =
-        action_context.lookup::<TripParams>("trip_params", instance_id)?;
+    let params = action_context
+        .lookup::<TripParams>("trip_params", action_context.instance_id())?;
     let flight_info = &params.flight_info;
     // ... (make request to another service)
     Ok(FlightReservation(String::from("123")))
 }
 
 async fn saga_cancel_flight(
-    instance_id: u16,
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
     /* ... */
     let trip_context = action_context.user_data();
     let confirmation: FlightReservation =
-        action_context.lookup("flight", instance_id)?;
+        action_context.lookup("flight", action_context.instance_id())?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
 
 async fn saga_book_car(
-    instance_id: u16,
     action_context: ActionContext<TripSaga>,
 ) -> Result<CarReservation, ActionError> {
     /* ... */
     let trip_context = action_context.user_data();
-    let params =
-        action_context.lookup::<TripParams>("trip_params", instance_id)?;
+    let params = action_context
+        .lookup::<TripParams>("trip_params", action_context.instance_id())?;
     let car_info = &params.car_info;
     // ... (make request to another service)
     Ok(CarReservation(String::from("123")))
 }
 
 async fn saga_cancel_car(
-    instance_id: u16,
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
     /* ... */
     let trip_context = action_context.user_data();
     let confirmation: CarReservation =
-        action_context.lookup("car", instance_id)?;
+        action_context.lookup("car", action_context.instance_id())?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }

@@ -1517,14 +1517,12 @@ mod test {
 
     fn make_test_one_node_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<Dag>) {
         async fn do_n1(
-            _instance_id: u16,
             ctx: ActionContext<TestSaga>,
         ) -> Result<i32, ActionError> {
             ctx.user_data().call("do_n1");
             Ok(1)
         }
         async fn undo_n1(
-            _instance_id: u16,
             ctx: ActionContext<TestSaga>,
         ) -> Result<(), anyhow::Error> {
             ctx.user_data().call("undo_n1");

@@ -262,7 +262,6 @@ pub fn make_example_provision_dag(params: &ExampleParams) -> Arc<Dag> {
 // This action takes the parameters from the node and outputs them so they
 // can be looked up by subsequent nodes.
 async fn demo_prov_instance_create_params(
-    _instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<ExampleParams> {
     let params = sgctx.create_params::<ExampleParams>()?;
@@ -277,11 +276,12 @@ async fn demo_prov_instance_create_params(
 }
 
 async fn demo_prov_instance_create(
-    instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<u64> {
-    let params =
-        sgctx.lookup::<ExampleParams>("instance_create_params", instance_id)?;
+    let params = sgctx.lookup::<ExampleParams>(
+        "instance_create_params",
+        sgctx.instance_id(),
+    )?;
     eprintln!(
         "running action: {} (instance name: {})",
         sgctx.node_label(),
@@ -294,12 +294,12 @@ async fn demo_prov_instance_create(
 }
 
 async fn demo_prov_vpc_alloc_ip(
-    instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<String> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using some data from a previous node */
-    let instance_id = sgctx.lookup::<u64>("instance_id", instance_id)?;
+    let instance_id =
+        sgctx.lookup::<u64>("instance_id", sgctx.instance_id())?;
     assert_eq!(instance_id, 1211);
     /* make up an IP (simulate allocation) */
     let ip = String::from("10.120.121.122");
@@ -309,7 +309,6 @@ async fn demo_prov_vpc_alloc_ip(
 // The root subsaga action. It takes the parameters from the Dag node and
 // outputs them.
 async fn demo_prov_server_alloc_params(
-    _instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<ExampleSubsagaParams> {
     eprintln!("running action: {}", sgctx.node_label());
@@ -318,13 +317,12 @@ async fn demo_prov_server_alloc_params(
 }
 
 // Another subsaga action
-async fn demo_prov_server_pick(
-    instance_id: u16,
-    sgctx: SagaExampleContext,
-) -> ExFuncResult<u64> {
+async fn demo_prov_server_pick(sgctx: SagaExampleContext) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
-    let params = sgctx
-        .lookup::<ExampleSubsagaParams>("server_alloc_params", instance_id)?;
+    let params = sgctx.lookup::<ExampleSubsagaParams>(
+        "server_alloc_params",
+        sgctx.instance_id(),
+    )?;
     /* exercise subsaga parameters */
     assert_eq!(params.number_of_things, 1);
     /* make up ("allocate") a new server id */
@@ -334,10 +332,10 @@ async fn demo_prov_server_pick(
 
 // The last subsaga action
 async fn demo_prov_server_reserve(
-    instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<ServerAllocResult> {
     eprintln!("running action: {}", sgctx.node_label());
+    let instance_id = sgctx.instance_id();
     let params = sgctx
         .lookup::<ExampleSubsagaParams>("server_alloc_params", instance_id)?;
 
@@ -351,22 +349,21 @@ async fn demo_prov_server_reserve(
 }
 
 async fn demo_prov_volume_create(
-    instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
-    assert_eq!(sgctx.lookup::<u64>("instance_id", instance_id)?, 1211);
+    assert_eq!(sgctx.lookup::<u64>("instance_id", sgctx.instance_id())?, 1211);
     /* make up ("allocate") a volume id */
     let volume_id = 1213u64;
     Ok(volume_id)
 }
 
 async fn demo_prov_instance_configure(
-    instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
+    let instance_id = sgctx.instance_id();
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id", instance_id)?, 1211);
 
@@ -383,10 +380,10 @@ async fn demo_prov_instance_configure(
     Ok(())
 }
 async fn demo_prov_volume_attach(
-    instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
+    let instance_id = sgctx.instance_id();
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id", instance_id)?, 1211);
     assert_eq!(sgctx.lookup::<u64>("volume_id", instance_id)?, 1213);
@@ -396,10 +393,10 @@ async fn demo_prov_volume_attach(
     Ok(())
 }
 async fn demo_prov_instance_boot(
-    instance_id: u16,
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
+    let instance_id = sgctx.instance_id();
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id", instance_id)?, 1211);
     assert_eq!(sgctx.lookup::<u64>("volume_id", instance_id)?, 1213);
@@ -409,12 +406,10 @@ async fn demo_prov_instance_boot(
     Ok(())
 }
 
-async fn demo_prov_print(
-    instance_id: u16,
-    sgctx: SagaExampleContext,
-) -> ExFuncResult<()> {
+async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     eprintln!("printing final state:");
+    let instance_id = sgctx.instance_id();
     let vm_instance_id = sgctx.lookup::<u64>("instance_id", instance_id)?;
     eprintln!("  instance id: {}", vm_instance_id);
     let ip = sgctx.lookup::<String>("instance_ip", instance_id)?;
