@@ -91,8 +91,7 @@ pub enum ActionRegistryError {
     NotFound,
 }
 
-/// A macro that creates a registry of saga actions that can be used across
-/// multiple sagas.
+/// A registry of saga actions that can be used across multiple sagas.
 ///
 /// Actions can exist at multiple nodes in each saga DAG. Since saga
 /// construction is dynamic and based upon user input, we need to allow a way
@@ -102,8 +101,6 @@ pub enum ActionRegistryError {
 /// of the Action is erased and the only mechanism we have to recover it is an
 /// `ActionName`. We therefore have all users register their actions for use
 /// across sagas so we can dynamically construct and restore sagas.
-///
-/// TODO: How do we handle actions wtih different saga types?
 #[derive(Debug)]
 pub struct ActionRegistry<UserType: SagaType> {
     actions: BTreeMap<ActionName, Arc<dyn Action<UserType>>>,
@@ -173,6 +170,19 @@ pub struct Node {
     /// as input to the DAG, and so we store them here. We only store these
     /// parameters for the first node of a saga or child saga.
     pub create_params: Option<serde_json::Value>,
+    // TODO:
+    // What if we hang a set of KV pairs or other structured data off each node
+    // which instructs that action what lookup keys to use? This could
+    // be instead of `instance_id`. The benefits are more information
+    // could be dynamically added to nodes in the DagBuilder. In essence, each node
+    // could get its own set of "create parameters".
+    // The downside is more work for creators of dags and users of actions. This
+    // would also likely be more error prone in that now each user of a dag
+    // has to add the right data structure to each node which runs an action or
+    // the action won't do the right thing. So instead of depending just on the output
+    // of node actions, the actions also depend on input of their current node.
+    // If we did this, could we typecheck these inputs with the actions? Maybe via
+    // some macro that generates a checker function.
 }
 
 /// A specification for creating a node. This allows dynamic creation of nodes
