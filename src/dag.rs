@@ -375,7 +375,7 @@ impl DagBuilder {
     /// The new nodes will individually depend on completion of all actions that
     /// were added in the last call to `append` or `append_parallel`.  `actions`
     /// is a vector of `(name, action)` tuples analogous to the arguments to
-    /// [`SagaTemplateBuilder::append`].
+    /// [`DagBuilder::append`].
     pub fn append_parallel(&mut self, nodes: Vec<Node>) {
         let newnodes: Vec<NodeIndex> =
             nodes.into_iter().map(|node| self.graph.add_node(node)).collect();
