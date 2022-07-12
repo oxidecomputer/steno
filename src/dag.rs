@@ -402,7 +402,7 @@ impl DagBuilder {
         self.last_added = newnodes;
     }
 
-    /// Take a subsaga spec describing nodes, create the nodes,
+    /// Take a saga spec describing nodes, create the nodes,
     /// and append them to the existing Dag.
     ///
     /// TODO: We probably want an `append_parallel_subsaga` that allows us to link all subsagas
