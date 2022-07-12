@@ -14,8 +14,8 @@ use crate::Node;
 use crate::NodeConcurrency;
 use crate::NodeSpec;
 use crate::SagaName;
+use crate::SagaSpec;
 use crate::SagaType;
-use crate::SubsagaSpec;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -153,8 +153,8 @@ pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
 }
 
 // Create a subsaga for server allocation
-pub fn server_alloc_subsaga<'a>() -> SubsagaSpec<'a> {
-    SubsagaSpec(
+pub fn server_alloc_subsaga<'a>() -> SagaSpec<'a> {
+    SagaSpec(
         NodeSpec {
             name: "server_alloc_params",
             label: "ReturnServerAllocParams",

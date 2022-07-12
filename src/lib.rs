@@ -61,7 +61,7 @@ pub use dag::NodeConcurrency;
 pub use dag::NodeSpec;
 pub use dag::SagaId;
 pub use dag::SagaName;
-pub use dag::SubsagaSpec;
+pub use dag::SagaSpec;
 pub use saga_action_error::ActionError;
 pub use saga_action_func::new_action_noop_undo;
 pub use saga_action_func::ActionFunc;

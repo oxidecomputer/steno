@@ -207,8 +207,8 @@ pub enum NodeConcurrency<'a> {
 /// An example implementation is shown below:
 ///
 /// ```ignore
-/// fn create_disk_subsaga<'a>() -> SubsagaSpec<'a> {
-///     SubSagaSpec(
+/// fn create_disk_subsaga<'a>() -> SagaSpec<'a> {
+///     SagaSpec(
 ///         // The root node is always the first one. It contains the saga
 ///         // parameters.
 ///         NodeSpec {
@@ -230,7 +230,7 @@ pub enum NodeConcurrency<'a> {
 ///
 ///
 /// TODO: Semantic validation (actions exist in registry, etc...)
-pub struct SubsagaSpec<'a>(pub NodeSpec<'a>, pub Vec<NodeConcurrency<'a>>);
+pub struct SagaSpec<'a>(pub NodeSpec<'a>, pub Vec<NodeConcurrency<'a>>);
 
 impl Node {
     /// Create a new child node for a saga or subsaga
@@ -409,7 +409,7 @@ impl DagBuilder {
     /// to the `last_added` nodes in a parallel fashion.
     pub fn append_subsaga<'a, T>(
         &mut self,
-        spec: &SubsagaSpec<'a>,
+        spec: &SagaSpec<'a>,
         instance_id: u16,
         params: &T,
     ) where
