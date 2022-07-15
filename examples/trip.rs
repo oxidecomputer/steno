@@ -13,7 +13,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use slog::Drain;
 use std::sync::Arc;
-use steno::new_action_noop_undo;
 use steno::ActionContext;
 use steno::ActionError;
 use steno::ActionFunc;
@@ -67,7 +66,8 @@ async fn book_trip(
 
     // Build a saga DAG.  The DAG describes the actions that are part
     // of the saga (including the functions to be invoked to do each of the
-    // steps) and how they depend on each other.  This is dynamically created for each trip.
+    // steps) and how they depend on each other.  This is dynamically created
+    // for each trip.
     let dag = make_trip_saga(params);
 
     // Get ready to execute the saga.
@@ -124,13 +124,6 @@ async fn book_trip(
 fn make_trip_action_registry() -> Arc<ActionRegistry<TripSaga>> {
     let mut registry = ActionRegistry::new();
 
-    // Create a start action capable of returning saga parameters. Each saga or subsaga
-    // needs one of these.
-    registry.register(
-        ActionName::new("trip_params"),
-        new_action_noop_undo(saga_trip_params),
-    );
-
     registry.register(
         ActionName::new("payment"),
         ActionFunc::new_action(
@@ -164,22 +157,7 @@ fn make_trip_action_registry() -> Arc<ActionRegistry<TripSaga>> {
 /// of the steps) and how they depend on each other.
 fn make_trip_saga(params: TripParams) -> Arc<Dag> {
     let name = SagaName::new("book-trip");
-    let mut builder = DagBuilder::new(name);
-    let saga_instance_id = 0;
-
-    builder.append(Node::new_root(
-        // name of this action's output (can be used in subsequent actions)
-        "trip_params",
-        // The instance id of the saga. This is somewhat irrelevant for a saga
-        // with no subsagas.
-        saga_instance_id,
-        // human-readable label for the action
-        "ReturnTripParams",
-        // The name of the action to run. This is the lookup key in the ActionRegistry.
-        ActionName::new("trip_params"),
-        // The creation parameters of the saga. They are output by the "root" node.
-        &params,
-    ));
+    let mut builder = DagBuilder::new(name, params);
 
     // Somewhat arbitrarily, we're choosing to charge the credit card first,
     // then make all the bookings in parallel.  We could do these all in
@@ -187,31 +165,19 @@ fn make_trip_saga(params: TripParams) -> Arc<Dag> {
     // Steno guarantees that eventually either all actions will succeed or all
     // executed actions will be undone.
     builder.append(Node::new_child(
+        // name of this action's output (can be used in subsequent actions)
         "payment",
-        saga_instance_id,
+        // human-readable label for the action
         "ChargeCreditCard",
+        // The name of the action to run. This is the lookup key in the
+        // ActionRegistry.
         ActionName::new("payment"),
     ));
 
     builder.append_parallel(vec![
-        Node::new_child(
-            "hotel",
-            saga_instance_id,
-            "BookHotel",
-            ActionName::new("hotel"),
-        ),
-        Node::new_child(
-            "flight",
-            saga_instance_id,
-            "BookFlight",
-            ActionName::new("flight"),
-        ),
-        Node::new_child(
-            "car",
-            saga_instance_id,
-            "BookCar",
-            ActionName::new("car"),
-        ),
+        Node::new_child("hotel", "BookHotel", ActionName::new("hotel")),
+        Node::new_child("flight", "BookFlight", ActionName::new("flight")),
+        Node::new_child("car", "BookCar", ActionName::new("car")),
     ]);
 
     Arc::new(builder.build())
@@ -261,19 +227,11 @@ struct PaymentConfirmation(String);
 
 // Saga action implementations
 
-async fn saga_trip_params(
-    action_context: ActionContext<TripSaga>,
-) -> Result<TripParams, ActionError> {
-    let params = action_context.create_params::<TripParams>()?;
-    Ok(params)
-}
-
 async fn saga_charge_card(
     action_context: ActionContext<TripSaga>,
 ) -> Result<PaymentConfirmation, ActionError> {
     let trip_context = action_context.user_data();
-    let params = action_context
-        .lookup::<TripParams>("trip_params", action_context.instance_id())?;
+    let params = action_context.saga_params::<TripParams>()?;
     let charge_details = &params.charge_details;
     // ... (make request to another service)
     Ok(PaymentConfirmation(String::from("123")))
@@ -286,8 +244,7 @@ async fn saga_refund_card(
     // after the action function has succeeded.  This node is called "payment",
     // so we fetch our own action's output by looking up the data for "payment".
     let trip_context = action_context.user_data();
-    let p: PaymentConfirmation =
-        action_context.lookup("payment", action_context.instance_id())?;
+    let p: PaymentConfirmation = action_context.lookup("payment")?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
@@ -297,8 +254,7 @@ async fn saga_book_hotel(
 ) -> Result<HotelReservation, ActionError> {
     /* ... */
     let trip_context = action_context.user_data();
-    let params = action_context
-        .lookup::<TripParams>("trip_params", action_context.instance_id())?;
+    let params = action_context.saga_params::<TripParams>()?;
     let hotel_name = &params.hotel_name;
     // ... (make request to another service)
     Ok(HotelReservation(String::from("123")))
@@ -309,8 +265,7 @@ async fn saga_cancel_hotel(
 ) -> Result<(), anyhow::Error> {
     /* ... */
     let trip_context = action_context.user_data();
-    let confirmation: HotelReservation =
-        action_context.lookup("hotel", action_context.instance_id())?;
+    let confirmation: HotelReservation = action_context.lookup("hotel")?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
@@ -320,8 +275,7 @@ async fn saga_book_flight(
 ) -> Result<FlightReservation, ActionError> {
     /* ... */
     let trip_context = action_context.user_data();
-    let params = action_context
-        .lookup::<TripParams>("trip_params", action_context.instance_id())?;
+    let params = action_context.saga_params::<TripParams>()?;
     let flight_info = &params.flight_info;
     // ... (make request to another service)
     Ok(FlightReservation(String::from("123")))
@@ -332,8 +286,7 @@ async fn saga_cancel_flight(
 ) -> Result<(), anyhow::Error> {
     /* ... */
     let trip_context = action_context.user_data();
-    let confirmation: FlightReservation =
-        action_context.lookup("flight", action_context.instance_id())?;
+    let confirmation: FlightReservation = action_context.lookup("flight")?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
@@ -343,8 +296,7 @@ async fn saga_book_car(
 ) -> Result<CarReservation, ActionError> {
     /* ... */
     let trip_context = action_context.user_data();
-    let params = action_context
-        .lookup::<TripParams>("trip_params", action_context.instance_id())?;
+    let params = action_context.saga_params::<TripParams>()?;
     let car_info = &params.car_info;
     // ... (make request to another service)
     Ok(CarReservation(String::from("123")))
@@ -355,8 +307,7 @@ async fn saga_cancel_car(
 ) -> Result<(), anyhow::Error> {
     /* ... */
     let trip_context = action_context.user_data();
-    let confirmation: CarReservation =
-        action_context.lookup("car", action_context.instance_id())?;
+    let confirmation: CarReservation = action_context.lookup("car")?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
