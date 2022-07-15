@@ -104,7 +104,7 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
         instance_name: "fake-o-instance".to_string(),
         number_of_instances: 1,
     };
-    let dag = make_example_provision_dag(&params);
+    let dag = make_example_provision_dag(params);
     println!("{}", dag.dot());
     Ok(())
 }
@@ -122,7 +122,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
         instance_name: "fake-o instance".to_string(),
         number_of_instances: 1,
     };
-    let dag = make_example_provision_dag(&params);
+    let dag = make_example_provision_dag(params);
     println!("*** saga dag definition ***");
     println!("saga graph: ");
     println!("{}", dag.dot());
@@ -221,7 +221,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
                 instance_name: "fake-o instance".to_string(),
                 number_of_instances: 1,
             };
-            let dag = make_example_provision_dag(&params);
+            let dag = make_example_provision_dag(params);
             let saga_id = make_saga_id();
             let future =
                 sec.saga_create(saga_id, uctx, dag.clone(), registry).await?;
