@@ -4,6 +4,7 @@ use crate::dag::Node;
 use crate::rust_features::ExpectNone;
 use crate::saga_action_error::ActionError;
 use crate::saga_action_generic::Action;
+use crate::saga_action_generic::ActionConstant;
 use crate::saga_action_generic::ActionData;
 use crate::saga_action_generic::ActionInjectError;
 use crate::saga_log::SagaNodeEventType;
@@ -419,7 +420,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
          */
         let forward = !sglog.unwinding();
         let mut live_state = SagaExecLiveState {
-            dag: Arc::clone(&dag),
             action_registry: Arc::clone(&registry),
             exec_state: if forward {
                 SagaCachedState::Running
@@ -656,15 +656,21 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
         include_self: bool,
+        ignore_depth: usize,
     ) {
         if include_self {
-            self.make_ancestor_tree_node(tree, live_state, node);
+            self.make_ancestor_tree_node(tree, live_state, node, ignore_depth);
             return;
         }
 
         let ancestors = self.dag.graph.neighbors_directed(node, Incoming);
         for ancestor in ancestors {
-            self.make_ancestor_tree_node(tree, live_state, ancestor);
+            self.make_ancestor_tree_node(
+                tree,
+                live_state,
+                ancestor,
+                ignore_depth,
+            );
         }
     }
 
@@ -673,15 +679,17 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
+        mut ignore_depth: usize,
     ) {
         let dag_node = self.dag.get(node).unwrap();
-        let (name, output) = match dag_node {
-            Node::Start { .. }
-            | Node::End
-            | Node::SubsagaEnd
-            | Node::SubsagaStart { .. } => return,
+        let found_here = match dag_node {
+            Node::Start { .. } | Node::End => None,
             Node::Constant { name, value } => {
-                (name.to_string(), Arc::new(value.clone()))
+                if ignore_depth == 0 {
+                    Some((name.to_string(), Arc::new(value.clone())))
+                } else {
+                    None
+                }
             }
             Node::Action { name, .. } => {
                 /*
@@ -693,38 +701,83 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                  * states, then that implies we've already finished undoing
                  * descendants, which would include the current node.
                  */
-                (name.to_string(), live_state.node_output(node))
+                if ignore_depth == 0 {
+                    Some((name.to_string(), live_state.node_output(node)))
+                } else {
+                    None
+                }
+            }
+            Node::SubsagaEnd { name } => {
+                /*
+                 * If we find a subsaga end node, then we'll emit the output of
+                 * the saga.  Plus, every node we find until we get to the next
+                 * subsaga start node needs to be ignored.  (But we still
+                 * continue the traversal, since there might be nodes from
+                 * before the subsaga that we need to include.)
+                 */
+                ignore_depth = ignore_depth + 1;
+                Some((name.to_string(), live_state.node_output(node)))
+            }
+
+            Node::SubsagaStart { .. } => {
+                if ignore_depth == 0 {
+                    // We don't need to traverse any more.
+                    return;
+                }
+
+                ignore_depth = ignore_depth - 1;
+                None
             }
         };
 
-        tree.insert(name, output);
-        self.make_ancestor_tree(tree, live_state, node, false);
+        if let Some((name, output)) = found_here {
+            tree.insert(name, output);
+        }
+        self.make_ancestor_tree(tree, live_state, node, false, ignore_depth);
     }
 
     fn saga_params_for(
         &self,
         live_state: &SagaExecLiveState<UserType>,
         node_index: NodeIndex,
+        ignore_depth: usize,
     ) -> Arc<serde_json::Value> {
         let node = self.dag.get(node_index).unwrap();
         match node {
-            // XXX-dap don't clone
-            Node::Start { params } => Arc::new(params.clone()),
-            Node::SubsagaStart { params_node_name, .. } => {
+            Node::Start { params } => {
+                assert_eq!(ignore_depth, 0);
+                // XXX-dap don't clone
+                Arc::new(params.clone())
+            }
+
+            Node::SubsagaStart { params_node_name, .. }
+                if ignore_depth == 0 =>
+            {
                 // XXX-dap error conditions
                 // XXX-dap this is way more expensive than we need!  Exactly one
                 // of our ancestors will have the right node in its ancestor
                 // tree but we don't know which one.
                 let mut tree = BTreeMap::new();
                 self.make_ancestor_tree(
-                    &mut tree, live_state, node_index, false,
+                    &mut tree, live_state, node_index, false, 0,
                 );
                 Arc::clone(tree.get(params_node_name).unwrap())
             }
-            Node::End
-            | Node::Action { .. }
-            | Node::Constant { .. }
-            | Node::SubsagaEnd => {
+
+            Node::SubsagaStart { .. } => {
+                // XXX-dap error conditions
+                // It shouldn't matter which ancestor we pick.
+                assert!(ignore_depth > 0);
+                let ancestor = self
+                    .dag
+                    .graph
+                    .neighbors_directed(node_index, Incoming)
+                    .next()
+                    .unwrap();
+                self.saga_params_for(live_state, ancestor, ignore_depth - 1)
+            }
+
+            Node::End | Node::Action { .. } | Node::Constant { .. } => {
                 // XXX-dap error conditions
                 // It shouldn't matter which ancestor we pick.
                 let ancestor = self
@@ -733,7 +786,19 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     .neighbors_directed(node_index, Incoming)
                     .next()
                     .unwrap();
-                self.saga_params_for(live_state, ancestor)
+                self.saga_params_for(live_state, ancestor, ignore_depth)
+            }
+
+            Node::SubsagaEnd { .. } => {
+                // XXX-dap error conditions
+                // It shouldn't matter which ancestor we pick.
+                let ancestor = self
+                    .dag
+                    .graph
+                    .neighbors_directed(node_index, Incoming)
+                    .next()
+                    .unwrap();
+                self.saga_params_for(live_state, ancestor, ignore_depth + 1)
             }
         }
     }
@@ -877,22 +942,14 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 &live_state,
                 node_id,
                 false,
+                0,
             );
 
-            let saga_params = self.saga_params_for(&live_state, node_id);
-
+            let saga_params = self.saga_params_for(&live_state, node_id, 0);
             let sgaction = if live_state.injected_errors.contains(&node_id) {
                 Arc::new(ActionInjectError {}) as Arc<dyn Action<UserType>>
             } else {
-                // TODO(AJS) - don't unwrap
-                let action_name = match &live_state.dag.get(node_id).unwrap() {
-                    Node::Action { action, .. } => action,
-                    _ => continue, // XXX-dap is that right?
-                };
-                live_state
-                    .action_registry
-                    .get(action_name)
-                    .expect("missing action for node")
+                self.node_action(&live_state, node_id)
             };
 
             let task_params = TaskParams {
@@ -930,19 +987,11 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 &live_state,
                 node_id,
                 true,
+                0,
             );
-            let saga_params = self.saga_params_for(&live_state, node_id);
 
-            // TODO(AJS) - don't unwrap
-            let action_name = match &live_state.dag.get(node_id).unwrap() {
-                Node::Action { action, .. } => action,
-                _ => continue, // XXX-dap is that right?
-            };
-            let sgaction = live_state
-                .action_registry
-                .get(action_name)
-                .expect("missing action for node");
-
+            let saga_params = self.saga_params_for(&live_state, node_id, 0);
+            let sgaction = self.node_action(&live_state, node_id);
             let task_params = TaskParams {
                 dag: Arc::clone(&self.dag),
                 live_state: Arc::clone(&self.live_state),
@@ -956,6 +1005,48 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
             let task = tokio::spawn(SagaExecutor::undo_node(task_params));
             live_state.node_task(node_id, task);
+        }
+    }
+
+    // XXX-dap if the action registry were hanging off self instead of
+    // live_state, we could just accept "self" here.
+    // XXX-dap dag, action registry should not be in live_state
+    fn node_action(
+        &self,
+        live_state: &SagaExecLiveState<UserType>,
+        node_index: NodeIndex,
+    ) -> Arc<dyn Action<UserType>> {
+        // TODO(AJS) - don't unwrap
+        let registry = &live_state.action_registry;
+        let dag = &self.dag;
+        match dag.get(node_index).unwrap() {
+            Node::Action { action, .. } => {
+                registry.get(action).expect("missing action for node")
+            }
+
+            Node::Constant { value, .. } => {
+                Arc::new(ActionConstant::new(value.clone()))
+            }
+
+            Node::Start { .. } | Node::End | Node::SubsagaStart { .. } => {
+                Arc::new(ActionConstant::new(serde_json::Value::Null))
+            }
+
+            Node::SubsagaEnd { .. } => {
+                // XXX-dap take the first immediate ancestor's output.  This is
+                // a little janky.  We should probably not explode if there's
+                // more than one, and really we shouldn't allow you to create
+                // that graph?  But we can't be sure a previous version didn't
+                // do that (or the database state isn't corrupt)
+                let ancestors: Vec<_> = dag
+                    .graph
+                    .neighbors_directed(node_index, Incoming)
+                    .collect();
+                assert_eq!(ancestors.len(), 1);
+                Arc::new(ActionConstant::new(
+                    live_state.node_output(ancestors[0]),
+                ))
+            }
         }
     }
 
@@ -1291,7 +1382,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
  */
 #[derive(Debug)]
 struct SagaExecLiveState<UserType: SagaType> {
-    dag: Arc<Dag>,
     action_registry: Arc<ActionRegistry<UserType>>,
 
     /** Unique identifier for this saga (an execution of a saga template) */

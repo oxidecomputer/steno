@@ -146,8 +146,8 @@ pub enum Node {
     End,
     Action { name: String, label: String, action: ActionName },
     Constant { name: String, value: serde_json::Value },
-    SubsagaStart { name: String, saga_name: SagaName, params_node_name: String },
-    SubsagaEnd,
+    SubsagaStart { saga_name: SagaName, params_node_name: String },
+    SubsagaEnd { name: String },
 }
 
 impl Node {
@@ -175,10 +175,10 @@ impl Node {
 
     pub fn name(&self) -> Option<&str> {
         match self {
-            Node::Start { .. } | Node::End | Node::SubsagaEnd => None,
+            Node::Start { .. } | Node::End | Node::SubsagaStart { .. } => None,
             Node::Action { name, .. } => Some(name),
             Node::Constant { name, .. } => Some(name),
-            Node::SubsagaStart { name, .. } => Some(name),
+            Node::SubsagaEnd { name, .. } => Some(name),
         }
     }
 
@@ -192,7 +192,7 @@ impl Node {
             Node::SubsagaStart { saga_name, .. } => {
                 format!("(subsaga start: {:?})", saga_name)
             }
-            Node::SubsagaEnd => String::from("(subsaga end)"),
+            Node::SubsagaEnd { .. } => String::from("(subsaga end)"),
         }
     }
 }
@@ -339,7 +339,6 @@ impl DagBuilder {
         params_node_name: &str,
     ) {
         self.append(Node::SubsagaStart {
-            name: name.to_string(),
             saga_name: subsaga.name.clone(),
             params_node_name: params_node_name.to_string(),
         });
@@ -362,7 +361,7 @@ impl DagBuilder {
             // Other nodes are copied directly into the parent graph.
             // XXX-dap TODO-cleanup make this an exhaustive match
             let node = if let Node::End = node {
-                Node::SubsagaEnd
+                Node::SubsagaEnd { name: name.to_string() }
             } else {
                 node.clone()
             };

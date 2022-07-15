@@ -132,6 +132,33 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
  * Special action implementations
  */
 
+// XXX-dap TODO-doc
+#[derive(Debug)]
+pub struct ActionConstant {
+    value: serde_json::Value,
+}
+
+impl ActionConstant {
+    pub fn new<T: ActionData>(v: T) -> ActionConstant {
+        ActionConstant {
+            value: serde_json::to_value(v).unwrap(), // XXX-dap
+        }
+    }
+}
+
+impl<UserType> Action<UserType> for ActionConstant
+where
+    UserType: SagaType,
+{
+    fn do_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, ActionResult> {
+        Box::pin(futures::future::ok(Arc::new(self.value.clone())))
+    }
+
+    fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
+        Box::pin(futures::future::ok(()))
+    }
+}
+
 /** Simulates an error at a given spot in the saga graph */
 #[derive(Debug)]
 pub struct ActionInjectError {}

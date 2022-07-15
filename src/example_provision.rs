@@ -273,8 +273,7 @@ async fn demo_prov_server_reserve(
     /* exercise subsaga parameters */
     assert_eq!(params.number_of_things, 1);
     /* exercise using data from previous nodes */
-    let server_id =
-        sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id;
+    let server_id = sgctx.lookup::<u64>("server_id")?;
     assert_eq!(server_id, 1212);
     /* package this up for downstream consumers */
     Ok(ServerAllocResult { server_id })
@@ -304,7 +303,10 @@ async fn demo_prov_instance_configure(
     // at the params. In cases with more subsagas we could loop over them. For
     // this example we decided to start the counting at 1 just to differentiate
     // the instance ids of the parent and child sagas.
-    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+    assert_eq!(
+        sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id,
+        1212
+    );
 
     assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
     Ok(())
@@ -317,8 +319,10 @@ async fn demo_prov_volume_attach(
     assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
 
-    // We know there is only one instance of the subsaga that created a server id
-    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+    assert_eq!(
+        sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id,
+        1212
+    );
     Ok(())
 }
 async fn demo_prov_instance_boot(
@@ -330,7 +334,10 @@ async fn demo_prov_instance_boot(
     assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
 
     // We know there is only one instance of the subsaga that created a server id
-    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+    assert_eq!(
+        sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id,
+        1212
+    );
     Ok(())
 }
 
@@ -343,7 +350,8 @@ async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<()> {
     eprintln!("  IP address: {}", ip);
     let volume_id = sgctx.lookup::<u64>("volume_id")?;
     eprintln!("  volume id: {}", volume_id);
-    let server_id = sgctx.lookup::<u64>("server_id")?;
+    let server_id =
+        sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id;
     eprintln!("  server id: {}", server_id);
     Ok(())
 }
