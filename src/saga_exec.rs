@@ -681,6 +681,32 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         node: NodeIndex,
         mut ignore_depth: usize,
     ) {
+        /*
+         * XXX-dap implementation notes
+         *
+         * What's `ignore_depth`?  Recall that the ancestor tree is used to
+         * lookup outputs from previous nodes that are available to the current
+         * node.  We want the behavior to be that for a given node, you cannot
+         * see outputs from nodes in a subsaga on which you depended (because
+         * that would tightly couple all possible subsagas -- they'd live in a
+         * single namespace of node names).  But of course you _should_ be able
+         * to see outputs from actions that preceded a subsaga that preceded
+         * you.  To deal with this, we traverse the DAG backwards, and if we
+         * find a SubsagaEnd node, then we ignore everything until we get to its
+         * SubsagaStart.  To implement this, we have this `ignore_depth`: if
+         * it's non-zero, we ignore any outputs we see.  We increment it on the
+         * recursive call when we're in a `SubsagaEnd` node, and we decrement it
+         * on the recursive call when we reach a `SubsagaStart` node.
+         *
+         * What about the output of a subsaga itself?  When a user appends a
+         * subsaga to a Dag, they give it a "name" just like they would a node.
+         * When a downstream node looks up the output of that name, they get the
+         * output of that subsaga.  To implement this, we store the name in the
+         * `SubsagaEnd` node.  When we find it in this traversal, if
+         * ignore_depth == 0 (see above), then we add the "output of the saga".
+         * This has never really been defined before, so we're defining it for
+         * now to be the output of the sole ancestor of subsaga's end node.
+         */
         let dag_node = self.dag.get(node).unwrap();
         let found_here = match dag_node {
             Node::Start { .. } | Node::End => None,
@@ -736,6 +762,22 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         self.make_ancestor_tree(tree, live_state, node, false, ignore_depth);
     }
 
+    /// Returns the saga parameters for the current node
+    // If this node is not within a subsaga, then these will be the top-level
+    // saga parameters.  We find these by walking ancestor nodes until we find
+    // the Start node and we grab the parameters directly out of that node.
+    //
+    // If this node is contained within a subsaga, then these will be the
+    // parameters of the _subsaga_.  We find these by walking ancestor nodes
+    // until we find a SubsagaStart node, which will say what _other_ node's
+    // output represents our parameters.  Then we grab that node's output.
+    // However, if we encounter a SubsagaEnd node, then there's a nested
+    // subsaga -- we need to skip _past_ the corresponding SubsagaStart.  We use
+    // `ignore_depth` similar to the way `make_ancestor_tree()` does in order to
+    // skip entire subsagas.
+    //
+    // (Note that we don't know which case we're in until we find the
+    // terminating condition for one or the other.)
     fn saga_params_for(
         &self,
         live_state: &SagaExecLiveState<UserType>,
@@ -1029,15 +1071,27 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             }
 
             Node::Start { .. } | Node::End | Node::SubsagaStart { .. } => {
+                // These nodes are no-ops in terms of the action that happens at
+                // the node itself.
                 Arc::new(ActionConstant::new(serde_json::Value::Null))
             }
 
             Node::SubsagaEnd { .. } => {
-                // XXX-dap take the first immediate ancestor's output.  This is
-                // a little janky.  We should probably not explode if there's
-                // more than one, and really we shouldn't allow you to create
-                // that graph?  But we can't be sure a previous version didn't
-                // do that (or the database state isn't corrupt)
+                // We record the subsaga's output here, as the output of the
+                // `SubsagaEnd` node.  (We don't _have_ to do this -- we could
+                // instead change the logic that _finds_ the saga's output to
+                // look in the same place that we do here.  But this is a simple
+                // and clear way to do this.)
+                // XXX-dap What is the saga's output?  We have not previously
+                // defined that.  For now, we'll take the first immediate
+                // ancestor's output.  This is a little janky.  We should
+                // probably not explode if there's more than one, and really we
+                // shouldn't allow you to create that graph in the first place.
+                // DagBuilder::build() could return an error in this case.
+                // (There are other error cases it could check too, like adding
+                // a Subsaga whose params node does not precede it.) Still, we
+                // can't be sure a previous version didn't do that (or the
+                // database state isn't corrupt) so we shouldn't blow up.
                 let ancestors: Vec<_> = dag
                     .graph
                     .neighbors_directed(node_index, Incoming)
