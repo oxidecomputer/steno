@@ -1535,15 +1535,13 @@ mod test {
             ActionFunc::new_action(do_n1, undo_n1),
         );
 
-        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
-        builder.append(Node::new_root(
+        let mut builder =
+            DagBuilder::new(SagaName::new("test-saga"), TestParams {});
+        builder.append(Node::new_child(
             "n1_out",
-            0,
             "n1",
             ActionName::new("n1_out"),
-            &TestParams {},
         ));
-
         (Arc::new(registry), Arc::new(builder.build()))
     }
 

@@ -6,8 +6,6 @@
 
 use crate::saga_action_generic::Action;
 use crate::saga_action_generic::ActionData;
-use crate::saga_action_generic::ActionEndNode;
-use crate::saga_action_generic::ActionStartNode;
 use crate::SagaType;
 use anyhow::anyhow;
 use petgraph::dot;
@@ -108,23 +106,7 @@ pub struct ActionRegistry<UserType: SagaType> {
 
 impl<UserType: SagaType> ActionRegistry<UserType> {
     pub fn new() -> ActionRegistry<UserType> {
-        let mut actions = BTreeMap::new();
-
-        // Insert the default start action for a saga
-        let action: Arc<dyn Action<UserType> + 'static> =
-            Arc::new(ActionStartNode {});
-        let name = ActionName("__steno_action_start_node__".to_string());
-        let already_inserted = actions.insert(name, action);
-        assert!(already_inserted.is_none());
-
-        // Insert the default end action for a saga
-        let action: Arc<dyn Action<UserType> + 'static> =
-            Arc::new(ActionEndNode {});
-        let name = ActionName("__steno_action_end_node__".to_string());
-        let already_inserted = actions.insert(name, action);
-        assert!(already_inserted.is_none());
-
-        ActionRegistry { actions }
+        ActionRegistry { actions: BTreeMap::new() }
     }
 
     pub fn register(
@@ -156,117 +138,61 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
 ///
 /// There can be multiple subsagas with nodes that run the same actions. In order
 /// to distinguish the action outputs we tag each one with an `instance_id`.
+// XXX-dap TODO-doc
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Node {
-    pub name: String,
-    pub instance_id: u16,
-    pub label: String,
-    pub action: ActionName,
-
-    /// Each node may be the start of the outer saga, or a subsaga. We store
-    /// the creation parameters for the saga or subsaga as output of the first
-    /// node so that it can be retrieved by child nodes. In order to feed the
-    /// output of the node execution, the params themselves must be stored
-    /// as input to the DAG, and so we store them here. We only store these
-    /// parameters for the first node of a saga or child saga.
-    pub create_params: Option<serde_json::Value>,
-    // TODO:
-    // What if we hang a set of KV pairs or other structured data off each node
-    // which instructs that action what lookup keys to use? This could
-    // be instead of `instance_id`. The benefits are more information
-    // could be dynamically added to nodes in the DagBuilder. In essence, each node
-    // could get its own set of "create parameters".
-    // The downside is more work for creators of dags and users of actions. This
-    // would also likely be more error prone in that now each user of a dag
-    // has to add the right data structure to each node which runs an action or
-    // the action won't do the right thing. So instead of depending just on the output
-    // of node actions, the actions also depend on input of their current node.
-    // If we did this, could we typecheck these inputs with the actions? Maybe via
-    // some macro that generates a checker function.
+pub enum Node {
+    // XXX don't want the variants to be public
+    Start { params: serde_json::Value },
+    End,
+    Action { name: String, label: String, action: ActionName },
+    Constant { name: String, value: serde_json::Value },
+    SubsagaStart { saga_name: SagaName, params_node_name: String },
+    SubsagaEnd { name: String },
 }
-
-/// A specification for creating a node. This allows dynamic creation of nodes
-/// for subsagas with different instance_ids and creation parameters.
-pub struct NodeSpec<'a> {
-    pub name: &'a str,
-    pub label: &'a str,
-    pub action: &'a str,
-}
-
-/// An abstract description of the shape of node execution
-///
-/// TODO: Do we want to allow arbitrary recursion here?
-pub enum NodeConcurrency<'a> {
-    Linear(Vec<NodeSpec<'a>>),
-    Parallel(Vec<NodeSpec<'a>>),
-}
-
-/// An abstract specification for a subsaga that can be used by a Dag
-/// to generate and append saga nodes.
-///
-/// An example implementation is shown below:
-///
-/// ```ignore
-/// fn create_disk_subsaga<'a>() -> SagaSpec<'a> {
-///     SagaSpec(
-///         // The root node is always the first one. It contains the saga
-///         // parameters.
-///         NodeSpec {
-///             name: "disk_create_params",
-///             label: "ReturnDiskCreateParams",
-///             action: "disk_create_params",
-///         },
-///         vec![
-///             NodeConcurrency::Linear(vec![NodeSpec {
-///                 name: "disk_id",
-///                 label: "GenerateDiskId",
-///                 action: "saga_generate_uuid",
-///             }]),
-///             NodeConcurrency::Parallel(vec![NodeSpec {...}, NodeSpec {...}]),
-///         ],
-///     )
-/// }
-/// ```
-///
-///
-/// TODO: Semantic validation (actions exist in registry, etc...)
-pub struct SagaSpec<'a>(pub NodeSpec<'a>, pub Vec<NodeConcurrency<'a>>);
 
 impl Node {
     /// Create a new child node for a saga or subsaga
-    pub fn new_child(
-        name: &str,
-        instance_id: u16,
-        label: &str,
-        action: ActionName,
-    ) -> Node {
-        Node {
+    pub fn new_child(name: &str, label: &str, action: ActionName) -> Node {
+        Node::Action {
             name: name.to_string(),
-            instance_id,
             label: label.to_string(),
             action,
-            create_params: None,
         }
     }
 
-    /// Create a new root node for a saga or subsaga
-    ///
-    /// The first node in a subsaga is always a root node even though it is
-    /// technically a child node of the outer saga.
-    pub fn new_root<T: ActionData>(
-        name: &str,
-        instance_id: u16,
-        label: &str,
-        action: ActionName,
-        create_params: &T,
-    ) -> Node {
-        let create_params = serde_json::to_value(create_params).unwrap();
-        Node {
-            name: name.to_string(),
-            instance_id,
-            label: label.to_string(),
-            action,
-            create_params: Some(create_params),
+    /**
+     * Create a node that emits a constant value (known when the saga is created)
+     *
+     * Why would you want this?  Suppose you're working with some saga action
+     * that expects input to come from some previous saga node.  But in your
+     * case, you know the input up front.  You can use this to provide the value
+     * to the downstream action.
+     */
+    pub fn new_constant<T: ActionData>(name: &str, value: T) -> Node {
+        let value = serde_json::to_value(value).unwrap(); // XXX-dap
+        Node::Constant { name: name.to_string(), value }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Node::Start { .. } | Node::End | Node::SubsagaStart { .. } => None,
+            Node::Action { name, .. } => Some(name),
+            Node::Constant { name, .. } => Some(name),
+            Node::SubsagaEnd { name, .. } => Some(name),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Node::Start { .. } => String::from("(start node)"),
+            Node::End => String::from("(end node)"),
+            Node::Action { label, .. } => label.clone(),
+            // XXX-dap include the constant value
+            Node::Constant { .. } => String::from("(constant)"),
+            Node::SubsagaStart { saga_name, .. } => {
+                format!("(subsaga start: {:?})", saga_name)
+            }
+            Node::SubsagaEnd { .. } => String::from("(subsaga end)"),
         }
     }
 }
@@ -294,11 +220,11 @@ impl Dag {
     pub fn get_index(&self, name: &str) -> Result<NodeIndex, anyhow::Error> {
         self.graph
             .node_indices()
-            .find(|i| self.graph[*i].name == name)
+            .find(|i| self.graph[*i].name().map(|n| n == name).unwrap_or(false))
             .ok_or_else(|| anyhow!("saga has no node named \"{}\"", name))
     }
 
-    /// Returns an object that can be used to print a graphiz-format
+    /// Returns an object that can be used to print a graphviz-format
     /// representation of the underlying node graph.
     pub fn dot(&self) -> DagDot<'_> {
         DagDot(&self.graph)
@@ -330,17 +256,17 @@ pub struct DagBuilder {
 
 impl DagBuilder {
     /// Create a new DAG for a Saga
-    pub fn new(name: SagaName) -> DagBuilder {
+    pub fn new<T>(name: SagaName, params: T) -> DagBuilder
+    where
+        T: ActionData,
+    {
         let mut graph = Graph::new();
 
         // Append a default "start" node.
-        let root = graph.add_node(Node::new_child(
-            "__StartNode__",
-            0,
-            "StartNode",
-            ActionName::new("__steno_action_start_node__"),
-        ));
-
+        // XXX-dap unwrap
+        let params = serde_json::to_value(params)
+            .expect("failed to serialize saga parameters");
+        let root = graph.add_node(Node::Start { params });
         DagBuilder { name, graph, root, last_added: vec![root] }
     }
 
@@ -358,9 +284,10 @@ impl DagBuilder {
     ///
     /// The instance id is useful because there may be many subsagas of the same
     /// type that run as part of the main saga. Each one of nodes in each subsaga
-    /// will only want to access data from its own nodes, and a common name for those nodes
-    /// is not enough to distinguish them across sagas. Furthermore, instance ids allow
-    /// the parent saga to identify data generated from different subsagas.
+    /// will only want to access data from its own nodes, and a common name for
+    /// those nodes is not enough to distinguish them across sagas. Furthermore,
+    /// instance ids allow the parent saga to identify data generated from
+    /// different subsagas.
     pub fn append(&mut self, node: Node) {
         let newnode = self.graph.add_node(node);
         for node in &self.last_added {
@@ -402,58 +329,90 @@ impl DagBuilder {
         self.last_added = newnodes;
     }
 
-    /// Take a saga spec describing nodes, create the nodes,
-    /// and append them to the existing Dag.
-    ///
-    /// TODO: We probably want an `append_parallel_subsaga` that allows us to link all subsagas
-    /// to the `last_added` nodes in a parallel fashion.
-    pub fn append_subsaga<'a, T>(
+    /// Append another DAG to this one (insert a subsaga)
+    // TODO: We probably want an `append_parallel_subsaga` that allows us to
+    // link all subsagas to the `last_added` nodes in a parallel fashion.
+    pub fn append_subsaga(
         &mut self,
-        spec: &SagaSpec<'a>,
-        instance_id: u16,
-        params: &T,
-    ) where
-        T: ActionData,
-    {
-        // Append the root of the subsaga
-        let root = &spec.0;
-        self.append(Node::new_root(
-            root.name,
-            instance_id,
-            root.label,
-            ActionName::new(root.action),
-            params,
-        ));
+        name: &str,
+        subsaga: &Dag,
+        params_node_name: &str,
+    ) {
+        self.append(Node::SubsagaStart {
+            saga_name: subsaga.name.clone(),
+            params_node_name: params_node_name.to_string(),
+        });
 
-        // Walk the rest of the nodes and append them.
-        for concurrency in &spec.1 {
-            match concurrency {
-                NodeConcurrency::Linear(specs) => {
-                    for spec in specs {
-                        self.append(Node::new_child(
-                            spec.name,
-                            instance_id,
-                            spec.label,
-                            ActionName::new(spec.action),
-                        ));
-                    }
+        let subsaga_start = self.last_added.clone();
+
+        // Insert all the nodes of the subsaga into this saga.
+        let subgraph = &subsaga.graph;
+        let mut subsaga_idx_to_saga_idx = BTreeMap::new();
+        for child_node_index in 0..subgraph.node_count() {
+            let child_node_index = NodeIndex::from(child_node_index as u32);
+            let node = subgraph.node_weight(child_node_index).unwrap();
+
+            // Skip the start node -- we handled that cleanly above.
+            if let Node::Start { .. } = node {
+                continue;
+            }
+
+            // When we get to the end node, we'll add a SubsagaEnd instead.
+            // Other nodes are copied directly into the parent graph.
+            // XXX-dap TODO-cleanup make this an exhaustive match
+            let node = if let Node::End = node {
+                Node::SubsagaEnd { name: name.to_string() }
+            } else {
+                node.clone()
+            };
+
+            let parent_node_index = self.graph.add_node(node);
+            assert!(subsaga_idx_to_saga_idx
+                .insert(child_node_index, parent_node_index)
+                .is_none());
+
+            // For any incoming edges for this node in the subgraph, create a
+            // corresponding edge in the new graph.
+            for ancestor_child_node_index in subgraph
+                .neighbors_directed(child_node_index, petgraph::Incoming)
+            {
+                let ancestor_child_node =
+                    subgraph.node_weight(ancestor_child_node_index).unwrap();
+                if matches!(ancestor_child_node, Node::Start { .. }) {
+                    continue;
                 }
-                NodeConcurrency::Parallel(specs) => {
-                    let nodes = specs
-                        .iter()
-                        .map(|spec| {
-                            Node::new_child(
-                                spec.name,
-                                instance_id,
-                                spec.label,
-                                ActionName::new(spec.action),
-                            )
-                        })
-                        .collect();
-                    self.append_parallel(nodes);
+                let ancestor_parent_node_index = subsaga_idx_to_saga_idx
+                    .get(&ancestor_child_node_index)
+                    .expect("graph was not a DAG");
+                self.graph.add_edge(
+                    *ancestor_parent_node_index,
+                    parent_node_index,
+                    (),
+                );
+            }
+        }
+
+        // Create the edges representing dependencies for the initial node(s) in
+        // the subsaga.  These are the outgoing edges from the subsaga's start
+        // node.
+        for descendent_child_node_index in
+            subgraph.neighbors_directed(subsaga.start_node, petgraph::Outgoing)
+        {
+            if let Some(descendent_parent_node_index) =
+                subsaga_idx_to_saga_idx.get(&descendent_child_node_index)
+            {
+                for s in &subsaga_start {
+                    self.graph.add_edge(*s, *descendent_parent_node_index, ());
                 }
             }
         }
+
+        // Set `last_added` so that we can keep adding to it.
+        let end_child_node_index = subsaga.end_node;
+        let end_parent_node_index = subsaga_idx_to_saga_idx
+            .get(&end_child_node_index)
+            .expect("end node was not processed");
+        self.last_added = vec![*end_parent_node_index];
     }
 
     /// Return the constructed DAG
@@ -462,12 +421,7 @@ impl DagBuilder {
     pub fn build(mut self) -> Dag {
         // Append an "end" node so that we can easily tell when the saga has
         // completed.
-        let newnode = self.graph.add_node(Node::new_child(
-            "__EndNode__",
-            0,
-            "EndNode",
-            ActionName::new("__steno_action_end_node__"),
-        ));
+        let newnode = self.graph.add_node(Node::End);
 
         for node in &self.last_added {
             self.graph.add_edge(*node, newnode, ());
@@ -479,5 +433,83 @@ impl DagBuilder {
             start_node: self.root,
             end_node: newnode,
         }
+    }
+}
+
+/// An abstract specification for a subsaga that can be used by a Dag
+/// to generate and append saga nodes.
+///
+/// An example implementation is shown below:
+///
+/// ```ignore
+/// fn create_disk_subsaga<'a>() -> SagaSpec<'a> {
+///     SagaSpec(
+///         vec![
+///             NodeConcurrency::Linear(vec![NodeSpec {
+///                 name: "disk_id",
+///                 label: "GenerateDiskId",
+///                 action: "saga_generate_uuid",
+///             }]),
+///             NodeConcurrency::Parallel(vec![NodeSpec {...}, NodeSpec {...}]),
+///         ],
+///     )
+/// }
+/// ```
+///
+///
+/// TODO: Semantic validation (actions exist in registry, etc...)
+pub struct SagaSpec<'a>(pub Vec<NodeConcurrency<'a>>);
+
+/// An abstract description of the shape of node execution
+///
+/// TODO: Do we want to allow arbitrary recursion here?
+pub enum NodeConcurrency<'a> {
+    Linear(Vec<NodeSpec<'a>>),
+    Parallel(Vec<NodeSpec<'a>>),
+}
+
+/// A specification for creating a node. This allows dynamic creation of nodes
+/// for subsagas with different instance_ids and creation parameters.
+pub struct NodeSpec<'a> {
+    pub name: &'a str,
+    pub label: &'a str,
+    pub action: &'a str,
+}
+
+impl<'a> SagaSpec<'a> {
+    pub fn to_dag<T>(&self, saga_name: SagaName, params: T) -> Dag
+    where
+        T: ActionData,
+    {
+        let mut builder = DagBuilder::new(saga_name, params);
+
+        for concurrency in &self.0 {
+            match concurrency {
+                NodeConcurrency::Linear(specs) => {
+                    for spec in specs {
+                        builder.append(Node::new_child(
+                            spec.name,
+                            spec.label,
+                            ActionName::new(spec.action),
+                        ));
+                    }
+                }
+                NodeConcurrency::Parallel(specs) => {
+                    let nodes = specs
+                        .iter()
+                        .map(|spec| {
+                            Node::new_child(
+                                spec.name,
+                                spec.label,
+                                ActionName::new(spec.action),
+                            )
+                        })
+                        .collect();
+                    builder.append_parallel(nodes);
+                }
+            }
+        }
+
+        builder.build()
     }
 }

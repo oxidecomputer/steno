@@ -129,45 +129,33 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
 }
 
 /*
- * Action implementations
+ * Special action implementations
  */
 
-/** Represents the start node in a graph */
+// XXX-dap TODO-doc
 #[derive(Debug)]
-pub struct ActionStartNode {}
+pub struct ActionConstant {
+    value: serde_json::Value,
+}
 
-impl<UserType> Action<UserType> for ActionStartNode
+impl ActionConstant {
+    pub fn new<T: ActionData>(v: T) -> ActionConstant {
+        ActionConstant {
+            value: serde_json::to_value(v).unwrap(), // XXX-dap
+        }
+    }
+}
+
+impl<UserType> Action<UserType> for ActionConstant
 where
     UserType: SagaType,
 {
     fn do_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, ActionResult> {
-        // TODO-log
-        Box::pin(futures::future::ok(Arc::new(serde_json::Value::Null)))
+        Box::pin(futures::future::ok(Arc::new(self.value.clone())))
     }
 
     fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
-        // TODO-log
         Box::pin(futures::future::ok(()))
-    }
-}
-/** Represents the end node in a graph */
-#[derive(Debug)]
-pub struct ActionEndNode {}
-
-impl<UserType: SagaType> Action<UserType> for ActionEndNode {
-    fn do_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, ActionResult> {
-        // TODO-log
-        Box::pin(futures::future::ok(Arc::new(serde_json::Value::Null)))
-    }
-
-    fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
-        /*
-         * We should not run compensation actions for nodes that have not
-         * started.  We should never start this node unless all other actions
-         * have completed.  We should never unwind a saga unless some action
-         * failed.  Thus, we should never undo the "end" node in a saga.
-         */
-        panic!("attempted to undo end node in saga");
     }
 }
 

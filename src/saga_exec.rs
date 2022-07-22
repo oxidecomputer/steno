@@ -4,6 +4,7 @@ use crate::dag::Node;
 use crate::rust_features::ExpectNone;
 use crate::saga_action_error::ActionError;
 use crate::saga_action_generic::Action;
+use crate::saga_action_generic::ActionConstant;
 use crate::saga_action_generic::ActionData;
 use crate::saga_action_generic::ActionInjectError;
 use crate::saga_log::SagaNodeEventType;
@@ -310,7 +311,9 @@ struct TaskParams<UserType: SagaType> {
     done_tx: mpsc::Sender<TaskCompletion<UserType>>,
     /** Ancestor tree for this node.  See [`ActionContext`]. */
     // TODO-cleanup there's no reason this should be an Arc.
-    ancestor_tree: Arc<BTreeMap<(String, u16), Arc<serde_json::Value>>>,
+    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
+    /** Saga parameters for the closest enclosing saga */
+    saga_params: Arc<serde_json::Value>,
     /** The action itself that we're executing. */
     action: Arc<dyn Action<UserType>>,
 }
@@ -417,7 +420,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
          */
         let forward = !sglog.unwinding();
         let mut live_state = SagaExecLiveState {
-            dag: Arc::clone(&dag),
             action_registry: Arc::clone(&registry),
             exec_state: if forward {
                 SagaCachedState::Running
@@ -650,46 +652,197 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
      */
     fn make_ancestor_tree(
         &self,
-        tree: &mut BTreeMap<(String, u16), Arc<serde_json::Value>>,
+        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
         include_self: bool,
+        ignore_depth: usize,
     ) {
         if include_self {
-            self.make_ancestor_tree_node(tree, live_state, node);
+            self.make_ancestor_tree_node(tree, live_state, node, ignore_depth);
             return;
         }
 
         let ancestors = self.dag.graph.neighbors_directed(node, Incoming);
         for ancestor in ancestors {
-            self.make_ancestor_tree_node(tree, live_state, ancestor);
+            self.make_ancestor_tree_node(
+                tree,
+                live_state,
+                ancestor,
+                ignore_depth,
+            );
         }
     }
 
     fn make_ancestor_tree_node(
         &self,
-        tree: &mut BTreeMap<(String, u16), Arc<serde_json::Value>>,
+        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
+        mut ignore_depth: usize,
     ) {
-        if node == self.dag.start_node {
-            return;
-        }
-
         /*
-         * If we're in this function, it's because we're looking at the ancestor
-         * of a node that's currently "Running".  All such ancestors must be
-         * "Done".  If they had never reached "Done", then we should never have
-         * started working on the current node.  If they were "Done" but moved
-         * on to one of the undoing states, then that implies we've already
-         * finished undoing descendants, which would include the current node.
+         * XXX-dap implementation notes
+         *
+         * What's `ignore_depth`?  Recall that the ancestor tree is used to
+         * lookup outputs from previous nodes that are available to the current
+         * node.  We want the behavior to be that for a given node, you cannot
+         * see outputs from nodes in a subsaga on which you depended (because
+         * that would tightly couple all possible subsagas -- they'd live in a
+         * single namespace of node names).  But of course you _should_ be able
+         * to see outputs from actions that preceded a subsaga that preceded
+         * you.  To deal with this, we traverse the DAG backwards, and if we
+         * find a SubsagaEnd node, then we ignore everything until we get to its
+         * SubsagaStart.  To implement this, we have this `ignore_depth`: if
+         * it's non-zero, we ignore any outputs we see.  We increment it on the
+         * recursive call when we're in a `SubsagaEnd` node, and we decrement it
+         * on the recursive call when we reach a `SubsagaStart` node.
+         *
+         * What about the output of a subsaga itself?  When a user appends a
+         * subsaga to a Dag, they give it a "name" just like they would a node.
+         * When a downstream node looks up the output of that name, they get the
+         * output of that subsaga.  To implement this, we store the name in the
+         * `SubsagaEnd` node.  When we find it in this traversal, if
+         * ignore_depth == 0 (see above), then we add the "output of the saga".
+         * This has never really been defined before, so we're defining it for
+         * now to be the output of the sole ancestor of subsaga's end node.
          */
         let dag_node = self.dag.get(node).unwrap();
-        let name = dag_node.name.clone();
-        let instance_id = dag_node.instance_id;
-        let output = live_state.node_output(node);
-        tree.insert((name, instance_id), output);
-        self.make_ancestor_tree(tree, live_state, node, false);
+        let found_here = match dag_node {
+            Node::Start { .. } | Node::End => None,
+            Node::Constant { name, value } => {
+                if ignore_depth == 0 {
+                    Some((name.to_string(), Arc::new(value.clone())))
+                } else {
+                    None
+                }
+            }
+            Node::Action { name, .. } => {
+                /*
+                 * If we're in this function, it's because we're looking at the
+                 * ancestor of a node that's currently "Running".  All such
+                 * ancestors must be "Done".  If they had never reached "Done",
+                 * then we should never have started working on the current
+                 * node.  If they were "Done" but moved on to one of the undoing
+                 * states, then that implies we've already finished undoing
+                 * descendants, which would include the current node.
+                 */
+                if ignore_depth == 0 {
+                    Some((name.to_string(), live_state.node_output(node)))
+                } else {
+                    None
+                }
+            }
+            Node::SubsagaEnd { name } => {
+                /*
+                 * If we find a subsaga end node, then we'll emit the output of
+                 * the saga.  Plus, every node we find until we get to the next
+                 * subsaga start node needs to be ignored.  (But we still
+                 * continue the traversal, since there might be nodes from
+                 * before the subsaga that we need to include.)
+                 */
+                ignore_depth = ignore_depth + 1;
+                Some((name.to_string(), live_state.node_output(node)))
+            }
+
+            Node::SubsagaStart { .. } => {
+                if ignore_depth == 0 {
+                    // We don't need to traverse any more.
+                    return;
+                }
+
+                ignore_depth = ignore_depth - 1;
+                None
+            }
+        };
+
+        if let Some((name, output)) = found_here {
+            tree.insert(name, output);
+        }
+        self.make_ancestor_tree(tree, live_state, node, false, ignore_depth);
+    }
+
+    /// Returns the saga parameters for the current node
+    // If this node is not within a subsaga, then these will be the top-level
+    // saga parameters.  We find these by walking ancestor nodes until we find
+    // the Start node and we grab the parameters directly out of that node.
+    //
+    // If this node is contained within a subsaga, then these will be the
+    // parameters of the _subsaga_.  We find these by walking ancestor nodes
+    // until we find a SubsagaStart node, which will say what _other_ node's
+    // output represents our parameters.  Then we grab that node's output.
+    // However, if we encounter a SubsagaEnd node, then there's a nested
+    // subsaga -- we need to skip _past_ the corresponding SubsagaStart.  We use
+    // `ignore_depth` similar to the way `make_ancestor_tree()` does in order to
+    // skip entire subsagas.
+    //
+    // (Note that we don't know which case we're in until we find the
+    // terminating condition for one or the other.)
+    fn saga_params_for(
+        &self,
+        live_state: &SagaExecLiveState<UserType>,
+        node_index: NodeIndex,
+        ignore_depth: usize,
+    ) -> Arc<serde_json::Value> {
+        let node = self.dag.get(node_index).unwrap();
+        match node {
+            Node::Start { params } => {
+                assert_eq!(ignore_depth, 0);
+                // XXX-dap don't clone
+                Arc::new(params.clone())
+            }
+
+            Node::SubsagaStart { params_node_name, .. }
+                if ignore_depth == 0 =>
+            {
+                // XXX-dap error conditions
+                // XXX-dap this is way more expensive than we need!  Exactly one
+                // of our ancestors will have the right node in its ancestor
+                // tree but we don't know which one.
+                let mut tree = BTreeMap::new();
+                self.make_ancestor_tree(
+                    &mut tree, live_state, node_index, false, 0,
+                );
+                Arc::clone(tree.get(params_node_name).unwrap())
+            }
+
+            Node::SubsagaStart { .. } => {
+                // XXX-dap error conditions
+                // It shouldn't matter which ancestor we pick.
+                assert!(ignore_depth > 0);
+                let ancestor = self
+                    .dag
+                    .graph
+                    .neighbors_directed(node_index, Incoming)
+                    .next()
+                    .unwrap();
+                self.saga_params_for(live_state, ancestor, ignore_depth - 1)
+            }
+
+            Node::End | Node::Action { .. } | Node::Constant { .. } => {
+                // XXX-dap error conditions
+                // It shouldn't matter which ancestor we pick.
+                let ancestor = self
+                    .dag
+                    .graph
+                    .neighbors_directed(node_index, Incoming)
+                    .next()
+                    .unwrap();
+                self.saga_params_for(live_state, ancestor, ignore_depth)
+            }
+
+            Node::SubsagaEnd { .. } => {
+                // XXX-dap error conditions
+                // It shouldn't matter which ancestor we pick.
+                let ancestor = self
+                    .dag
+                    .graph
+                    .neighbors_directed(node_index, Incoming)
+                    .next()
+                    .unwrap();
+                self.saga_params_for(live_state, ancestor, ignore_depth + 1)
+            }
+        }
     }
 
     /**
@@ -831,17 +984,14 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 &live_state,
                 node_id,
                 false,
+                0,
             );
 
+            let saga_params = self.saga_params_for(&live_state, node_id, 0);
             let sgaction = if live_state.injected_errors.contains(&node_id) {
                 Arc::new(ActionInjectError {}) as Arc<dyn Action<UserType>>
             } else {
-                // TODO(AJS) - don't unwrap
-                let action_name = &live_state.dag.get(node_id).unwrap().action;
-                live_state
-                    .action_registry
-                    .get(action_name)
-                    .expect("missing action for node")
+                self.node_action(&live_state, node_id)
             };
 
             let task_params = TaskParams {
@@ -850,6 +1000,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 node_id,
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
+                saga_params,
                 action: sgaction,
                 user_context: Arc::clone(&self.user_context),
             };
@@ -878,27 +1029,78 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 &live_state,
                 node_id,
                 true,
+                0,
             );
 
-            // TODO(AJS) - don't unwrap
-            let action_name = &live_state.dag.get(node_id).unwrap().action;
-            let sgaction = live_state
-                .action_registry
-                .get(action_name)
-                .expect("missing action for node");
-
+            let saga_params = self.saga_params_for(&live_state, node_id, 0);
+            let sgaction = self.node_action(&live_state, node_id);
             let task_params = TaskParams {
                 dag: Arc::clone(&self.dag),
                 live_state: Arc::clone(&self.live_state),
                 node_id,
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
+                saga_params,
                 action: sgaction,
                 user_context: Arc::clone(&self.user_context),
             };
 
             let task = tokio::spawn(SagaExecutor::undo_node(task_params));
             live_state.node_task(node_id, task);
+        }
+    }
+
+    // XXX-dap if the action registry were hanging off self instead of
+    // live_state, we could just accept "self" here.
+    // XXX-dap dag, action registry should not be in live_state
+    fn node_action(
+        &self,
+        live_state: &SagaExecLiveState<UserType>,
+        node_index: NodeIndex,
+    ) -> Arc<dyn Action<UserType>> {
+        // TODO(AJS) - don't unwrap
+        let registry = &live_state.action_registry;
+        let dag = &self.dag;
+        match dag.get(node_index).unwrap() {
+            Node::Action { action, .. } => {
+                registry.get(action).expect("missing action for node")
+            }
+
+            Node::Constant { value, .. } => {
+                Arc::new(ActionConstant::new(value.clone()))
+            }
+
+            Node::Start { .. } | Node::End | Node::SubsagaStart { .. } => {
+                // These nodes are no-ops in terms of the action that happens at
+                // the node itself.
+                Arc::new(ActionConstant::new(serde_json::Value::Null))
+            }
+
+            Node::SubsagaEnd { .. } => {
+                // We record the subsaga's output here, as the output of the
+                // `SubsagaEnd` node.  (We don't _have_ to do this -- we could
+                // instead change the logic that _finds_ the saga's output to
+                // look in the same place that we do here.  But this is a simple
+                // and clear way to do this.)
+                // XXX-dap What is the saga's output?  We have not previously
+                // defined that.  For now, we'll take the first immediate
+                // ancestor's output.  This is a little janky.  We should
+                // probably not explode if there's more than one, and really we
+                // shouldn't allow you to create that graph in the first place.
+                // DagBuilder::build() could return an error in this case.
+                // (There are other error cases it could check too, like adding
+                // a Subsaga whose params node does not precede it.) Still, we
+                // can't be sure a previous version didn't do that (or the
+                // database state isn't corrupt) so we shouldn't blow up.
+                let ancestors: Vec<_> = dag
+                    .graph
+                    .neighbors_directed(node_index, Incoming)
+                    .collect();
+                assert_eq!(ancestors.len(), 1);
+                Arc::new(ActionConstant::new(
+                    live_state.node_output(ancestors[0]),
+                ))
+            }
         }
     }
 
@@ -940,6 +1142,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         let exec_future = task_params.action.do_it(ActionContext {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
+            saga_params: Arc::clone(&task_params.saga_params),
             node_id,
             dag: Arc::clone(&task_params.dag),
             user_context: Arc::clone(&task_params.user_context),
@@ -993,6 +1196,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         let exec_future = task_params.action.undo_it(ActionContext {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
+            saga_params: Arc::clone(&task_params.saga_params),
             node_id,
             dag: Arc::clone(&task_params.dag),
             user_context: Arc::clone(&task_params.user_context),
@@ -1083,8 +1287,14 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
              */
             let (error_node_id, error_source) =
                 live_state.node_errors.iter().next().unwrap();
-            let error_node_name =
-                self.dag.get(*error_node_id).unwrap().name.clone();
+            // XXX-dap error condition
+            let error_node_name = self
+                .dag
+                .get(*error_node_id)
+                .unwrap()
+                .name()
+                .unwrap()
+                .to_string();
             return SagaResult {
                 saga_id: self.saga_id,
                 saga_log: live_state.sglog.clone(),
@@ -1100,15 +1310,9 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .node_outputs
             .iter()
             .filter_map(|(node_id, node_output)| {
-                let start_node = &self.dag.start_node;
-                let end_node = &self.dag.end_node;
-                if *node_id == *start_node || *node_id == *end_node {
-                    None
-                } else {
-                    let node_name =
-                        self.dag.get(*node_id).unwrap().name.clone();
-                    Some((node_name, Arc::clone(node_output)))
-                }
+                self.dag.get(*node_id).unwrap().name().map(|node_name| {
+                    (node_name.to_string(), Arc::clone(node_output))
+                })
             })
             .collect();
 
@@ -1232,7 +1436,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
  */
 #[derive(Debug)]
 struct SagaExecLiveState<UserType: SagaType> {
-    dag: Arc<Dag>,
     action_registry: Arc<ActionRegistry<UserType>>,
 
     /** Unique identifier for this saga (an execution of a saga template) */
@@ -1495,23 +1698,23 @@ impl SagaExecStatus {
                 d,
                 width = big_indent
             )?;
+            let mklabel = |node| {
+                let node = self.dag.get(node).unwrap();
+                if let Some(name) = node.name() {
+                    format!("{} (produces {:?})", node.label(), name)
+                } else {
+                    node.label()
+                }
+            };
             if nodes.len() == 1 {
                 let node = nodes[0];
-                let node_label = format!(
-                    "{} (produces \"{}\")",
-                    self.dag.get(node).unwrap().label,
-                    self.dag.get(node).unwrap().name
-                );
+                let node_label = mklabel(nodes[0]);
                 let node_state = &self.node_exec_states[&node];
                 write!(out, "{}: {}\n", node_state, node_label)?;
             } else {
                 write!(out, "+ (actions in parallel)\n")?;
                 for node in nodes {
-                    let node_label = format!(
-                        "{} (produces \"{}\")",
-                        self.dag.get(*node).unwrap().label,
-                        self.dag.get(*node).unwrap().name
-                    );
+                    let node_label = mklabel(*node);
                     let node_state = &self.node_exec_states[&node];
                     // TODO(AJS) - fix this when subsaga nodes added
                     //let child_sagas = self.child_sagas.get(&node);
@@ -1636,10 +1839,11 @@ fn recovery_validate_parent(
  * have enough state to know which node is invoking the API.
  */
 pub struct ActionContext<UserType: SagaType> {
-    ancestor_tree: Arc<BTreeMap<(String, u16), Arc<serde_json::Value>>>,
+    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
     node_id: NodeIndex,
     dag: Arc<Dag>,
     user_context: Arc<UserType::ExecContextType>,
+    saga_params: Arc<serde_json::Value>,
 }
 
 impl<UserType: SagaType> ActionContext<UserType> {
@@ -1659,42 +1863,37 @@ impl<UserType: SagaType> ActionContext<UserType> {
     pub fn lookup<T: ActionData + 'static>(
         &self,
         name: &str,
-        instance_id: u16,
     ) -> Result<T, ActionError> {
         // TODO: Remove this unnecessary allocation via `Borrow/Cow`
-        let key = (name.to_string(), instance_id);
-        let item = self.ancestor_tree.get(&key).unwrap_or_else(|| {
-            panic!(
-                "no ancestor called \"{}\" with instance id: {}",
-                name, instance_id
-            )
-        });
+        let key = name.to_string();
+        let item = self
+            .ancestor_tree
+            .get(&key)
+            .unwrap_or_else(|| panic!("no ancestor called \"{}\"", name));
         // TODO-cleanup double-asterisk seems ridiculous
         serde_json::from_value((**item).clone())
             .map_err(ActionError::new_deserialize)
     }
 
     /**
-     * Returns the create parameters if the current node is a (sub)saga start node.
+     * Returns the saga parameters for the current action
      *
-     * # Panics
-     *
-     * This function panics if the node does not have create parameters.
+     * If this action is being run as a subsaga, this returns the saga
+     * parameters for the subsaga.  This way actions don't have to care whether
+     * they're running in a saga or not.
      */
-    pub fn create_params<T: ActionData + 'static>(
+    pub fn saga_params<T: ActionData + 'static>(
         &self,
     ) -> Result<T, ActionError> {
-        serde_json::from_value(
-            self.dag.get(self.node_id).unwrap().create_params.clone().unwrap(),
-        )
-        .map_err(ActionError::new_deserialize)
+        serde_json::from_value((*self.saga_params).clone())
+            .map_err(ActionError::new_deserialize)
     }
 
     /**
      * Returns the human-readable label for the current saga node
      */
-    pub fn node_label(&self) -> &str {
-        &self.dag.get(self.node_id).unwrap().label
+    pub fn node_label(&self) -> String {
+        self.dag.get(self.node_id).unwrap().label()
     }
 
     /**
@@ -1702,14 +1901,6 @@ impl<UserType: SagaType> ActionContext<UserType> {
      */
     pub fn user_data(&self) -> &UserType::ExecContextType {
         &self.user_context
-    }
-
-    /**
-     * Return the instance_id of the current node
-     *
-     */
-    pub fn instance_id(&self) -> u16 {
-        self.dag.get(self.node_id).unwrap().instance_id
     }
 }
 
