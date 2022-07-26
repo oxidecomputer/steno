@@ -124,30 +124,32 @@ async fn book_trip(
 fn make_trip_action_registry() -> Arc<ActionRegistry<TripSaga>> {
     let mut registry = ActionRegistry::new();
 
-    registry.register(
-        ActionName::new("payment"),
-        ActionFunc::new_action(
-            // action function
-            saga_charge_card,
-            // undo function
-            saga_refund_card,
-        ),
-    );
+    registry.register(ActionFunc::new_action(
+        // action name
+        "payment",
+        // action function
+        saga_charge_card,
+        // undo function
+        saga_refund_card,
+    ));
 
-    registry.register(
-        ActionName::new("hotel"),
-        ActionFunc::new_action(saga_book_hotel, saga_cancel_hotel),
-    );
+    registry.register(ActionFunc::new_action(
+        "hotel",
+        saga_book_hotel,
+        saga_cancel_hotel,
+    ));
 
-    registry.register(
-        ActionName::new("flight"),
-        ActionFunc::new_action(saga_book_flight, saga_cancel_flight),
-    );
+    registry.register(ActionFunc::new_action(
+        "flight",
+        saga_book_flight,
+        saga_cancel_flight,
+    ));
 
-    registry.register(
-        ActionName::new("car"),
-        ActionFunc::new_action(saga_book_car, saga_cancel_car),
-    );
+    registry.register(ActionFunc::new_action(
+        "car",
+        saga_book_car,
+        saga_cancel_car,
+    ));
 
     Arc::new(registry)
 }

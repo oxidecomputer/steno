@@ -6,6 +6,7 @@
 
 use crate::saga_action_error::ActionError;
 use crate::saga_exec::ActionContext;
+use crate::ActionName;
 use futures::future::BoxFuture;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -126,6 +127,11 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
         &self,
         sgctx: ActionContext<UserType>,
     ) -> BoxFuture<'_, UndoResult>;
+
+    /**
+     * Return the name of the action used as the key in the ActionRegistry
+     */
+    fn name(&self) -> ActionName;
 }
 
 /*
@@ -157,6 +163,10 @@ where
     fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
         Box::pin(futures::future::ok(()))
     }
+
+    fn name(&self) -> ActionName {
+        ActionName::new("ActionConstant")
+    }
 }
 
 /** Simulates an error at a given spot in the saga graph */
@@ -172,5 +182,9 @@ impl<UserType: SagaType> Action<UserType> for ActionInjectError {
     fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
         /* We should never undo an action that failed. */
         unimplemented!();
+    }
+
+    fn name(&self) -> ActionName {
+        ActionName::new("InjectError")
     }
 }

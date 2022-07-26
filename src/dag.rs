@@ -109,12 +109,8 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
         ActionRegistry { actions: BTreeMap::new() }
     }
 
-    pub fn register(
-        &mut self,
-        name: ActionName,
-        action: Arc<dyn Action<UserType>>,
-    ) {
-        let already_inserted = self.actions.insert(name, action);
+    pub fn register(&mut self, action: Arc<dyn Action<UserType>>) {
+        let already_inserted = self.actions.insert(action.name(), action);
         assert!(already_inserted.is_none());
     }
 
@@ -136,8 +132,6 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
 /// the execution state of the saga here. That continues to reside in saga log
 /// consisting of `SagaNodeEvent`s.
 ///
-/// There can be multiple subsagas with nodes that run the same actions. In order
-/// to distinguish the action outputs we tag each one with an `instance_id`.
 // XXX-dap TODO-doc
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum Node {
@@ -200,8 +194,6 @@ impl Node {
 /// A DAG describing a saga
 //
 // Note: This doesn't implement JSON schema because of Graph and NodeIndex
-// TODO(AJS) - Create a separate metadata type?
-//
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dag {
     pub(crate) name: SagaName,

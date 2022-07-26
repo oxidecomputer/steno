@@ -98,45 +98,38 @@ impl From<ExampleError> for ActionError {
 pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
     let mut registry = ActionRegistry::new();
 
-    registry.register(
-        ActionName::new("instance_create"),
-        new_action_noop_undo(demo_prov_instance_create),
-    );
-    registry.register(
-        ActionName::new("vpc_alloc_ip"),
-        new_action_noop_undo(demo_prov_vpc_alloc_ip),
-    );
-    registry.register(
-        ActionName::new("volume_create"),
-        new_action_noop_undo(demo_prov_volume_create),
-    );
-    registry.register(
-        ActionName::new("instance_configure"),
-        new_action_noop_undo(demo_prov_instance_configure),
-    );
-    registry.register(
-        ActionName::new("volume_attach"),
-        new_action_noop_undo(demo_prov_volume_attach),
-    );
-    registry.register(
-        ActionName::new("instance_boot"),
-        new_action_noop_undo(demo_prov_instance_boot),
-    );
-    registry.register(
-        ActionName::new("print"),
-        new_action_noop_undo(demo_prov_print),
-    );
+    registry.register(new_action_noop_undo(
+        "instance_create",
+        demo_prov_instance_create,
+    ));
+    registry
+        .register(new_action_noop_undo("vpc_alloc_ip", demo_prov_vpc_alloc_ip));
+    registry.register(new_action_noop_undo(
+        "volume_create",
+        demo_prov_volume_create,
+    ));
+    registry.register(new_action_noop_undo(
+        "instance_configure",
+        demo_prov_instance_configure,
+    ));
+    registry.register(new_action_noop_undo(
+        "volume_attach",
+        demo_prov_volume_attach,
+    ));
+    registry.register(new_action_noop_undo(
+        "instance_boot",
+        demo_prov_instance_boot,
+    ));
+    registry.register(new_action_noop_undo("print", demo_prov_print));
 
     // Subsaga actions are registered just like any other action
     // The order of registration doesn't matter
-    registry.register(
-        ActionName::new("server_pick"),
-        new_action_noop_undo(demo_prov_server_pick),
-    );
-    registry.register(
-        ActionName::new("server_reserve"),
-        new_action_noop_undo(demo_prov_server_reserve),
-    );
+    registry
+        .register(new_action_noop_undo("server_pick", demo_prov_server_pick));
+    registry.register(new_action_noop_undo(
+        "server_reserve",
+        demo_prov_server_reserve,
+    ));
 
     Arc::new(registry)
 }

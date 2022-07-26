@@ -1530,10 +1530,7 @@ mod test {
         }
 
         let mut registry = ActionRegistry::new();
-        registry.register(
-            ActionName::new("n1_out"),
-            ActionFunc::new_action(do_n1, undo_n1),
-        );
+        registry.register(ActionFunc::new_action("n1_out", do_n1, undo_n1));
 
         let mut builder =
             DagBuilder::new(SagaName::new("test-saga"), TestParams {});
