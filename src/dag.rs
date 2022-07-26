@@ -60,8 +60,42 @@ NewtypeFrom! { () pub struct SagaId(Uuid); }
 pub struct ActionName(String);
 
 impl ActionName {
-    pub fn new(name: &str) -> ActionName {
-        ActionName(name.to_string())
+    pub fn new<S: AsRef<str>>(name: S) -> ActionName {
+        ActionName(name.as_ref().to_string())
+    }
+}
+
+impl<S> From<S> for ActionName
+where
+    S: AsRef<str>,
+{
+    fn from(s: S) -> Self {
+        ActionName::new(s)
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+pub struct NodeName(String);
+
+impl NodeName {
+    pub fn new<S: AsRef<str>>(name: S) -> NodeName {
+        NodeName(name.as_ref().to_string())
+    }
+}
+
+impl AsRef<str> for NodeName {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -138,19 +172,23 @@ pub enum Node {
     // XXX don't want the variants to be public
     Start { params: serde_json::Value },
     End,
-    Action { name: String, label: String, action: ActionName },
-    Constant { name: String, value: serde_json::Value },
-    SubsagaStart { saga_name: SagaName, params_node_name: String },
-    SubsagaEnd { name: String },
+    Action { name: NodeName, label: String, action: ActionName },
+    Constant { name: NodeName, value: serde_json::Value },
+    SubsagaStart { saga_name: SagaName, params_node_name: NodeName },
+    SubsagaEnd { name: NodeName },
 }
 
 impl Node {
     /// Create a new child node for a saga or subsaga
-    pub fn new_child(name: &str, label: &str, action: ActionName) -> Node {
+    pub fn new_child<S1: AsRef<str>, S2: AsRef<str>, A: Into<ActionName>>(
+        name: S1,
+        label: S2,
+        action: A,
+    ) -> Node {
         Node::Action {
-            name: name.to_string(),
-            label: label.to_string(),
-            action,
+            name: NodeName::new(name),
+            label: label.as_ref().to_string(),
+            action: action.into(),
         }
     }
 
@@ -162,17 +200,20 @@ impl Node {
      * case, you know the input up front.  You can use this to provide the value
      * to the downstream action.
      */
-    pub fn new_constant<T: ActionData>(name: &str, value: T) -> Node {
+    pub fn new_constant<S: AsRef<str>, T: ActionData>(
+        name: S,
+        value: T,
+    ) -> Node {
         let value = serde_json::to_value(value).unwrap(); // XXX-dap
-        Node::Constant { name: name.to_string(), value }
+        Node::Constant { name: NodeName::new(name), value }
     }
 
-    pub fn name(&self) -> Option<&str> {
+    pub fn name(&self) -> Option<&NodeName> {
         match self {
             Node::Start { .. } | Node::End | Node::SubsagaStart { .. } => None,
-            Node::Action { name, .. } => Some(name),
-            Node::Constant { name, .. } => Some(name),
-            Node::SubsagaEnd { name, .. } => Some(name),
+            Node::Action { name, .. } => Some(&name),
+            Node::Constant { name, .. } => Some(&name),
+            Node::SubsagaEnd { name, .. } => Some(&name),
         }
     }
 
@@ -212,7 +253,12 @@ impl Dag {
     pub fn get_index(&self, name: &str) -> Result<NodeIndex, anyhow::Error> {
         self.graph
             .node_indices()
-            .find(|i| self.graph[*i].name().map(|n| n == name).unwrap_or(false))
+            .find(|i| {
+                self.graph[*i]
+                    .name()
+                    .map(|n| n.as_ref() == name)
+                    .unwrap_or(false)
+            })
             .ok_or_else(|| anyhow!("saga has no node named \"{}\"", name))
     }
 
@@ -332,7 +378,7 @@ impl DagBuilder {
     ) {
         self.append(Node::SubsagaStart {
             saga_name: subsaga.name.clone(),
-            params_node_name: params_node_name.to_string(),
+            params_node_name: NodeName::new(params_node_name),
         });
 
         let subsaga_start = self.last_added.clone();
@@ -353,7 +399,7 @@ impl DagBuilder {
             // Other nodes are copied directly into the parent graph.
             // XXX-dap TODO-cleanup make this an exhaustive match
             let node = if let Node::End = node {
-                Node::SubsagaEnd { name: name.to_string() }
+                Node::SubsagaEnd { name: NodeName::new(name) }
             } else {
                 node.clone()
             };
@@ -482,7 +528,7 @@ impl<'a> SagaSpec<'a> {
                         builder.append(Node::new_child(
                             spec.name,
                             spec.label,
-                            ActionName::new(spec.action),
+                            spec.action,
                         ));
                     }
                 }
@@ -490,11 +536,7 @@ impl<'a> SagaSpec<'a> {
                     let nodes = specs
                         .iter()
                         .map(|spec| {
-                            Node::new_child(
-                                spec.name,
-                                spec.label,
-                                ActionName::new(spec.action),
-                            )
+                            Node::new_child(spec.name, spec.label, spec.action)
                         })
                         .collect();
                     builder.append_parallel(nodes);

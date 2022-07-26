@@ -1,6 +1,7 @@
 //! Manages execution of a saga
 
 use crate::dag::Node;
+use crate::dag::NodeName;
 use crate::rust_features::ExpectNone;
 use crate::saga_action_error::ActionError;
 use crate::saga_action_generic::Action;
@@ -311,7 +312,7 @@ struct TaskParams<UserType: SagaType> {
     done_tx: mpsc::Sender<TaskCompletion<UserType>>,
     /** Ancestor tree for this node.  See [`ActionContext`]. */
     // TODO-cleanup there's no reason this should be an Arc.
-    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
+    ancestor_tree: Arc<BTreeMap<NodeName, Arc<serde_json::Value>>>,
     /** Saga parameters for the closest enclosing saga */
     saga_params: Arc<serde_json::Value>,
     /** The action itself that we're executing. */
@@ -652,7 +653,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
      */
     fn make_ancestor_tree(
         &self,
-        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
+        tree: &mut BTreeMap<NodeName, Arc<serde_json::Value>>,
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
         include_self: bool,
@@ -676,7 +677,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
     fn make_ancestor_tree_node(
         &self,
-        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
+        tree: &mut BTreeMap<NodeName, Arc<serde_json::Value>>,
         live_state: &SagaExecLiveState<UserType>,
         node: NodeIndex,
         mut ignore_depth: usize,
@@ -712,7 +713,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             Node::Start { .. } | Node::End => None,
             Node::Constant { name, value } => {
                 if ignore_depth == 0 {
-                    Some((name.to_string(), Arc::new(value.clone())))
+                    Some((name.clone(), Arc::new(value.clone())))
                 } else {
                     None
                 }
@@ -728,7 +729,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                  * descendants, which would include the current node.
                  */
                 if ignore_depth == 0 {
-                    Some((name.to_string(), live_state.node_output(node)))
+                    Some((name.clone(), live_state.node_output(node)))
                 } else {
                     None
                 }
@@ -742,7 +743,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                  * before the subsaga that we need to include.)
                  */
                 ignore_depth = ignore_depth + 1;
-                Some((name.to_string(), live_state.node_output(node)))
+                Some((name.clone(), live_state.node_output(node)))
             }
 
             Node::SubsagaStart { .. } => {
@@ -1288,13 +1289,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             let (error_node_id, error_source) =
                 live_state.node_errors.iter().next().unwrap();
             // XXX-dap error condition
-            let error_node_name = self
-                .dag
-                .get(*error_node_id)
-                .unwrap()
-                .name()
-                .unwrap()
-                .to_string();
+            let error_node_name =
+                self.dag.get(*error_node_id).unwrap().name().unwrap().clone();
             return SagaResult {
                 saga_id: self.saga_id,
                 saga_log: live_state.sglog.clone(),
@@ -1311,7 +1307,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .iter()
             .filter_map(|(node_id, node_output)| {
                 self.dag.get(*node_id).unwrap().name().map(|node_name| {
-                    (node_name.to_string(), Arc::clone(node_output))
+                    (node_name.clone(), Arc::clone(node_output))
                 })
             })
             .collect();
@@ -1600,7 +1596,7 @@ pub struct SagaResult {
  */
 #[derive(Clone, Debug)]
 pub struct SagaResultOk {
-    node_outputs: BTreeMap<String, Arc<serde_json::Value>>,
+    node_outputs: BTreeMap<NodeName, Arc<serde_json::Value>>,
 }
 
 impl SagaResultOk {
@@ -1613,10 +1609,13 @@ impl SagaResultOk {
      */
     pub fn lookup_output<T: ActionData + 'static>(
         &self,
-        name: &str,
+        name: &NodeName,
     ) -> Result<T, ActionError> {
-        let output_json = self.node_outputs.get(name).unwrap_or_else(|| {
-            panic!("node with name \"{}\": not part of this saga", name)
+        let output_json = self.node_outputs.get(&name).unwrap_or_else(|| {
+            panic!(
+                "node with name \"{}\": not part of this saga",
+                name.as_ref()
+            )
         });
         // TODO-cleanup double-asterisk seems odd?
         serde_json::from_value((**output_json).clone())
@@ -1650,7 +1649,7 @@ impl SagaResultOk {
  */
 #[derive(Clone, Debug)]
 pub struct SagaResultErr {
-    pub error_node_name: String,
+    pub error_node_name: NodeName,
     pub error_source: ActionError,
 }
 
@@ -1839,7 +1838,7 @@ fn recovery_validate_parent(
  * have enough state to know which node is invoking the API.
  */
 pub struct ActionContext<UserType: SagaType> {
-    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
+    ancestor_tree: Arc<BTreeMap<NodeName, Arc<serde_json::Value>>>,
     node_id: NodeIndex,
     dag: Arc<Dag>,
     user_context: Arc<UserType::ExecContextType>,
@@ -1868,7 +1867,7 @@ impl<UserType: SagaType> ActionContext<UserType> {
         let key = name.to_string();
         let item = self
             .ancestor_tree
-            .get(&key)
+            .get(&NodeName::new(key))
             .unwrap_or_else(|| panic!("no ancestor called \"{}\"", name));
         // TODO-cleanup double-asterisk seems ridiculous
         serde_json::from_value((**item).clone())

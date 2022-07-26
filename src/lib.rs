@@ -58,6 +58,7 @@ pub use dag::Dag;
 pub use dag::DagBuilder;
 pub use dag::Node;
 pub use dag::NodeConcurrency;
+pub use dag::NodeName;
 pub use dag::NodeSpec;
 pub use dag::SagaId;
 pub use dag::SagaName;
