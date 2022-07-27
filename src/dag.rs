@@ -53,21 +53,19 @@ NewtypeFrom! { () pub struct SagaId(Uuid); }
 /// a crash, the name is used to link each node in the DAG with the
 /// [`Action`] implementation.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    JsonSchema,
+    Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 pub struct ActionName(String);
 
 impl ActionName {
     pub fn new<S: AsRef<str>>(name: S) -> ActionName {
         ActionName(name.as_ref().to_string())
+    }
+}
+
+impl fmt::Debug for ActionName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!("{:?}", self.0))
     }
 }
 
