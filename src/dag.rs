@@ -287,8 +287,13 @@ impl Node {
             Node::Start { .. } => String::from("(start node)"),
             Node::End => String::from("(end node)"),
             Node::Action { label, .. } => label.clone(),
-            // XXX-dap include the constant value
-            Node::Constant { .. } => String::from("(constant)"),
+            Node::Constant { value, .. } => {
+                let value_as_json = serde_json::to_string(value)
+                    .unwrap_or_else(|e| {
+                        format!("(failed to serialize constant value: {:#})", e)
+                    });
+                format!("(constant = {})", value_as_json)
+            }
             Node::SubsagaStart { saga_name, .. } => {
                 format!("(subsaga start: {:?})", saga_name)
             }

@@ -7,7 +7,7 @@
 +-- stage  2: + (actions in parallel)
               +-- done: VpcAllocIp (produces "instance_ip")
               +-- done: VolumeCreate (produces "volume_id")
-+-- stage  3: done: (constant) (produces "server_alloc_params")
++-- stage  3: done: (constant = {"number_of_things":1}) (produces "server_alloc_params")
 +-- stage  4: done: (subsaga start: SagaName("server-alloc"))
 +-- stage  5: done: ServerPick (produces "server_id")
 +-- stage  6: done: ServerReserve (produces "server_reserve")

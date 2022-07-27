@@ -37,7 +37,7 @@ digraph {
 +-- stage  2: + (actions in parallel)
               +-- blocked: VpcAllocIp (produces "instance_ip")
               +-- blocked: VolumeCreate (produces "volume_id")
-+-- stage  3: blocked: (constant) (produces "server_alloc_params")
++-- stage  3: blocked: (constant = {"number_of_things":1}) (produces "server_alloc_params")
 +-- stage  4: blocked: (subsaga start: SagaName("server-alloc"))
 +-- stage  5: blocked: ServerPick (produces "server_id")
 +-- stage  6: blocked: ServerReserve (produces "server_reserve")
