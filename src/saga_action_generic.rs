@@ -138,7 +138,14 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
  * Special action implementations
  */
 
-// XXX-dap TODO-doc
+/// [`Action`] impl that emits a value known when the DAG is created
+///
+/// This is used to implement [`UserNode::Constant`].
+///
+/// Why would you want this?  Suppose you're working with some saga action that
+/// expects input to come from some previous saga node.  But in your case, you
+/// know the input up front.  You can use this to provide the value to the
+/// downstream action.
 #[derive(Debug)]
 pub struct ActionConstant {
     value: serde_json::Value,
