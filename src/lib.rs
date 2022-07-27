@@ -46,10 +46,11 @@ mod store;
  * interfaces.  However, the "steno" crate wants to have an example that uses
  * this crate, hence our problem.
  */
-pub use example_provision::make_example_action_registry;
+pub use example_provision::load_example_actions;
 pub use example_provision::make_example_provision_dag;
 pub use example_provision::ExampleContext;
 pub use example_provision::ExampleParams;
+pub use example_provision::ExampleSagaType;
 
 pub use dag::ActionName;
 pub use dag::ActionRegistry;

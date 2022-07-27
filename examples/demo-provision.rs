@@ -11,11 +11,13 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use steno::make_example_action_registry;
+use steno::load_example_actions;
 use steno::make_example_provision_dag;
+use steno::ActionRegistry;
 use steno::Dag;
 use steno::ExampleContext;
 use steno::ExampleParams;
+use steno::ExampleSagaType;
 use steno::SagaId;
 use steno::SagaLog;
 use steno::SagaSerialized;
@@ -93,6 +95,12 @@ fn read_saga_state<R: io::Read>(
     reader: R,
 ) -> Result<SagaSerialized, anyhow::Error> {
     serde_json::from_reader(reader).context("reading saga state")
+}
+
+fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
+    let mut registry = ActionRegistry::new();
+    load_example_actions(&mut registry);
+    Arc::new(registry)
 }
 
 /*

@@ -2,11 +2,9 @@
  * Common code shared by examples
  */
 
-use crate::new_action_noop_undo;
 use crate::ActionContext;
 use crate::ActionError;
 use crate::ActionFuncResult;
-use crate::ActionName;
 use crate::ActionRegistry;
 use crate::Dag;
 use crate::DagBuilder;
@@ -94,45 +92,65 @@ impl From<ExampleError> for ActionError {
     }
 }
 
-/// Create an ActionRegistry for use with the Saga DAG
+mod actions {
+    use super::ExampleSagaType;
+    use crate::new_action_noop_undo;
+    use crate::Action;
+    use lazy_static::lazy_static;
+    use std::sync::Arc;
+
+    lazy_static! {
+        pub static ref INSTANCE_CREATE: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "instance_create",
+                super::demo_prov_instance_create,
+            );
+        pub static ref VPC_ALLOC_IP: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo("vpc_alloc_ip", super::demo_prov_vpc_alloc_ip);
+        pub static ref VOLUME_CREATE: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "volume_create",
+                super::demo_prov_volume_create,
+            );
+        pub static ref INSTANCE_CONFIGURE: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "instance_configure",
+                super::demo_prov_instance_configure,
+            );
+        pub static ref VOLUME_ATTACH: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "volume_attach",
+                super::demo_prov_volume_attach,
+            );
+        pub static ref INSTANCE_BOOT: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "instance_boot",
+                super::demo_prov_instance_boot,
+            );
+        pub static ref PRINT: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo("print", super::demo_prov_print);
+        pub static ref SERVER_PICK: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo("server_pick", super::demo_prov_server_pick);
+        pub static ref SERVER_RESERVE: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "server_reserve",
+                super::demo_prov_server_reserve,
+            );
+    }
+}
+
+/// Load our actions into an ActionRegistry
 #[doc(hidden)]
-pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
-    let mut registry = ActionRegistry::new();
-
-    registry.register(new_action_noop_undo(
-        "instance_create",
-        demo_prov_instance_create,
-    ));
-    registry
-        .register(new_action_noop_undo("vpc_alloc_ip", demo_prov_vpc_alloc_ip));
-    registry.register(new_action_noop_undo(
-        "volume_create",
-        demo_prov_volume_create,
-    ));
-    registry.register(new_action_noop_undo(
-        "instance_configure",
-        demo_prov_instance_configure,
-    ));
-    registry.register(new_action_noop_undo(
-        "volume_attach",
-        demo_prov_volume_attach,
-    ));
-    registry.register(new_action_noop_undo(
-        "instance_boot",
-        demo_prov_instance_boot,
-    ));
-    registry.register(new_action_noop_undo("print", demo_prov_print));
-
-    // Subsaga actions are registered just like any other action
-    // The order of registration doesn't matter
-    registry
-        .register(new_action_noop_undo("server_pick", demo_prov_server_pick));
-    registry.register(new_action_noop_undo(
-        "server_reserve",
-        demo_prov_server_reserve,
-    ));
-
-    Arc::new(registry)
+pub fn load_example_actions(registry: &mut ActionRegistry<ExampleSagaType>) {
+    registry.register(actions::INSTANCE_CREATE.clone());
+    registry.register(actions::VPC_ALLOC_IP.clone());
+    registry.register(actions::VOLUME_CREATE.clone());
+    registry.register(actions::INSTANCE_CONFIGURE.clone());
+    registry.register(actions::VOLUME_ATTACH.clone());
+    registry.register(actions::INSTANCE_BOOT.clone());
+    registry.register(actions::PRINT.clone());
+    registry.register(actions::SERVER_PICK.clone());
+    registry.register(actions::SERVER_RESERVE.clone());
 }
 
 /// Create a subsaga for server allocation
@@ -144,12 +162,12 @@ fn server_alloc_subsaga() -> Dag {
     d.append(UserNode::action(
         "server_id",
         "ServerPick",
-        ActionName::new("server_pick"),
+        actions::SERVER_PICK.as_ref(),
     ));
     d.append(UserNode::action(
         "server_reserve",
         "ServerReserve",
-        ActionName::new("server_reserve"),
+        actions::SERVER_RESERVE.as_ref(),
     ));
 
     d.build()
@@ -169,18 +187,18 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<Dag> {
     d.append(UserNode::action(
         "instance_id",
         "InstanceCreate",
-        ActionName::new("instance_create"),
+        actions::INSTANCE_CREATE.as_ref(),
     ));
     d.append_parallel(vec![
         UserNode::action(
             "instance_ip",
             "VpcAllocIp",
-            ActionName::new("vpc_alloc_ip"),
+            actions::VPC_ALLOC_IP.as_ref(),
         ),
         UserNode::action(
             "volume_id",
             "VolumeCreate",
-            ActionName::new("volume_create"),
+            actions::VOLUME_CREATE.as_ref(),
         ),
     ]);
 
@@ -202,19 +220,19 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<Dag> {
     d.append(UserNode::action(
         "instance_configure",
         "InstanceConfigure",
-        ActionName::new("instance_configure"),
+        actions::INSTANCE_CONFIGURE.as_ref(),
     ));
     d.append(UserNode::action(
         "volume_attach",
         "VolumeAttach",
-        ActionName::new("volume_attach"),
+        actions::VOLUME_ATTACH.as_ref(),
     ));
     d.append(UserNode::action(
         "instance_boot",
         "InstanceBoot",
-        ActionName::new("instance_boot"),
+        actions::INSTANCE_BOOT.as_ref(),
     ));
-    d.append(UserNode::action("print", "Print", ActionName::new("print")));
+    d.append(UserNode::action("print", "Print", actions::PRINT.as_ref()));
 
     Arc::new(d.build())
 }

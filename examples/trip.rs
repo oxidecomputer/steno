@@ -15,8 +15,6 @@ use slog::Drain;
 use std::sync::Arc;
 use steno::ActionContext;
 use steno::ActionError;
-use steno::ActionFunc;
-use steno::ActionName;
 use steno::ActionRegistry;
 use steno::Dag;
 use steno::DagBuilder;
@@ -62,13 +60,17 @@ async fn book_trip(
 ) {
     // Register the actions to run during saga execution.
     // This is created once for all sagas.
-    let registry = make_trip_action_registry();
+    let registry = {
+        let mut registry = ActionRegistry::new();
+        load_trip_actions(&mut registry);
+        Arc::new(registry)
+    };
 
-    // Build a saga DAG.  The DAG describes the actions that are part
-    // of the saga (including the functions to be invoked to do each of the
-    // steps) and how they depend on each other.  This is dynamically created
-    // for each trip.
-    let dag = make_trip_saga(params);
+    // Build a saga DAG.  The DAG describes the actions that are part of the
+    // saga (including the functions to be invoked to do each of the steps) and
+    // how they depend on each other.  This can be dynamically created for each
+    // trip.
+    let dag = make_trip_dag(params);
 
     // Get ready to execute the saga.
 
@@ -120,44 +122,59 @@ async fn book_trip(
     }
 }
 
-/// Registers all actions for the saga
-fn make_trip_action_registry() -> Arc<ActionRegistry<TripSaga>> {
-    let mut registry = ActionRegistry::new();
+/// Define the actions as globals so that we can easily and type-safely access
+/// them during registration and DAG construction.
+mod actions {
+    use super::TripSaga;
+    use lazy_static::lazy_static;
+    use std::sync::Arc;
+    use steno::Action;
+    use steno::ActionFunc;
 
-    registry.register(ActionFunc::new_action(
-        // action name
-        "payment",
-        // action function
-        saga_charge_card,
-        // undo function
-        saga_refund_card,
-    ));
-
-    registry.register(ActionFunc::new_action(
-        "hotel",
-        saga_book_hotel,
-        saga_cancel_hotel,
-    ));
-
-    registry.register(ActionFunc::new_action(
-        "flight",
-        saga_book_flight,
-        saga_cancel_flight,
-    ));
-
-    registry.register(ActionFunc::new_action(
-        "car",
-        saga_book_car,
-        saga_cancel_car,
-    ));
-
-    Arc::new(registry)
+    lazy_static! {
+        pub static ref PAYMENT: Arc<dyn Action<TripSaga>> =
+            ActionFunc::new_action(
+                "payment",
+                super::saga_charge_card,
+                super::saga_refund_card
+            );
+        pub static ref HOTEL: Arc<dyn Action<TripSaga>> =
+            ActionFunc::new_action(
+                "hotel",
+                super::saga_book_hotel,
+                super::saga_cancel_hotel
+            );
+        pub static ref FLIGHT: Arc<dyn Action<TripSaga>> =
+            ActionFunc::new_action(
+                "flight",
+                super::saga_book_flight,
+                super::saga_cancel_flight
+            );
+        pub static ref CAR: Arc<dyn Action<TripSaga>> = ActionFunc::new_action(
+            "car",
+            super::saga_book_car,
+            super::saga_cancel_car
+        );
+    }
 }
 
-/// Builds the saga DAG to book a trip. The builder methods describes the actions
-/// that are part of the saga (including the functions to be invoked to do each
-/// of the steps) and how they depend on each other.
-fn make_trip_saga(params: TripParams) -> Arc<Dag> {
+/// Load our actions into an ActionRegistry
+///
+/// This step is separate from building the DAG because if we implement saga
+/// recovery (i.e., resuming sagas after a crash), we need to register the
+/// actions but we don't need to build a new DAG.
+fn load_trip_actions(registry: &mut ActionRegistry<TripSaga>) {
+    registry.register(actions::PAYMENT.clone());
+    registry.register(actions::HOTEL.clone());
+    registry.register(actions::FLIGHT.clone());
+    registry.register(actions::CAR.clone());
+}
+
+/// Build the DAG for booking a trip
+fn make_trip_dag(params: TripParams) -> Arc<Dag> {
+    // The builder methods describes the actions that are part of the saga
+    // (including the functions to be invoked to do each of the steps) and how
+    // they depend on each other.
     let name = SagaName::new("book-trip");
     let mut builder = DagBuilder::new(name, params);
 
@@ -171,15 +188,16 @@ fn make_trip_saga(params: TripParams) -> Arc<Dag> {
         "payment",
         // human-readable label for the action
         "ChargeCreditCard",
-        // The name of the action to run. This is the lookup key in the
-        // ActionRegistry.
-        ActionName::new("payment"),
+        // The name of the action to run. This can be either a &dyn Action or a
+        // literal `ActionName`.  Either way, the named action must appear in
+        // the action registry.
+        actions::PAYMENT.as_ref(),
     ));
 
     builder.append_parallel(vec![
-        UserNode::action("hotel", "BookHotel", ActionName::new("hotel")),
-        UserNode::action("flight", "BookFlight", ActionName::new("flight")),
-        UserNode::action("car", "BookCar", ActionName::new("car")),
+        UserNode::action("hotel", "BookHotel", actions::HOTEL.as_ref()),
+        UserNode::action("flight", "BookFlight", actions::FLIGHT.as_ref()),
+        UserNode::action("car", "BookCar", actions::CAR.as_ref()),
     ]);
 
     Arc::new(builder.build())
@@ -203,12 +221,12 @@ struct TripParams {
 // easy for us to access application-specific state, like a logger, HTTP
 // clients, etc.
 #[derive(Debug)]
-struct TripContext;
+pub struct TripContext;
 
 // Steno uses several type parameters that you specify by impl'ing the SagaType
 // trait.
 #[derive(Debug)]
-struct TripSaga;
+pub struct TripSaga;
 impl SagaType for TripSaga {
     // Type for the application-specific context (see above)
     type ExecContextType = Arc<TripContext>;

@@ -209,16 +209,16 @@ enum UserNodeKind {
 }
 
 impl UserNode {
-    pub fn action<N: AsRef<str>, L: AsRef<str>, A: Into<ActionName>>(
+    pub fn action<N: AsRef<str>, L: AsRef<str>, A: SagaType>(
         node_name: N,
         label: L,
-        action_name: A,
+        action: &dyn Action<A>,
     ) -> UserNode {
         UserNode {
             node_name: NodeName::new(node_name),
             kind: UserNodeKind::Action {
                 label: label.as_ref().to_string(),
-                action_name: action_name.into(),
+                action_name: action.name(),
             },
         }
     }
