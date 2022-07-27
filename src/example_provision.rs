@@ -293,10 +293,6 @@ async fn demo_prov_instance_configure(
 
     let params = sgctx.saga_params::<ExampleParams>()?;
     assert_eq!(params.number_of_instances, 1);
-    // Allocated by the subsaga. We know there is only one instance by looking
-    // at the params. In cases with more subsagas we could loop over them. For
-    // this example we decided to start the counting at 1 just to differentiate
-    // the instance ids of the parent and child sagas.
     assert_eq!(
         sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id,
         1212

@@ -433,7 +433,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             node_outputs: BTreeMap::new(),
             nodes_undone: BTreeMap::new(),
             node_errors: BTreeMap::new(),
-            child_sagas: BTreeMap::new(),
             sglog,
             injected_errors: BTreeSet::new(),
             sec_hdl,
@@ -1339,33 +1338,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             let mut nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>> =
                 BTreeMap::new();
             let mut node_exec_states = BTreeMap::new();
-            let mut child_sagas = BTreeMap::new();
 
             let graph = &self.dag.graph;
             let topo_visitor = Topo::new(graph);
             for node in topo_visitor.iter(graph) {
                 /* Record the current execution state for this node. */
                 node_exec_states.insert(node, live_state.node_exec_state(node));
-
-                /*
-                 * If there's a child saga for this node, construct its status.
-                 */
-                if let Some(child_ids) = live_state.child_sagas.get(&node) {
-                    /*
-                     * TODO-correctness check lock order.  This seems okay
-                     * because we always take locks from parent -> child and
-                     * there cannot be cycles.
-                     */
-                    let mut statuses = Vec::new();
-                    for c in child_ids {
-                        let child_view =
-                            live_state.sec_hdl.saga_get(*c).await.unwrap();
-                        statuses.push(child_view.state.status().clone());
-                    }
-                    child_sagas
-                        .insert(node, statuses)
-                        .expect_none("duplicate child status");
-                }
 
                 /*
                  * Compute the node's depth.  This must be 0 (already stored
@@ -1460,9 +1438,6 @@ struct SagaExecLiveState<UserType: SagaType> {
     nodes_undone: BTreeMap<NodeIndex, UndoMode>,
     /** Errors produced by failed actions. */
     node_errors: BTreeMap<NodeIndex, ActionError>,
-
-    /** Child sagas created by a node (for status and control) */
-    child_sagas: BTreeMap<NodeIndex, Vec<SagaId>>,
 
     /** Persistent state */
     sglog: SagaLog,
