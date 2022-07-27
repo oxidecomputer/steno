@@ -10,10 +10,7 @@ use crate::ActionName;
 use crate::ActionRegistry;
 use crate::Dag;
 use crate::DagBuilder;
-use crate::NodeConcurrency;
-use crate::NodeSpec;
 use crate::SagaName;
-use crate::SagaSpec;
 use crate::SagaType;
 use crate::UserNode;
 use serde::Deserialize;
@@ -138,19 +135,20 @@ pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
 pub fn server_alloc_subsaga() -> Dag {
     // XXX-dap the "params" here is unused because this is a subsaga
     let params = ();
-    SagaSpec(vec![NodeConcurrency::Linear(vec![
-        NodeSpec {
-            name: "server_id",
-            label: "ServerPick",
-            action: "server_pick",
-        },
-        NodeSpec {
-            name: "server_reserve",
-            label: "ServerReserve",
-            action: "server_reserve",
-        },
-    ])])
-    .to_dag(SagaName::new("server-alloc"), params)
+    let name = SagaName::new("server-alloc");
+    let mut d = DagBuilder::new(name, params);
+    d.append(UserNode::action(
+        "server_id",
+        "ServerPick",
+        ActionName::new("server_pick"),
+    ));
+    d.append(UserNode::action(
+        "server_reserve",
+        "ServerReserve",
+        ActionName::new("server_reserve"),
+    ));
+
+    d.build()
 }
 
 /// Create a dag that describes a "VM Provision" Saga
@@ -163,8 +161,6 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<Dag> {
     let name = SagaName::new("DemoVmProvision");
     let mut d = DagBuilder::new(name, params);
 
-    // The saga instance Id (not related to VM instance)
-    // TODO(AJS): Name this something else?
     d.append(UserNode::action(
         "instance_id",
         "InstanceCreate",

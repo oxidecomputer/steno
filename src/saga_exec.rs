@@ -1059,7 +1059,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         live_state: &SagaExecLiveState<UserType>,
         node_index: NodeIndex,
     ) -> Arc<dyn Action<UserType>> {
-        // TODO(AJS) - don't unwrap
         let registry = &live_state.action_registry;
         let dag = &self.dag;
         match dag.get(node_index).unwrap() {
