@@ -1447,8 +1447,8 @@ impl TryFrom<SagaSerialized> for SagaLog {
 mod test {
     use super::*;
     use crate::{
-        ActionContext, ActionError, ActionFunc, ActionName, DagBuilder, Node,
-        SagaId, SagaName,
+        ActionContext, ActionError, ActionFunc, ActionName, DagBuilder, SagaId,
+        SagaName, UserNode,
     };
     use serde::{Deserialize, Serialize};
     use slog::Drain;
@@ -1534,7 +1534,7 @@ mod test {
 
         let mut builder =
             DagBuilder::new(SagaName::new("test-saga"), TestParams {});
-        builder.append(Node::new_child(
+        builder.append(UserNode::action(
             "n1_out",
             "n1",
             ActionName::new("n1_out"),

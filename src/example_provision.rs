@@ -10,12 +10,12 @@ use crate::ActionName;
 use crate::ActionRegistry;
 use crate::Dag;
 use crate::DagBuilder;
-use crate::Node;
 use crate::NodeConcurrency;
 use crate::NodeSpec;
 use crate::SagaName;
 use crate::SagaSpec;
 use crate::SagaType;
+use crate::UserNode;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -165,18 +165,18 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<Dag> {
 
     // The saga instance Id (not related to VM instance)
     // TODO(AJS): Name this something else?
-    d.append(Node::new_child(
+    d.append(UserNode::action(
         "instance_id",
         "InstanceCreate",
         ActionName::new("instance_create"),
     ));
     d.append_parallel(vec![
-        Node::new_child(
+        UserNode::action(
             "instance_ip",
             "VpcAllocIp",
             ActionName::new("vpc_alloc_ip"),
         ),
-        Node::new_child(
+        UserNode::action(
             "volume_id",
             "VolumeCreate",
             ActionName::new("volume_create"),
@@ -190,30 +190,30 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<Dag> {
     // subsaga.  Do we need/want to enable that?
     // XXX-dap yes I think so
     let subsaga_params = ExampleSubsagaParams { number_of_things: 1 };
-    d.append(Node::new_constant("server_alloc_params", subsaga_params));
-    d.append_subsaga(
+    d.append(UserNode::constant("server_alloc_params", subsaga_params));
+    d.append(UserNode::subsaga(
         "server_alloc",
-        &server_alloc_subsaga(),
+        server_alloc_subsaga(),
         "server_alloc_params",
-    );
+    ));
 
     // Append nodes that will run after the subsaga completes
-    d.append(Node::new_child(
+    d.append(UserNode::action(
         "instance_configure",
         "InstanceConfigure",
         ActionName::new("instance_configure"),
     ));
-    d.append(Node::new_child(
+    d.append(UserNode::action(
         "volume_attach",
         "VolumeAttach",
         ActionName::new("volume_attach"),
     ));
-    d.append(Node::new_child(
+    d.append(UserNode::action(
         "instance_boot",
         "InstanceBoot",
         ActionName::new("instance_boot"),
     ));
-    d.append(Node::new_child("print", "Print", ActionName::new("print")));
+    d.append(UserNode::action("print", "Print", ActionName::new("print")));
 
     Arc::new(d.build())
 }

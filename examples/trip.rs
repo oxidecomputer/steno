@@ -20,11 +20,11 @@ use steno::ActionName;
 use steno::ActionRegistry;
 use steno::Dag;
 use steno::DagBuilder;
-use steno::Node;
 use steno::SagaId;
 use steno::SagaName;
 use steno::SagaType;
 use steno::SecClient;
+use steno::UserNode;
 use uuid::Uuid;
 
 // This is where we're going: this program will collect payment and book a whole
@@ -114,7 +114,7 @@ async fn book_trip(
             );
         }
         Err(error) => {
-            println!("action failed: {}", error.error_node_name);
+            println!("action failed: {}", error.error_node_name.as_ref());
             println!("error: {}", error.error_source);
         }
     }
@@ -166,7 +166,7 @@ fn make_trip_saga(params: TripParams) -> Arc<Dag> {
     // parallel, or all sequentially, and the saga would still be correct, since
     // Steno guarantees that eventually either all actions will succeed or all
     // executed actions will be undone.
-    builder.append(Node::new_child(
+    builder.append(UserNode::action(
         // name of this action's output (can be used in subsequent actions)
         "payment",
         // human-readable label for the action
@@ -177,9 +177,9 @@ fn make_trip_saga(params: TripParams) -> Arc<Dag> {
     ));
 
     builder.append_parallel(vec![
-        Node::new_child("hotel", "BookHotel", ActionName::new("hotel")),
-        Node::new_child("flight", "BookFlight", ActionName::new("flight")),
-        Node::new_child("car", "BookCar", ActionName::new("car")),
+        UserNode::action("hotel", "BookHotel", ActionName::new("hotel")),
+        UserNode::action("flight", "BookFlight", ActionName::new("flight")),
+        UserNode::action("car", "BookCar", ActionName::new("car")),
     ]);
 
     Arc::new(builder.build())

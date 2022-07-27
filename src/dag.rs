@@ -154,6 +154,84 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
     }
 }
 
+/// Describes a node in the saga graph
+///
+/// There are three kinds of nodes you can add to a graph:
+///
+/// * an _action_ (see [`UserNode::action`]), which executes a particular
+///   [`Action`] with an associated undo action
+/// * a _constant_ (see [`UserNode::constant`]), which is like an action that
+///   outputs a value that's known when the DAG is constructed
+/// * a _subsaga_ (see [`UserNode::subsaga`]), which executes another DAG in the
+///   context of this saga
+///
+/// Each of these node types has a `node_name` and produces an output.  Other
+/// nodes that depend on this node (directly or indirectly) can access the
+/// output by looking it up by the node name using
+/// [`crate::ActionContext::lookup`]:
+///
+/// * The output of an action node is emitted by the action itself.
+/// * The output of a constant node is the value provided when the node was
+///   created (see [`UserNode::constant`]).
+/// * The output of a subsaga node is the output of the subsaga itself.  Note
+///   that the output of individual nodes from the subsaga DAG is _not_
+///   available to other nodes in this DAG.  Only the final output is available.
+#[derive(Debug, Clone)]
+pub struct UserNode {
+    node_name: NodeName,
+    kind: UserNodeKind,
+}
+
+#[derive(Debug, Clone)]
+enum UserNodeKind {
+    Action { label: String, action_name: ActionName },
+    Constant { value: serde_json::Value },
+    Subsaga { params_node_name: NodeName, dag: Dag },
+}
+
+impl UserNode {
+    pub fn action<N: AsRef<str>, L: AsRef<str>, A: Into<ActionName>>(
+        node_name: N,
+        label: L,
+        action_name: A,
+    ) -> UserNode {
+        UserNode {
+            node_name: NodeName::new(node_name),
+            kind: UserNodeKind::Action {
+                label: label.as_ref().to_string(),
+                action_name: action_name.into(),
+            },
+        }
+    }
+
+    pub fn constant<N: AsRef<str>, V: Serialize>(
+        node_name: N,
+        value: V,
+    ) -> UserNode {
+        // XXX-dap unwrap
+        UserNode {
+            node_name: NodeName::new(node_name),
+            kind: UserNodeKind::Constant {
+                value: serde_json::to_value(value).unwrap(),
+            },
+        }
+    }
+
+    pub fn subsaga<N1: AsRef<str>, N2: AsRef<str>>(
+        node_name: N1,
+        dag: Dag,
+        params_node_name: N2,
+    ) -> UserNode {
+        UserNode {
+            node_name: NodeName::new(node_name),
+            kind: UserNodeKind::Subsaga {
+                params_node_name: NodeName::new(params_node_name),
+                dag,
+            },
+        }
+    }
+}
+
 /// A Node in the graph
 ///
 /// Since sagas are constructed dynamically at runtime, we don't know the
@@ -167,45 +245,15 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
 // XXX-dap TODO-doc
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum Node {
-    // XXX don't want the variants to be public
     Start { params: serde_json::Value },
     End,
-    Action { name: NodeName, label: String, action: ActionName },
+    Action { name: NodeName, label: String, action_name: ActionName },
     Constant { name: NodeName, value: serde_json::Value },
     SubsagaStart { saga_name: SagaName, params_node_name: NodeName },
     SubsagaEnd { name: NodeName },
 }
 
 impl Node {
-    /// Create a new child node for a saga or subsaga
-    pub fn new_child<S1: AsRef<str>, S2: AsRef<str>, A: Into<ActionName>>(
-        name: S1,
-        label: S2,
-        action: A,
-    ) -> Node {
-        Node::Action {
-            name: NodeName::new(name),
-            label: label.as_ref().to_string(),
-            action: action.into(),
-        }
-    }
-
-    /**
-     * Create a node that emits a constant value (known when the saga is created)
-     *
-     * Why would you want this?  Suppose you're working with some saga action
-     * that expects input to come from some previous saga node.  But in your
-     * case, you know the input up front.  You can use this to provide the value
-     * to the downstream action.
-     */
-    pub fn new_constant<S: AsRef<str>, T: ActionData>(
-        name: S,
-        value: T,
-    ) -> Node {
-        let value = serde_json::to_value(value).unwrap(); // XXX-dap
-        Node::Constant { name: NodeName::new(name), value }
-    }
-
     pub fn name(&self) -> Option<&NodeName> {
         match self {
             Node::Start { .. } | Node::End | Node::SubsagaStart { .. } => None,
@@ -312,72 +360,67 @@ impl DagBuilder {
     /// the last call to `append` or `append_parallel`.  (The idea is to `append`
     /// a sequence of steps that run one after another.)
     ///
-    /// `action` will be used when this node is being executed.
-    ///
-    /// The node is called `name`. This name is used along with `instance_id`
-    /// for storing the output of the action so that descendant nodes can
-    /// access it using [`crate::ActionContext::lookup`].
-    ///
-    /// The instance id is useful because there may be many subsagas of the same
-    /// type that run as part of the main saga. Each one of nodes in each subsaga
-    /// will only want to access data from its own nodes, and a common name for
-    /// those nodes is not enough to distinguish them across sagas. Furthermore,
-    /// instance ids allow the parent saga to identify data generated from
-    /// different subsagas.
-    pub fn append(&mut self, node: Node) {
+    pub fn append(&mut self, user_node: UserNode) {
+        let newnodes = &[self.add_node(user_node)];
+        self.set_last(newnodes);
+    }
+
+    fn add_node(&mut self, user_node: UserNode) -> NodeIndex {
+        match user_node.kind {
+            UserNodeKind::Action { label, action_name } => {
+                self.add_simple(Node::Action {
+                    name: user_node.node_name,
+                    label,
+                    action_name,
+                })
+            }
+            UserNodeKind::Constant { value } => {
+                self.add_simple(Node::Constant {
+                    name: user_node.node_name,
+                    value,
+                })
+            }
+            UserNodeKind::Subsaga { params_node_name, dag } => {
+                self.add_subsaga(user_node.node_name, dag, params_node_name)
+            }
+        }
+    }
+
+    // XXX-dap TODO-doc The add_* functions add graph nodes, add dependencies
+    // from "last", but do not _set_ "last".  They return a NodeIndex of the
+    // last thing they added.
+
+    /// Appends a `Node::Constant` or `Node::Action` to the graph
+    fn add_simple(&mut self, node: Node) -> NodeIndex {
+        assert!(matches!(node, Node::Constant { .. } | Node::Action { .. }));
         let newnode = self.graph.add_node(node);
+        self.depends_on_last(newnode);
+        newnode
+    }
+
+    fn depends_on_last(&mut self, newnode: NodeIndex) {
         for node in &self.last_added {
             self.graph.add_edge(*node, newnode, ());
         }
-
-        self.last_added = vec![newnode];
     }
 
-    /// Adds a set of nodes to the graph that can be executed concurrently
-    ///
-    /// The new nodes will individually depend on completion of all actions that
-    /// were added in the last call to `append` or `append_parallel`.  `actions`
-    /// is a vector of `(name, action)` tuples analogous to the arguments to
-    /// [`DagBuilder::append`].
-    pub fn append_parallel(&mut self, nodes: Vec<Node>) {
-        let newnodes: Vec<NodeIndex> =
-            nodes.into_iter().map(|node| self.graph.add_node(node)).collect();
-
-        // TODO-design For this exploration, we assume that any nodes appended
-        // after a parallel set are intended to depend on _all_ nodes in the
-        // parallel set.  This doesn't have to be the case in general, but if
-        // you wanted to do something else, you probably would need pretty
-        // fine-grained control over the construction of the graph.  This is
-        // mostly a question of how to express the construction of the graph,
-        // not the graph itself nor how it gets processed, so let's defer for
-        // now.
-        //
-        // Even given that, it might make more sense to implement this by
-        // creating an intermediate node that all the parallel nodes have edges
-        // to, and then edges from this intermediate node to the next set of
-        // parallel nodes.
-        for node in &self.last_added {
-            for newnode in &newnodes {
-                self.graph.add_edge(*node, *newnode, ());
-            }
-        }
-
-        self.last_added = newnodes;
+    fn set_last(&mut self, nodes: &[NodeIndex]) {
+        self.last_added = nodes.to_vec();
     }
 
     /// Append another DAG to this one (insert a subsaga)
-    // TODO: We probably want an `append_parallel_subsaga` that allows us to
-    // link all subsagas to the `last_added` nodes in a parallel fashion.
-    pub fn append_subsaga(
+    fn add_subsaga(
         &mut self,
-        name: &str,
-        subsaga: &Dag,
-        params_node_name: &str,
-    ) {
-        self.append(Node::SubsagaStart {
+        name: NodeName,
+        subsaga: Dag,
+        params_node_name: NodeName,
+    ) -> NodeIndex {
+        let node_start = Node::SubsagaStart {
             saga_name: subsaga.name.clone(),
             params_node_name: NodeName::new(params_node_name),
-        });
+        };
+        let subsaga_start = self.graph.add_node(node_start);
+        self.depends_on_last(subsaga_start);
 
         // Insert all the nodes of the subsaga into this saga.
         let subgraph = &subsaga.graph;
@@ -395,7 +438,7 @@ impl DagBuilder {
             // Other nodes are copied directly into the parent graph.
             // XXX-dap TODO-cleanup make this an exhaustive match
             let node = if let Node::End = node {
-                Node::SubsagaEnd { name: NodeName::new(name) }
+                Node::SubsagaEnd { name: name.clone() }
             } else {
                 node.clone()
             };
@@ -448,7 +491,37 @@ impl DagBuilder {
         let end_parent_node_index = subsaga_idx_to_saga_idx
             .get(&end_child_node_index)
             .expect("end node was not processed");
-        self.last_added = vec![*end_parent_node_index];
+        *end_parent_node_index
+    }
+
+    /// Adds a set of nodes to the graph that can be executed concurrently
+    ///
+    /// The new nodes will individually depend on completion of all actions that
+    /// were added in the last call to `append` or `append_parallel`.  `actions`
+    /// is a vector of `(name, action)` tuples analogous to the arguments to
+    /// [`DagBuilder::append`].
+    pub fn append_parallel(&mut self, user_nodes: Vec<UserNode>) {
+        let newnodes: Vec<NodeIndex> = user_nodes
+            .into_iter()
+            .map(|user_node| self.add_node(user_node))
+            .collect();
+
+        // XXX-dap TODO-coverage test two sagas in parallel
+
+        // TODO-design For this exploration, we assume that any nodes appended
+        // after a parallel set are intended to depend on _all_ nodes in the
+        // parallel set.  This doesn't have to be the case in general, but if
+        // you wanted to do something else, you probably would need pretty
+        // fine-grained control over the construction of the graph.  This is
+        // mostly a question of how to express the construction of the graph,
+        // not the graph itself nor how it gets processed, so let's defer for
+        // now.
+        //
+        // Even given that, it might make more sense to implement this by
+        // creating an intermediate node that all the parallel nodes have edges
+        // to, and then edges from this intermediate node to the next set of
+        // parallel nodes.
+        self.set_last(&newnodes);
     }
 
     /// Return the constructed DAG
@@ -523,7 +596,7 @@ impl<'a> SagaSpec<'a> {
             match concurrency {
                 NodeConcurrency::Linear(specs) => {
                     for spec in specs {
-                        builder.append(Node::new_child(
+                        builder.append(UserNode::action(
                             spec.name,
                             spec.label,
                             spec.action,
@@ -534,7 +607,7 @@ impl<'a> SagaSpec<'a> {
                     let nodes = specs
                         .iter()
                         .map(|spec| {
-                            Node::new_child(spec.name, spec.label, spec.action)
+                            UserNode::action(spec.name, spec.label, spec.action)
                         })
                         .collect();
                     builder.append_parallel(nodes);

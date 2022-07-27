@@ -1063,7 +1063,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let registry = &live_state.action_registry;
         let dag = &self.dag;
         match dag.get(node_index).unwrap() {
-            Node::Action { action, .. } => {
+            Node::Action { action_name: action, .. } => {
                 registry.get(action).expect("missing action for node")
             }
 
@@ -1609,14 +1609,16 @@ impl SagaResultOk {
      */
     pub fn lookup_output<T: ActionData + 'static>(
         &self,
-        name: &NodeName,
+        name: &str,
     ) -> Result<T, ActionError> {
-        let output_json = self.node_outputs.get(&name).unwrap_or_else(|| {
-            panic!(
-                "node with name \"{}\": not part of this saga",
-                name.as_ref()
-            )
-        });
+        let key = NodeName::new(name);
+        let output_json =
+            self.node_outputs.get(&key).unwrap_or_else(|| {
+                panic!(
+                    "node with name \"{}\": not part of this saga",
+                    key.as_ref(),
+                )
+            });
         // TODO-cleanup double-asterisk seems odd?
         serde_json::from_value((**output_json).clone())
             .map_err(ActionError::new_deserialize)
