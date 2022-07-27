@@ -506,11 +506,6 @@ impl DagBuilder {
             let child_node_index = NodeIndex::from(child_node_index as u32);
             let node = subgraph.node_weight(child_node_index).unwrap();
 
-            // Skip the start node -- we handled that cleanly above.
-            if let Node::Start { .. } = node {
-                continue;
-            }
-
             // When we get to the end node, we'll add a SubsagaEnd instead.
             // Other nodes are copied directly into the parent graph.
             // XXX-dap TODO-cleanup make this an exhaustive match
@@ -520,7 +515,13 @@ impl DagBuilder {
                 node.clone()
             };
 
-            let parent_node_index = self.graph.add_node(node);
+            // We already appended the start node
+            let parent_node_index = if let Node::Start { .. } = node {
+                subsaga_start
+            } else {
+                self.graph.add_node(node)
+            };
+
             assert!(subsaga_idx_to_saga_idx
                 .insert(child_node_index, parent_node_index)
                 .is_none());
@@ -530,34 +531,12 @@ impl DagBuilder {
             for ancestor_child_node_index in subgraph
                 .neighbors_directed(child_node_index, petgraph::Incoming)
             {
-                let ancestor_child_node =
-                    subgraph.node_weight(ancestor_child_node_index).unwrap();
-                if matches!(ancestor_child_node, Node::Start { .. }) {
-                    continue;
-                }
                 let ancestor_parent_node_index = subsaga_idx_to_saga_idx
                     .get(&ancestor_child_node_index)
                     .expect("graph was not a DAG");
                 self.graph.add_edge(
                     *ancestor_parent_node_index,
                     parent_node_index,
-                    (),
-                );
-            }
-        }
-
-        // Create the edges representing dependencies for the initial node(s) in
-        // the subsaga.  These are the outgoing edges from the subsaga's start
-        // node.
-        for descendent_child_node_index in
-            subgraph.neighbors_directed(subsaga.start_node, petgraph::Outgoing)
-        {
-            if let Some(descendent_parent_node_index) =
-                subsaga_idx_to_saga_idx.get(&descendent_child_node_index)
-            {
-                self.graph.add_edge(
-                    subsaga_start,
-                    *descendent_parent_node_index,
                     (),
                 );
             }
