@@ -75,15 +75,7 @@ where
 }
 
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    JsonSchema,
+    Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 pub struct NodeName(String);
 
@@ -96,6 +88,12 @@ impl NodeName {
 impl AsRef<str> for NodeName {
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+impl fmt::Debug for NodeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!("{:?}", self.0))
     }
 }
 
@@ -381,8 +379,6 @@ impl DagBuilder {
             params_node_name: NodeName::new(params_node_name),
         });
 
-        let subsaga_start = self.last_added.clone();
-
         // Insert all the nodes of the subsaga into this saga.
         let subgraph = &subsaga.graph;
         let mut subsaga_idx_to_saga_idx = BTreeMap::new();
@@ -439,9 +435,11 @@ impl DagBuilder {
             if let Some(descendent_parent_node_index) =
                 subsaga_idx_to_saga_idx.get(&descendent_child_node_index)
             {
-                for s in &subsaga_start {
-                    self.graph.add_edge(*s, *descendent_parent_node_index, ());
-                }
+                self.graph.add_edge(
+                    subsaga_start,
+                    *descendent_parent_node_index,
+                    (),
+                );
             }
         }
 
