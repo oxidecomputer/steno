@@ -70,7 +70,6 @@ pub use saga_action_generic::ActionResult;
 pub use saga_action_generic::SagaType;
 pub use saga_action_generic::UndoResult;
 pub use saga_exec::ActionContext;
-pub use saga_exec::SagaExecManager;
 pub use saga_exec::SagaExecStatus;
 pub use saga_exec::SagaResult;
 pub use saga_exec::SagaResultErr;

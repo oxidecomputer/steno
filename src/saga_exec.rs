@@ -1288,8 +1288,13 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             let (error_node_id, error_source) =
                 live_state.node_errors.iter().next().unwrap();
             // XXX-dap error condition
-            let error_node_name =
-                self.dag.get(*error_node_id).unwrap().name().unwrap().clone();
+            let error_node_name = self
+                .dag
+                .get(*error_node_id)
+                .unwrap()
+                .node_name()
+                .unwrap()
+                .clone();
             return SagaResult {
                 saga_id: self.saga_id,
                 saga_log: live_state.sglog.clone(),
@@ -1305,7 +1310,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .node_outputs
             .iter()
             .filter_map(|(node_id, node_output)| {
-                self.dag.get(*node_id).unwrap().name().map(|node_name| {
+                self.dag.get(*node_id).unwrap().node_name().map(|node_name| {
                     (node_name.clone(), Arc::clone(node_output))
                 })
             })
@@ -1700,7 +1705,7 @@ impl SagaExecStatus {
             )?;
             let mklabel = |node| {
                 let node = self.dag.get(node).unwrap();
-                if let Some(name) = node.name() {
+                if let Some(name) = node.node_name() {
                     format!("{} (produces {:?})", node.label(), name)
                 } else {
                     node.label()
@@ -1834,10 +1839,9 @@ fn recovery_validate_parent(
 
 /**
  * Action's handle to the saga subsystem
- *
- * Any APIs that are useful for actions should hang off this object.  It should
- * have enough state to know which node is invoking the API.
  */
+// Any APIs that are useful for actions should hang off this object.  It should
+// have enough state to know which node is invoking the API.
 pub struct ActionContext<UserType: SagaType> {
     ancestor_tree: Arc<BTreeMap<NodeName, Arc<serde_json::Value>>>,
     node_id: NodeIndex,
@@ -1849,11 +1853,8 @@ pub struct ActionContext<UserType: SagaType> {
 impl<UserType: SagaType> ActionContext<UserType> {
     /**
      * Retrieves a piece of data stored by a previous (ancestor) node in the
-     * current saga.  The data is identified by `name` and `instance_id`.
-     *
-     * The instance id is necessary to identify the output of the same action
-     * from different subsagas.
-     *
+     * current saga.  The data is identified by `name`, the name of the ancestor
+     * node.
      *
      * # Panics
      *
@@ -1970,8 +1971,7 @@ pub trait SagaExecManager: fmt::Debug + Send + Sync {
      * Replaces the action at the specified node with one that just generates an
      * error
      *
-     * See [`SagaTemplateMetadata::node_for_name`] to get the node_id for a
-     * node.
+     * See [`Dag::get_index()`] to get the node_id for a node.
      */
     fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()>;
 }

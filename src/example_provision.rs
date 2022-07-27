@@ -43,18 +43,21 @@ use thiserror::Error;
  *          boot instance
  */
 
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct ExampleSagaType {}
 impl SagaType for ExampleSagaType {
     type ExecContextType = ExampleContext;
 }
 
+#[doc(hidden)]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ExampleParams {
     pub instance_name: String,
     pub number_of_instances: u16,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct ExampleContext;
 
@@ -92,6 +95,7 @@ impl From<ExampleError> for ActionError {
 }
 
 /// Create an ActionRegistry for use with the Saga DAG
+#[doc(hidden)]
 pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
     let mut registry = ActionRegistry::new();
 
@@ -131,8 +135,8 @@ pub fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
     Arc::new(registry)
 }
 
-// Create a subsaga for server allocation
-pub fn server_alloc_subsaga() -> Dag {
+/// Create a subsaga for server allocation
+fn server_alloc_subsaga() -> Dag {
     // XXX-dap the "params" here is unused because this is a subsaga
     let params = ();
     let name = SagaName::new("server-alloc");
@@ -151,12 +155,13 @@ pub fn server_alloc_subsaga() -> Dag {
     d.build()
 }
 
-/// Create a dag that describes a "VM Provision" Saga
+/// Create a dag that describes a demo "VM Provision" Saga
 ///
 /// The actions in this saga do essentially nothing. They print out what
 /// node is running, they produce some data, and they consume some data
 /// from previous nodes. The intent is just to exercise the API. You can
 /// interact with this  using the `demo-provision` example.
+#[doc(hidden)]
 pub fn make_example_provision_dag(params: ExampleParams) -> Arc<Dag> {
     let name = SagaName::new("DemoVmProvision");
     let mut d = DagBuilder::new(name, params);

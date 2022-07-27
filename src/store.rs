@@ -12,12 +12,10 @@ use serde::Serialize;
 use std::convert::TryFrom;
 use std::fmt;
 
-/**
- * Interfaces implemented by the Steno consumer to storing saga state and saga
- * log state persistently
- *
- * Correct implementation of these interfaces is critical for crash recovery.
- */
+/// Interfaces implemented by the Steno consumer to storing saga state and saga
+/// log state persistently
+///
+/// Correct implementation of these interfaces is critical for crash recovery.
 #[async_trait]
 pub trait SecStore: fmt::Debug + Send + Sync {
     /**
@@ -53,7 +51,8 @@ pub trait SecStore: fmt::Debug + Send + Sync {
 }
 
 /**
- * Describes what the SecStore needs to store for a persistent saga record.
+ * Describes what an impl of [`SecStore`] needs to store for a persistent saga
+ * record.
  */
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SagaCreateParams {

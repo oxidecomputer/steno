@@ -55,6 +55,7 @@
 
 #![allow(clippy::large_enum_variant)]
 
+use crate::saga_exec::SagaExecManager;
 use crate::saga_exec::SagaExecutor;
 use crate::store::SagaCachedState;
 use crate::store::SagaCreateParams;
@@ -62,7 +63,6 @@ use crate::store::SecStore;
 use crate::ActionError;
 use crate::ActionRegistry;
 use crate::Dag;
-use crate::SagaExecManager;
 use crate::SagaExecStatus;
 use crate::SagaId;
 use crate::SagaLog;
@@ -1076,7 +1076,7 @@ impl Sec {
     ) {
         let log = self.log.new(o!(
             "saga_id" => saga_id.to_string(),
-            "saga_name" => dag.name.0.clone()
+            "saga_name" => dag.name.to_string(),
         ));
         /* TODO-log Figure out the way to log JSON objects to a JSON drain */
         // TODO(AJS) - Get rid of this unwrap?
@@ -1132,7 +1132,7 @@ impl Sec {
     ) {
         let log = self.log.new(o!(
             "saga_id" => saga_id.to_string(),
-            "saga_name" => dag.name.0.clone(),
+            "saga_name" => dag.name.to_string(),
         ));
         /* TODO-log Figure out the way to log JSON objects to a JSON drain */
         // TODO(AJS) - Get rid of this unwrap?
@@ -1424,11 +1424,8 @@ struct SagaDoneData {
     status: SagaExecStatus,
 }
 
-/*
- * Very simple file-based serialization and deserialization, intended only for
- * testing and debugging
- */
-
+/// Simple file-based serialization and deserialization of a whole saga,
+/// intended only for testing and debugging
 #[derive(Deserialize, Serialize)]
 pub struct SagaSerialized {
     pub saga_id: SagaId,
