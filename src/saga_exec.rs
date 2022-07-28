@@ -67,7 +67,7 @@ trait SagaNodeRest<UserType: SagaType>: Send + Sync {
     fn propagate(
         &self,
         exec: &SagaExecutor<UserType>,
-        live_state: &mut SagaExecLiveState<UserType>,
+        live_state: &mut SagaExecLiveState,
     );
     fn log_event(&self) -> SagaNodeEventType;
 }
@@ -80,7 +80,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsDone> {
     fn propagate(
         &self,
         exec: &SagaExecutor<UserType>,
-        live_state: &mut SagaExecLiveState<UserType>,
+        live_state: &mut SagaExecLiveState,
     ) {
         let graph = &exec.dag.graph;
         assert!(!live_state.node_errors.contains_key(&self.node_id));
@@ -136,7 +136,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsFailed> {
     fn propagate(
         &self,
         exec: &SagaExecutor<UserType>,
-        live_state: &mut SagaExecLiveState<UserType>,
+        live_state: &mut SagaExecLiveState,
     ) {
         let graph = &exec.dag.graph;
         assert!(!live_state.node_outputs.contains_key(&self.node_id));
@@ -189,7 +189,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
     fn propagate(
         &self,
         exec: &SagaExecutor<UserType>,
-        live_state: &mut SagaExecLiveState<UserType>,
+        live_state: &mut SagaExecLiveState,
     ) {
         let graph = &exec.dag.graph;
         assert_eq!(live_state.exec_state, SagaCachedState::Unwinding);
@@ -304,7 +304,7 @@ struct TaskParams<UserType: SagaType> {
      * This is used only to update state for status purposes.  We want to avoid
      * any tight coupling between this task and the internal state.
      */
-    live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
+    live_state: Arc<Mutex<SagaExecLiveState>>,
 
     /** id of the graph node whose action we're running */
     node_id: NodeIndex,
@@ -351,6 +351,7 @@ pub struct SagaExecutor<UserType: SagaType> {
     log: slog::Logger,
 
     dag: Arc<SagaDag>,
+    action_registry: Arc<ActionRegistry<UserType>>,
 
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
@@ -361,7 +362,7 @@ pub struct SagaExecutor<UserType: SagaType> {
     /** For each node, the NodeIndex of the start of its saga or subsaga */
     node_saga_start: BTreeMap<NodeIndex, NodeIndex>,
 
-    live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
+    live_state: Arc<Mutex<SagaExecLiveState>>,
     user_context: Arc<UserType::ExecContextType>,
 }
 
@@ -424,7 +425,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
          */
         let forward = !sglog.unwinding();
         let mut live_state = SagaExecLiveState {
-            action_registry: Arc::clone(&registry),
             exec_state: if forward {
                 SagaCachedState::Running
             } else {
@@ -700,6 +700,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             saga_id,
             user_context,
             live_state: Arc::new(Mutex::new(live_state)),
+            action_registry: Arc::clone(&registry),
             node_saga_start,
         })
     }
@@ -716,7 +717,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     fn make_ancestor_tree(
         &self,
         tree: &mut BTreeMap<NodeName, Arc<serde_json::Value>>,
-        live_state: &SagaExecLiveState<UserType>,
+        live_state: &SagaExecLiveState,
         node_index: NodeIndex,
         include_self: bool,
     ) {
@@ -734,7 +735,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     fn make_ancestor_tree_node(
         &self,
         tree: &mut BTreeMap<NodeName, Arc<serde_json::Value>>,
-        live_state: &SagaExecLiveState<UserType>,
+        live_state: &SagaExecLiveState,
         node_index: NodeIndex,
     ) {
         let dag_node = self.dag.get(node_index).unwrap();
@@ -785,7 +786,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     // will be the parameters of the _subsaga_.
     fn saga_params_for(
         &self,
-        live_state: &SagaExecLiveState<UserType>,
+        live_state: &SagaExecLiveState,
         node_index: NodeIndex,
     ) -> Arc<serde_json::Value> {
         let subsaga_start_index = self.node_saga_start[&node_index];
@@ -1027,15 +1028,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         }
     }
 
-    // XXX-dap if the action registry were hanging off self instead of
-    // live_state, we could just accept "self" here.
-    // XXX-dap dag, action registry should not be in live_state
     fn node_action(
         &self,
-        live_state: &SagaExecLiveState<UserType>,
+        live_state: &SagaExecLiveState,
         node_index: NodeIndex,
     ) -> Arc<dyn Action<UserType>> {
-        let registry = &live_state.action_registry;
+        let registry = &self.action_registry;
         let dag = &self.dag;
         match dag.get(node_index).unwrap() {
             Node::Action { action_name: action, .. } => {
@@ -1390,9 +1388,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
  * TODO This would be a good place for a debug log.
  */
 #[derive(Debug)]
-struct SagaExecLiveState<UserType: SagaType> {
-    action_registry: Arc<ActionRegistry<UserType>>,
-
+struct SagaExecLiveState {
     /** Unique identifier for this saga (an execution of a saga template) */
     saga_id: SagaId,
 
@@ -1459,7 +1455,7 @@ impl fmt::Display for NodeExecState {
     }
 }
 
-impl<UserType: SagaType> SagaExecLiveState<UserType> {
+impl SagaExecLiveState {
     /*
      * TODO-design The current implementation does not use explicit state.  In
      * most cases, this made things better than before because each hunk of code
@@ -1876,13 +1872,11 @@ impl From<NodeIndex> for SagaNodeId {
  */
 // TODO Consider how we do map internal node indexes to stable node ids.
 // TODO clean up this interface
-async fn record_now<T>(
-    live_state: &mut SagaExecLiveState<T>,
+async fn record_now(
+    live_state: &mut SagaExecLiveState,
     node: NodeIndex,
     event_type: SagaNodeEventType,
-) where
-    T: SagaType,
-{
+) {
     let saga_id = live_state.saga_id;
     let node_id = node.into();
 
