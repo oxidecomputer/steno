@@ -740,44 +740,48 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         node_index: NodeIndex,
     ) {
         let dag_node = self.dag.get(node_index).unwrap();
-        let next_node_index = match dag_node {
-            InternalNode::Start { .. } | InternalNode::End => Some(node_index),
-            InternalNode::Constant { name, value } => {
-                // XXX-dap validate no duplicates?
-                tree.insert(name.clone(), Arc::new(value.clone()));
-                // XXX-dap clones
-                Some(node_index)
-            }
-            InternalNode::Action { name, .. } => {
-                /*
-                 * If we're in this function, it's because we're looking at the
-                 * ancestor of a node that's currently "Running".  All such
-                 * ancestors must be "Done".  If they had never reached "Done",
-                 * then we should never have started working on the current
-                 * node.  If they were "Done" but moved on to one of the undoing
-                 * states, then that implies we've already finished undoing
-                 * descendants, which would include the current node.
-                 */
-                tree.insert(name.clone(), live_state.node_output(node_index));
-                Some(node_index)
-            }
-            InternalNode::SubsagaEnd { name } => {
-                /*
-                 * If we find a subsaga end node, then we'll emit the output of
-                 * the saga.  Plus, skip up to the start of the containing saga
-                 * so that we don't include outputs from nodes in the subsaga.
-                 */
-                tree.insert(name.clone(), live_state.node_output(node_index));
-                let next_node_index =
-                    self.node_saga_start.get(&node_index).unwrap();
-                Some(*next_node_index)
-            }
 
-            InternalNode::SubsagaStart { .. } => None,
+        // Record any output from the current node.
+        match dag_node {
+            InternalNode::Constant { name, .. }
+            | InternalNode::Action { name, .. }
+            | InternalNode::SubsagaEnd { name, .. } => {
+                let output = live_state.node_output(node_index);
+                let already_found = tree.insert(name.clone(), output);
+                if let Some(_) = already_found {
+                    panic!(
+                        "multiple nodes in the same saga with name {:?}",
+                        name
+                    );
+                }
+            }
+            InternalNode::Start { .. }
+            | InternalNode::End
+            | InternalNode::SubsagaStart { .. } => (),
+        }
+
+        // Figure out where to resume the traversal.
+        let resume_node = match dag_node {
+            InternalNode::SubsagaStart { .. } => {
+                // We were traversing nodes in a subsaga and we're now done.
+                None
+            }
+            InternalNode::SubsagaEnd { .. } => {
+                // We're traversing nodes in a saga that contains a subsaga.
+                // Skip over the subsaga.
+                Some(*self.node_saga_start.get(&node_index).unwrap())
+            }
+            InternalNode::Constant { .. }
+            | InternalNode::Action { .. }
+            | InternalNode::Start { .. }
+            | InternalNode::End => {
+                // Ordinary traversal -- keep going from where we are.
+                Some(node_index)
+            }
         };
 
-        if let Some(next_node_index) = next_node_index {
-            self.make_ancestor_tree(tree, live_state, next_node_index, false);
+        if let Some(resume_node) = resume_node {
+            self.make_ancestor_tree(tree, live_state, resume_node, false);
         }
     }
 
