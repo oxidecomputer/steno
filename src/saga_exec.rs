@@ -746,14 +746,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             InternalNode::Constant { name, .. }
             | InternalNode::Action { name, .. }
             | InternalNode::SubsagaEnd { name, .. } => {
+                // TODO-cleanup This implementation may encounter the same node
+                // twice.  This feels a little sloppy and inefficient.
                 let output = live_state.node_output(node_index);
-                let already_found = tree.insert(name.clone(), output);
-                if let Some(_) = already_found {
-                    panic!(
-                        "multiple nodes in the same saga with name {:?}",
-                        name
-                    );
-                }
+                tree.insert(name.clone(), output);
             }
             InternalNode::Start { .. }
             | InternalNode::End
@@ -797,7 +793,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let subsaga_start_index = self.node_saga_start[&node_index];
         let subsaga_start_node = self.dag.get(subsaga_start_index).unwrap();
         match subsaga_start_node {
-            InternalNode::Start { params } => Arc::new(params.clone()), // XXX-dap clone
+            InternalNode::Start { params } => params.clone(),
             InternalNode::SubsagaStart { params_node_name, .. } => {
                 // TODO-performance We're going to repeat this for every node in
                 // the subsaga.  We may as well cache it somewhere.  The tricky
@@ -1046,7 +1042,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             }
 
             InternalNode::Constant { value, .. } => {
-                Arc::new(ActionConstant::new(value.clone()))
+                Arc::new(ActionConstant::new(Arc::clone(value)))
             }
 
             InternalNode::Start { .. }
@@ -1054,7 +1050,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             | InternalNode::SubsagaStart { .. } => {
                 // These nodes are no-ops in terms of the action that happens at
                 // the node itself.
-                Arc::new(ActionConstant::new(serde_json::Value::Null))
+                Arc::new(ActionConstant::new(Arc::new(serde_json::Value::Null)))
             }
 
             InternalNode::SubsagaEnd { .. } => {
@@ -1079,7 +1075,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     .collect();
                 assert_eq!(ancestors.len(), 1);
                 Arc::new(ActionConstant::new(
-                    (*live_state.node_output(ancestors[0])).clone(),
+                    live_state.node_output(ancestors[0]),
                 ))
             }
         }

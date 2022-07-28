@@ -143,11 +143,11 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
 /// This is used to implement [`UserNode::Constant`].
 #[derive(Debug)]
 pub struct ActionConstant {
-    value: serde_json::Value,
+    value: Arc<serde_json::Value>,
 }
 
 impl ActionConstant {
-    pub fn new(value: serde_json::Value) -> ActionConstant {
+    pub fn new(value: Arc<serde_json::Value>) -> ActionConstant {
         ActionConstant { value }
     }
 }
@@ -157,7 +157,7 @@ where
     UserType: SagaType,
 {
     fn do_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, ActionResult> {
-        Box::pin(futures::future::ok(Arc::new(self.value.clone())))
+        Box::pin(futures::future::ok(self.value.clone()))
     }
 
     fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {

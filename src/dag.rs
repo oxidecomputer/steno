@@ -292,10 +292,10 @@ impl Node {
 /// consisting of `SagaNodeEvent`s.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum InternalNode {
-    Start { params: serde_json::Value },
+    Start { params: Arc<serde_json::Value> },
     End,
     Action { name: NodeName, label: String, action_name: ActionName },
-    Constant { name: NodeName, value: serde_json::Value },
+    Constant { name: NodeName, value: Arc<serde_json::Value> },
     SubsagaStart { saga_name: SagaName, params_node_name: NodeName },
     SubsagaEnd { name: NodeName },
 }
@@ -358,7 +358,8 @@ impl SagaDag {
         // Wrap the DAG with a Start node (which stores the parameters) and an
         // end node so that we can easily tell when the saga has completed.
         let mut graph = dagfrag.graph;
-        let start_node = graph.add_node(InternalNode::Start { params });
+        let start_node =
+            graph.add_node(InternalNode::Start { params: Arc::new(params) });
         let end_node = graph.add_node(InternalNode::End);
 
         // The first-added nodes in the graph depend on the "start" node.
@@ -561,7 +562,7 @@ impl DagBuilder {
             NodeKind::Constant { value } => {
                 self.add_simple(InternalNode::Constant {
                     name: user_node.node_name,
-                    value,
+                    value: Arc::new(value),
                 })
             }
             NodeKind::Subsaga { params_node_name, dag } => {
