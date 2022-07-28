@@ -1097,7 +1097,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     .collect();
                 assert_eq!(ancestors.len(), 1);
                 Arc::new(ActionConstant::new(
-                    live_state.node_output(ancestors[0]),
+                    (*live_state.node_output(ancestors[0])).clone(),
                 ))
             }
         }

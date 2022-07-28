@@ -201,12 +201,9 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<SagaDag> {
         ),
     ]);
 
-    // Take a subsaga spec and add its nodes to the DAG with the given
-    // instance id and parameters.
-    //
-    // TODO: The original code allowed running saga nodes in parallel with a
-    // subsaga.  Do we need/want to enable that?
-    // XXX-dap yes I think so
+    // Take a subsaga spec and add its nodes to the DAG.
+    // XXX-dap TODO-coverage put another node in parallel with the subsaga to
+    // make sure that works.
     let subsaga_params = ExampleSubsagaParams { number_of_things: 1 };
     d.append(UserNode::constant(
         "server_alloc_params",

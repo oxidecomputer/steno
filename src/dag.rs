@@ -246,7 +246,10 @@ impl UserNode {
 
     /// Make a new constant node (see [`UserNode`])
     ///
-    /// This node immediately emits `value`.
+    /// This node immediately emits `value`.  Why would you want this?  Suppose
+    /// you're working with some saga action that expects input to come from
+    /// some previous saga node.  But in your case, you know the input up front.
+    /// You can use this to provide the value to the downstream action.
     pub fn constant<N: AsRef<str>>(
         node_name: N,
         value: serde_json::Value,
@@ -518,8 +521,6 @@ impl DagBuilder {
         if self.first_added.is_none() {
             self.first_added = Some(newnodes.clone());
         }
-
-        // XXX-dap TODO-coverage test two sagas in parallel
 
         // TODO-design For this exploration, we assume that any nodes appended
         // after a parallel set are intended to depend on _all_ nodes in the

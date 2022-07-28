@@ -141,21 +141,14 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
 /// [`Action`] impl that emits a value known when the DAG is created
 ///
 /// This is used to implement [`UserNode::Constant`].
-///
-/// Why would you want this?  Suppose you're working with some saga action that
-/// expects input to come from some previous saga node.  But in your case, you
-/// know the input up front.  You can use this to provide the value to the
-/// downstream action.
 #[derive(Debug)]
 pub struct ActionConstant {
     value: serde_json::Value,
 }
 
 impl ActionConstant {
-    pub fn new<T: ActionData>(v: T) -> ActionConstant {
-        ActionConstant {
-            value: serde_json::to_value(v).unwrap(), // XXX-dap
-        }
+    pub fn new(value: serde_json::Value) -> ActionConstant {
+        ActionConstant { value }
     }
 }
 
