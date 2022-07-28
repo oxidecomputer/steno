@@ -8,6 +8,7 @@ use crate::ActionFuncResult;
 use crate::ActionRegistry;
 use crate::Dag;
 use crate::DagBuilder;
+use crate::SagaDag;
 use crate::SagaName;
 use crate::SagaType;
 use crate::UserNode;
@@ -155,10 +156,8 @@ pub fn load_example_actions(registry: &mut ActionRegistry<ExampleSagaType>) {
 
 /// Create a subsaga for server allocation
 fn server_alloc_subsaga() -> Dag {
-    // XXX-dap the "params" here is unused because this is a subsaga
-    let params = ();
     let name = SagaName::new("server-alloc");
-    let mut d = DagBuilder::new(name, params);
+    let mut d = DagBuilder::new(name);
     d.append(UserNode::action(
         "server_id",
         "ServerPick",
@@ -180,9 +179,9 @@ fn server_alloc_subsaga() -> Dag {
 /// from previous nodes. The intent is just to exercise the API. You can
 /// interact with this  using the `demo-provision` example.
 #[doc(hidden)]
-pub fn make_example_provision_dag(params: ExampleParams) -> Arc<Dag> {
+pub fn make_example_provision_dag(params: ExampleParams) -> Arc<SagaDag> {
     let name = SagaName::new("DemoVmProvision");
-    let mut d = DagBuilder::new(name, params);
+    let mut d = DagBuilder::new(name);
 
     d.append(UserNode::action(
         "instance_id",
@@ -234,7 +233,7 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<Dag> {
     ));
     d.append(UserNode::action("print", "Print", actions::PRINT.as_ref()));
 
-    Arc::new(d.build())
+    Arc::new(SagaDag::new(d.build(), serde_json::to_value(params).unwrap()))
 }
 
 async fn demo_prov_instance_create(

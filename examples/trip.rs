@@ -16,8 +16,8 @@ use std::sync::Arc;
 use steno::ActionContext;
 use steno::ActionError;
 use steno::ActionRegistry;
-use steno::Dag;
 use steno::DagBuilder;
+use steno::SagaDag;
 use steno::SagaId;
 use steno::SagaName;
 use steno::SagaType;
@@ -171,12 +171,12 @@ fn load_trip_actions(registry: &mut ActionRegistry<TripSaga>) {
 }
 
 /// Build the DAG for booking a trip
-fn make_trip_dag(params: TripParams) -> Arc<Dag> {
+fn make_trip_dag(params: TripParams) -> Arc<SagaDag> {
     // The builder methods describes the actions that are part of the saga
     // (including the functions to be invoked to do each of the steps) and how
     // they depend on each other.
     let name = SagaName::new("book-trip");
-    let mut builder = DagBuilder::new(name, params);
+    let mut builder = DagBuilder::new(name);
 
     // Somewhat arbitrarily, we're choosing to charge the credit card first,
     // then make all the bookings in parallel.  We could do these all in
@@ -200,7 +200,10 @@ fn make_trip_dag(params: TripParams) -> Arc<Dag> {
         UserNode::action("car", "BookCar", actions::CAR.as_ref()),
     ]);
 
-    Arc::new(builder.build())
+    Arc::new(SagaDag::new(
+        builder.build(),
+        serde_json::to_value(params).unwrap(),
+    ))
 }
 
 // Implementation of the trip saga

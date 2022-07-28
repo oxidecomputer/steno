@@ -2,10 +2,26 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Construction and Recovery of sagas
+//! Saga and saga DAG construction
+//!
+//! A _saga_ is primarily made up of a directed acylic graph (DAG) of saga
+//! _nodes_, most of which are _actions_.  The facilities in this module are
+//! used to build up sagas.  It looks like this:
+//!
+//! At the lowest layer, we have [`UserNode`]s, which usually describe an
+//! action.  Use [`DagBuilder`] to assemble these into a [`Dag`].  The resulting
+//! `Dag` can be used in one of two ways:
+//!
+//! 1. When combined with parameters for the saga, the `Dag` becomes a
+//!    [`SagaDag`] and can be executed using the [`sec`].
+//! 2. Alternatively, the `Dag` can be used as a _subsaga_ of some other saga.
+//!    To do this, use [`UserNode::subsaga`] to create a subsaga _node_
+//!    containing the subsaga `Dag`, then append this to the [`DagBuilder`]
+//!    that's used to construct the outer saga.
+// Note: The graph-related types here don't implement JSON schema because of
+// Graph and NodeIndex.
 
 use crate::saga_action_generic::Action;
-use crate::saga_action_generic::ActionData;
 use crate::SagaType;
 use anyhow::anyhow;
 use petgraph::dot;
@@ -209,6 +225,11 @@ enum UserNodeKind {
 }
 
 impl UserNode {
+    /// Make a new action node (see [`UserNode`])
+    ///
+    /// This node is used to execute the given action.  The action's output will
+    /// be available to dependent nodes by looking up the name `node_name`.  See
+    /// [`Action`] for more information.
     pub fn action<N: AsRef<str>, L: AsRef<str>, A: SagaType>(
         node_name: N,
         label: L,
@@ -223,6 +244,9 @@ impl UserNode {
         }
     }
 
+    /// Make a new constant node (see [`UserNode`])
+    ///
+    /// This node immediately emits `value`.
     pub fn constant<N: AsRef<str>, V: Serialize>(
         node_name: N,
         value: V,
@@ -236,6 +260,12 @@ impl UserNode {
         }
     }
 
+    /// Make a new subsaga node (see [`UserNode`])
+    ///
+    /// This is used to insert a subsaga into another saga.  The output of the
+    /// subsaga will have name `node_name` in the outer saga.  The subsaga's DAG
+    /// is described by `dag`.  Its input parameters will come from node
+    /// `params_node_name` in the outer saga.
     pub fn subsaga<N1: AsRef<str>, N2: AsRef<str>>(
         node_name: N1,
         dag: Dag,
@@ -300,18 +330,52 @@ impl Node {
     }
 }
 
-/// A directed acyclic graph (DAG) that defines a distributed saga
-//
-// Note: This doesn't implement JSON schema because of Graph and NodeIndex
+/// A [`Dag`] plus saga input parameters that together can be used to execute a
+/// saga
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dag {
-    pub(crate) name: SagaName,
+pub struct SagaDag {
+    /// name of the saga (intended primarily for use by the consumer)
+    pub(crate) saga_name: SagaName,
+    /// the actual DAG representation
+    ///
+    /// Unlike [`Dag`], [`SagaDag`]'s graph can contain any type of [`Node`].
+    /// There is always exactly one [`Node::Start`] node and exactly one
+    /// [`Node::End`] node.  The graph can contain subsagas, which are always
+    /// bracketed by [`Node::SubsagaStart`] and [`Node::SubsagaEnd`] nodes.
     pub(crate) graph: Graph<Node, ()>,
+    /// the index of the [`Node::Start`] node for this Saga
     pub(crate) start_node: NodeIndex,
+    /// the index of the [`Node::End`] node for this Saga
     pub(crate) end_node: NodeIndex,
 }
 
-impl Dag {
+impl SagaDag {
+    /// Make a [`SagaDag`] from the given DAG and input parameters
+    pub fn new(dagfrag: Dag, params: serde_json::Value) -> SagaDag {
+        // Wrap the DAG with a Start node (which stores the parameters) and an
+        // end node so that we can easily tell when the saga has completed.
+        let mut graph = dagfrag.graph;
+        let start_node = graph.add_node(Node::Start { params });
+        let end_node = graph.add_node(Node::End);
+
+        // The first-added nodes in the graph depend on the "start" node.
+        for first_node in &dagfrag.first_nodes {
+            graph.add_edge(start_node, *first_node, ());
+        }
+
+        // The "end" node depends on the last-added nodes in the DAG.
+        for last_node in &dagfrag.last_nodes {
+            graph.add_edge(*last_node, end_node, ());
+        }
+
+        SagaDag {
+            saga_name: dagfrag.saga_name,
+            graph: graph,
+            start_node,
+            end_node,
+        }
+    }
+
     /// Return a node given its index
     pub(crate) fn get(&self, node_index: NodeIndex) -> Option<&Node> {
         self.graph.node_weight(node_index)
@@ -337,7 +401,7 @@ impl Dag {
     }
 }
 
-/// Graphviz-formatted view of a saga graph
+/// Graphviz-formatted view of a saga DAG
 ///
 /// Use the `Display` impl to print a representation suitable as input to
 /// the `dot` command.  You could put this into a file `graph.out` and run
@@ -352,44 +416,84 @@ impl<'a> fmt::Display for DagDot<'a> {
     }
 }
 
-/// Used to define a DAG that can then be executed as a saga
+/// Describes a directed acyclic graph (DAG) to be used as a saga or subsaga
+///
+/// If you want to run this `Dag` as a saga, you need to create a [`SagaDag`]
+/// (which requires providing input parameters).
+///
+/// If you want to insert this `Dag` into another saga (as a subsaga), use
+/// [`UserNode::subsaga()`] to create a subsaga _node_ and append this to the
+/// outer saga's [`DagBuilder`].
+///
+/// This type is built with [`DagBuilder`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dag {
+    /// name of the saga (intended primarily for use by the consumer)
+    saga_name: SagaName,
+
+    /// the actual DAG representation
+    ///
+    /// This graph does *not* contain a [`Node::Start`] or [`Node::End`] node.
+    /// Those only make sense for `Dag`s that will become top-level sagas (as
+    /// opposed to subsagas).  Instead, we keep track of the first group of
+    /// DAG (root nodes) and the last group of DAG nodes (leaf nodes).  Later,
+    /// we'll wrap this `Dag` in either [`SagaDag`] (for use as a top-level
+    /// saga), in which case we'll add the start and end nodes, or we'll use it
+    /// as a subsaga, in which case we'll add SubsagaStart and SubsagaEnd nodes.
+    graph: Graph<Node, ()>,
+
+    /// the initial nodes (root nodes) of the DAG
+    first_nodes: Vec<NodeIndex>,
+
+    /// the last nodes (leaf nodes) of the DAG
+    last_nodes: Vec<NodeIndex>,
+}
+
+/// Used to build a [`Dag`] that can then be executed as either a saga or subsaga
+///
+/// Use [`DagBuilder::append()`] and [`DagBuilder::append_parallel()`] to add
+/// nodes to the graph.  Use [`DagBuilder::build()`] to finish construction and
+/// build a [`Dag`].
 #[derive(Debug)]
 pub struct DagBuilder {
-    name: SagaName,
+    /// name of the saga (intended primarily for use by the consumer)
+    saga_name: SagaName,
+    /// the actual DAG representation
+    ///
+    /// This looks the same as [`Dag`]'s `graph`.
     graph: Graph<Node, ()>,
-    root: NodeIndex,
 
-    // Callers use the builder by appending a sequence of nodes (or subsagas).
-    // Some of these may run concurrently.
-    //
-    // The `append()`/`append_parallel()` functions are public.  As the names
-    // imply, they append new nodes to the graph.  They also update "last_added"
-    // so that the next set of nodes will depend on the ones that were just
-    // added.
-    //
-    // The `add_*()` functions are private, for use only by
-    // `append()`/`append_parallel()`.  These functions have a consistent
-    // pattern: they add nodes to the graph, they create dependencies from
-    // each node in "last_added" to each of the new nodes, and they return the
-    // index of the last node they added.  They do _not_ update "last_added"
-    // themselves.
+    /// the initial set of nodes (root nodes), if any have been added
+    first_added: Option<Vec<NodeIndex>>,
+
+    /// the most-recently-added set of nodes (current leaf nodes)
+    ///
+    /// Callers use the builder by appending a sequence of nodes (or subsagas).
+    /// Some of these may run concurrently.
+    ///
+    /// The `append()`/`append_parallel()` functions are public.  As the names
+    /// imply, they append new nodes to the graph.  They also update "last_added"
+    /// so that the next set of nodes will depend on the ones that were just
+    /// added.
+    ///
+    /// The `add_*()` functions are private, for use only by
+    /// `append()`/`append_parallel()`.  These functions have a consistent
+    /// pattern: they add nodes to the graph, they create dependencies from
+    /// each node in "last_added" to each of the new nodes, and they return the
+    /// index of the last node they added.  They do _not_ update "last_added"
+    /// themselves.
     last_added: Vec<NodeIndex>,
 }
 
 impl DagBuilder {
-    /// Begin building a DAG for a saga
-    pub fn new<T>(name: SagaName, params: T) -> DagBuilder
-    where
-        T: ActionData,
-    {
-        let mut graph = Graph::new();
-
-        // Append a default "start" node.
-        // XXX-dap unwrap
-        let params = serde_json::to_value(params)
-            .expect("failed to serialize saga parameters");
-        let root = graph.add_node(Node::Start { params });
-        DagBuilder { name, graph, root, last_added: vec![root] }
+    /// Begin building a DAG for a saga or subsaga
+    pub fn new(saga_name: SagaName) -> DagBuilder {
+        DagBuilder {
+            saga_name,
+            graph: Graph::new(),
+            first_added: None,
+            last_added: vec![],
+        }
     }
 
     /// Adds a new node to the graph to be run after the most-recently-appended
@@ -414,6 +518,10 @@ impl DagBuilder {
             .map(|user_node| self.add_node(user_node))
             .collect();
 
+        if self.first_added.is_none() {
+            self.first_added = Some(newnodes.clone());
+        }
+
         // XXX-dap TODO-coverage test two sagas in parallel
 
         // TODO-design For this exploration, we assume that any nodes appended
@@ -437,6 +545,7 @@ impl DagBuilder {
     // set `self.last`.  They return the `NodeIndex` of the last thing they
     // added.
 
+    /// Adds any kind of [`UserNode`] to the graph
     fn add_node(&mut self, user_node: UserNode) -> NodeIndex {
         match user_node.kind {
             UserNodeKind::Action { label, action_name } => {
@@ -458,7 +567,7 @@ impl DagBuilder {
         }
     }
 
-    /// Appends a `Node::Constant` or `Node::Action` to the graph
+    /// Adds a `Node::Constant` or `Node::Action` to the graph
     fn add_simple(&mut self, node: Node) -> NodeIndex {
         assert!(matches!(node, Node::Constant { .. } | Node::Action { .. }));
         let newnode = self.graph.add_node(node);
@@ -466,21 +575,7 @@ impl DagBuilder {
         newnode
     }
 
-    /// Record that node `newnode` depends on the last set of nodes that were
-    /// appended
-    fn depends_on_last(&mut self, newnode: NodeIndex) {
-        for node in &self.last_added {
-            self.graph.add_edge(*node, newnode, ());
-        }
-    }
-
-    /// Record that the nodes in `nodes` should be ancestors of whatever nodes
-    /// get added next.
-    fn set_last(&mut self, nodes: &[NodeIndex]) {
-        self.last_added = nodes.to_vec();
-    }
-
-    /// Append another DAG to this one as a subsaga
+    /// Adds another DAG to this one as a subsaga
     ///
     /// This isn't quite the same as inserting the given DAG into the DAG that
     /// we're building.  Subsaga nodes live in a separate namespace of node
@@ -489,38 +584,30 @@ impl DagBuilder {
     fn add_subsaga(
         &mut self,
         name: NodeName,
-        subsaga: Dag,
+        subsaga_dag: Dag,
         params_node_name: NodeName,
     ) -> NodeIndex {
         let node_start = Node::SubsagaStart {
-            saga_name: subsaga.name.clone(),
+            saga_name: subsaga_dag.saga_name.clone(),
             params_node_name: NodeName::new(params_node_name),
         };
         let subsaga_start = self.graph.add_node(node_start);
         self.depends_on_last(subsaga_start);
 
         // Insert all the nodes of the subsaga into this saga.
-        let subgraph = &subsaga.graph;
+        let subgraph = &subsaga_dag.graph;
         let mut subsaga_idx_to_saga_idx = BTreeMap::new();
         for child_node_index in 0..subgraph.node_count() {
             let child_node_index = NodeIndex::from(child_node_index as u32);
-            let node = subgraph.node_weight(child_node_index).unwrap();
+            let node = subgraph.node_weight(child_node_index).unwrap().clone();
 
-            // When we get to the end node, we'll add a SubsagaEnd instead.
-            // Other nodes are copied directly into the parent graph.
+            // DagFragments are not allowed to have Start/End nodes.  Given
+            // that, nodes are copied directly into the parent graph.
             // XXX-dap TODO-cleanup make this an exhaustive match
-            let node = if let Node::End = node {
-                Node::SubsagaEnd { name: name.clone() }
-            } else {
-                node.clone()
-            };
+            assert!(!matches!(node, Node::Start { .. } | Node::End));
 
             // We already appended the start node
-            let parent_node_index = if let Node::Start { .. } = node {
-                subsaga_start
-            } else {
-                self.graph.add_node(node)
-            };
+            let parent_node_index = self.graph.add_node(node);
 
             assert!(subsaga_idx_to_saga_idx
                 .insert(child_node_index, parent_node_index)
@@ -542,29 +629,47 @@ impl DagBuilder {
             }
         }
 
-        // Set `last_added` so that we can keep adding to it.
-        let end_child_node_index = subsaga.end_node;
-        let end_parent_node_index = subsaga_idx_to_saga_idx
-            .get(&end_child_node_index)
-            .expect("end node was not processed");
-        *end_parent_node_index
+        // The initial nodes of the subsaga DAG must depend on the SubsagaStart
+        // node that we added.
+        for child_first_node in &subsaga_dag.first_nodes {
+            let parent_first_node =
+                subsaga_idx_to_saga_idx.get(&child_first_node).unwrap();
+            self.graph.add_edge(subsaga_start, *parent_first_node, ());
+        }
+
+        // Add a SubsagaEnd node that depends on the last nodes of the subsaga
+        // DAG.
+        let subsaga_end = self.graph.add_node(Node::SubsagaEnd { name });
+        for child_last_node in &subsaga_dag.last_nodes {
+            let parent_last_node =
+                subsaga_idx_to_saga_idx.get(&child_last_node).unwrap();
+            self.graph.add_edge(*parent_last_node, subsaga_end, ());
+        }
+
+        subsaga_end
     }
 
-    /// Return the constructed DAG
-    pub fn build(mut self) -> Dag {
-        // Append an "end" node so that we can easily tell when the saga has
-        // completed.
-        let newnode = self.graph.add_node(Node::End);
-
+    /// Record that node `newnode` depends on the last set of nodes that were
+    /// appended
+    fn depends_on_last(&mut self, newnode: NodeIndex) {
         for node in &self.last_added {
             self.graph.add_edge(*node, newnode, ());
         }
+    }
 
+    /// Record that the nodes in `nodes` should be ancestors of whatever nodes
+    /// get added next.
+    fn set_last(&mut self, nodes: &[NodeIndex]) {
+        self.last_added = nodes.to_vec();
+    }
+
+    /// Return the constructed DAG
+    pub fn build(self) -> Dag {
         Dag {
-            name: self.name,
+            saga_name: self.saga_name,
             graph: self.graph,
-            start_node: self.root,
-            end_node: newnode,
+            first_nodes: self.first_added.unwrap_or_else(|| Vec::new()),
+            last_nodes: self.last_added,
         }
     }
 }

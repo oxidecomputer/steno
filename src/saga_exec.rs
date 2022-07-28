@@ -12,8 +12,8 @@ use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
 use crate::sec::SecExecClient;
 use crate::ActionRegistry;
-use crate::Dag;
 use crate::SagaCachedState;
+use crate::SagaDag;
 use crate::SagaId;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
@@ -295,7 +295,7 @@ struct TaskCompletion<UserType: SagaType> {
  * Context provided to the (tokio) task that executes an action
  */
 struct TaskParams<UserType: SagaType> {
-    dag: Arc<Dag>,
+    dag: Arc<SagaDag>,
     user_context: Arc<UserType::ExecContextType>,
 
     /**
@@ -350,7 +350,7 @@ pub struct SagaExecutor<UserType: SagaType> {
     #[allow(dead_code)]
     log: slog::Logger,
 
-    dag: Arc<Dag>,
+    dag: Arc<SagaDag>,
 
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
@@ -373,7 +373,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     pub fn new(
         log: slog::Logger,
         saga_id: SagaId,
-        dag: Arc<Dag>,
+        dag: Arc<SagaDag>,
         registry: Arc<ActionRegistry<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
         sec_hdl: SecExecClient,
@@ -403,7 +403,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     pub fn new_recover(
         log: slog::Logger,
         saga_id: SagaId,
-        dag: Arc<Dag>,
+        dag: Arc<SagaDag>,
         registry: Arc<ActionRegistry<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
         sec_hdl: SecExecClient,
@@ -1642,7 +1642,7 @@ pub struct SagaExecStatus {
     saga_id: SagaId,
     nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>>,
     node_exec_states: BTreeMap<NodeIndex, NodeExecState>,
-    dag: Arc<Dag>,
+    dag: Arc<SagaDag>,
     sglog: SagaLog,
 }
 
@@ -1820,7 +1820,7 @@ fn recovery_validate_parent(
 pub struct ActionContext<UserType: SagaType> {
     ancestor_tree: Arc<BTreeMap<NodeName, Arc<serde_json::Value>>>,
     node_id: NodeIndex,
-    dag: Arc<Dag>,
+    dag: Arc<SagaDag>,
     user_context: Arc<UserType::ExecContextType>,
     saga_params: Arc<serde_json::Value>,
 }

@@ -11,7 +11,8 @@
 //! * Write some functions that will be used as _actions_ and _undo actions_ for
 //!   your saga.  Package these up with [`ActionFunc::new_action()`].
 //! * Add these actions to an [`ActionRegistry`]
-//! * Use [`DagBuilder`] to construct a graph of these actions.
+//! * Use [`DagBuilder`] to construct a graph of these actions.  Wrap this up in
+//!   a [`SagaDag`].
 //! * Construct a saga execution coordinator with [`sec()`] and use that to run
 //!   the saga.  You can start with an [`InMemorySecStore`] or impl your own
 //!   [`SecStore`].
@@ -58,6 +59,7 @@ pub use dag::ActionRegistryError;
 pub use dag::Dag;
 pub use dag::DagBuilder;
 pub use dag::NodeName;
+pub use dag::SagaDag;
 pub use dag::SagaId;
 pub use dag::SagaName;
 pub use dag::UserNode;

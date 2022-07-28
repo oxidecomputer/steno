@@ -55,6 +55,7 @@
 
 #![allow(clippy::large_enum_variant)]
 
+use crate::dag::SagaDag;
 use crate::saga_exec::SagaExecManager;
 use crate::saga_exec::SagaExecutor;
 use crate::store::SagaCachedState;
@@ -62,7 +63,6 @@ use crate::store::SagaCreateParams;
 use crate::store::SecStore;
 use crate::ActionError;
 use crate::ActionRegistry;
-use crate::Dag;
 use crate::SagaExecStatus;
 use crate::SagaId;
 use crate::SagaLog;
@@ -164,7 +164,7 @@ impl SecClient {
         &self,
         saga_id: SagaId,
         uctx: Arc<UserType::ExecContextType>,
-        dag: Arc<Dag>,
+        dag: Arc<SagaDag>,
         registry: Arc<ActionRegistry<UserType>>,
     ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
@@ -203,7 +203,7 @@ impl SecClient {
         let (ack_tx, ack_rx) = oneshot::channel();
         let saga_log = SagaLog::new_recover(saga_id, log_events)
             .context("recovering log")?;
-        let dag: Arc<Dag> = Arc::new(
+        let dag: Arc<SagaDag> = Arc::new(
             serde_json::from_value(dag)
                 .map_err(ActionError::new_deserialize)?,
         );
@@ -455,7 +455,7 @@ enum SecClientMsg {
         template_params: Box<dyn TemplateParams>,
 
         /** The user created DAG */
-        dag: Arc<Dag>,
+        dag: Arc<SagaDag>,
     },
 
     /**
@@ -476,7 +476,7 @@ enum SecClientMsg {
         template_params: Box<dyn TemplateParams>,
 
         /** The user created DAG */
-        dag: Arc<Dag>,
+        dag: Arc<SagaDag>,
     },
 
     /** Start (or resume) running a saga */
@@ -582,7 +582,7 @@ trait TemplateParams: Send + fmt::Debug {
  */
 #[derive(Debug)]
 struct TemplateParamsForCreate<UserType: SagaType + fmt::Debug> {
-    dag: Arc<Dag>,
+    dag: Arc<SagaDag>,
     registry: Arc<ActionRegistry<UserType>>,
     uctx: Arc<UserType::ExecContextType>,
 }
@@ -618,7 +618,7 @@ where
  */
 #[derive(Debug)]
 struct TemplateParamsForRecover<UserType: SagaType + fmt::Debug> {
-    dag: Arc<Dag>,
+    dag: Arc<SagaDag>,
     registry: Arc<ActionRegistry<UserType>>,
     uctx: Arc<UserType::ExecContextType>,
     saga_log: SagaLog,
@@ -1059,7 +1059,7 @@ impl Sec {
         >,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
-        dag: Arc<Dag>,
+        dag: Arc<SagaDag>,
     ) {
         self.do_saga_create(ack_tx, saga_id, template_params, dag, false);
     }
@@ -1071,12 +1071,12 @@ impl Sec {
         >,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
-        dag: Arc<Dag>,
+        dag: Arc<SagaDag>,
         autostart: bool,
     ) {
         let log = self.log.new(o!(
             "saga_id" => saga_id.to_string(),
-            "saga_name" => dag.name.to_string(),
+            "saga_name" => dag.saga_name.to_string(),
         ));
         /* TODO-log Figure out the way to log JSON objects to a JSON drain */
         // TODO(AJS) - Get rid of this unwrap?
@@ -1128,11 +1128,11 @@ impl Sec {
         >,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
-        dag: Arc<Dag>,
+        dag: Arc<SagaDag>,
     ) {
         let log = self.log.new(o!(
             "saga_id" => saga_id.to_string(),
-            "saga_name" => dag.name.to_string(),
+            "saga_name" => dag.saga_name.to_string(),
         ));
         /* TODO-log Figure out the way to log JSON objects to a JSON drain */
         // TODO(AJS) - Get rid of this unwrap?
@@ -1512,7 +1512,8 @@ mod test {
         type ExecContextType = TestContext;
     }
 
-    fn make_test_one_node_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<Dag>) {
+    fn make_test_one_node_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<SagaDag>)
+    {
         async fn do_n1(
             ctx: ActionContext<TestSaga>,
         ) -> Result<i32, ActionError> {
@@ -1530,10 +1531,15 @@ mod test {
         let action_n1 = ActionFunc::new_action("n1_out", do_n1, undo_n1);
         registry.register(Arc::clone(&action_n1));
 
-        let mut builder =
-            DagBuilder::new(SagaName::new("test-saga"), TestParams {});
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
         builder.append(UserNode::action("n1_out", "n1", &*action_n1));
-        (Arc::new(registry), Arc::new(builder.build()))
+        (
+            Arc::new(registry),
+            Arc::new(SagaDag::new(
+                builder.build(),
+                serde_json::to_value(TestParams {}).unwrap(),
+            )),
+        )
     }
 
     // Tests the "normal flow" for a newly created saga: create + start.
@@ -1576,7 +1582,7 @@ mod test {
             .await
             .expect("failed to create saga");
 
-        sec.saga_inject_error(saga_id, NodeIndex::new(1))
+        sec.saga_inject_error(saga_id, NodeIndex::new(0))
             .await
             .expect("failed to inject error");
 

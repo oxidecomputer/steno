@@ -14,10 +14,10 @@ use std::sync::Arc;
 use steno::load_example_actions;
 use steno::make_example_provision_dag;
 use steno::ActionRegistry;
-use steno::Dag;
 use steno::ExampleContext;
 use steno::ExampleParams;
 use steno::ExampleSagaType;
+use steno::SagaDag;
 use steno::SagaId;
 use steno::SagaLog;
 use steno::SagaSerialized;
@@ -221,7 +221,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
                 println!("{}", saga.state.status());
                 println!("");
             }
-            let dag: Arc<Dag> =
+            let dag: Arc<SagaDag> =
                 Arc::new(serde_json::from_value(saga_recovered.dag)?);
             (saga_id, future, dag)
         } else {
