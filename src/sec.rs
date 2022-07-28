@@ -1536,7 +1536,7 @@ mod test {
         (
             Arc::new(registry),
             Arc::new(SagaDag::new(
-                builder.build(),
+                builder.build().unwrap(),
                 serde_json::to_value(TestParams {}).unwrap(),
             )),
         )

@@ -32,8 +32,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
+use thiserror::Error;
 use uuid::Uuid;
 
 /** Unique identifier for a Saga (an execution of a saga template) */
@@ -489,6 +491,39 @@ pub struct DagBuilder {
     /// index of the last node they added.  They do _not_ update "last_added"
     /// themselves.
     last_added: Vec<NodeIndex>,
+
+    /// names of nodes added so far
+    node_names: BTreeSet<NodeName>,
+
+    /// error from any builder operation (returned by `build()`)
+    error: Option<DagBuilderError>,
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum DagBuilderError {
+    #[error("saga must end with exactly one node")]
+    /// The saga ended with zero nodes (if it was empty) or more than one node.
+    /// Sagas are required to end with a single node that emits the output for
+    /// the saga itself.
+    BadOutputNode,
+
+    #[error(
+        "subsaga node {0:?} has parameters that come from node {:1?}, but it \
+        does not depend on any such node"
+    )]
+    /// A subsaga was appended whose parameters were supposed to come from a
+    /// node that does not exist or that the subsaga does not depend on.
+    BadSubsagaParams(NodeName, NodeName),
+
+    #[error("name was used multiple times in the same Dag: {0:?}")]
+    /// The same name was given to multiple nodes in the same DAG.  This is not
+    /// allowed.  Node names must be unique because they are used to identify
+    /// outputs.
+    DuplicateName(NodeName),
+
+    #[error("attempted to append 0 nodes in parallel")]
+    /// It's not allowed to append 0 nodes in parallel.
+    EmptyStage,
 }
 
 impl DagBuilder {
@@ -499,6 +534,8 @@ impl DagBuilder {
             graph: Graph::new(),
             first_added: None,
             last_added: vec![],
+            node_names: BTreeSet::new(),
+            error: None,
         }
     }
 
@@ -519,6 +556,65 @@ impl DagBuilder {
     /// The new nodes will individually depend on completion of all actions that
     /// were added in the last call to `append()` or `append_parallel()`.
     pub fn append_parallel(&mut self, user_nodes: Vec<Node>) {
+        // If we've encountered an error already, don't do anything.  We'll
+        // report this when the user invokes `build()`.
+        if self.error.is_some() {
+            return;
+        }
+
+        // It's not allowed to have an empty stage.  It's not clear what would
+        // be intended by this.  With the current implementation, you'd wind up
+        // creating two separate connected components of the DAG, which violates
+        // all kinds of assumptions.
+        if user_nodes.len() == 0 {
+            self.error = Some(DagBuilderError::EmptyStage);
+            return;
+        }
+
+        // Validate that if we're appending a subsaga, then the node from which
+        // it gets its parameters has already been appended.  If it hasn't been
+        // appended, this is definitely invalid because we'd have no way to get
+        // these parameters when we need them.  As long as the parameters node
+        // has been appended already, then the new subsaga node will depend on
+        // that node (either directly or indirectly).
+        //
+        // It might seem more natural to validate this in `add_subsaga()`.  But
+        // if we're appending multiple nodes in parallel here, then by the time
+        // we get to `add_subsaga()`, it's possible that we've added nodes to
+        // the graph on which the subsaga does _not_ depend.  That would cause
+        // us to erroneously think this is valid when it's not.
+        //
+        // If this fails, we won't report it until the user calls `build()`.  In
+        // the meantime, we proceed with the building.  The problem here doesn't
+        // make that any harder.
+        for node in &user_nodes {
+            if let NodeKind::Subsaga { params_node_name, .. } = &node.kind {
+                if !self.node_names.contains(&params_node_name)
+                    && self.error.is_none()
+                {
+                    self.error = Some(DagBuilderError::BadSubsagaParams(
+                        node.node_name.clone(),
+                        params_node_name.clone(),
+                    ));
+                    return;
+                }
+            }
+        }
+
+        // Now validate that the names of these new nodes are unique.  It's
+        // important that we do this after the above check because otherwise if
+        // the user added a subsaga node whose parameters came from a parallel
+        // node (added in the same call), we wouldn't catch the problem.
+        for node in &user_nodes {
+            if !self.node_names.insert(node.node_name.clone()) {
+                self.error = Some(DagBuilderError::DuplicateName(
+                    node.node_name.clone(),
+                ));
+                return;
+            }
+        }
+
+        // Now we can proceed with adding the nodes.
         let newnodes: Vec<NodeIndex> = user_nodes
             .into_iter()
             .map(|user_node| self.add_node(user_node))
@@ -680,12 +776,158 @@ impl DagBuilder {
     }
 
     /// Return the constructed DAG
-    pub fn build(self) -> Dag {
-        Dag {
+    pub fn build(self) -> Result<Dag, DagBuilderError> {
+        // If we ran into a problem along the way, report it now.
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+
+        // Every saga must end in exactly one leaf node.
+        if self.last_added.len() != 1 {
+            return Err(DagBuilderError::BadOutputNode);
+        }
+
+        Ok(Dag {
             saga_name: self.saga_name,
             graph: self.graph,
             first_nodes: self.first_added.unwrap_or_else(|| Vec::new()),
             last_nodes: self.last_added,
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::DagBuilder;
+    use super::DagBuilderError;
+    use super::Node;
+    use super::NodeName;
+    use super::SagaName;
+
+    #[test]
+    fn test_builder_bad_output_nodes() {
+        // error case: totally empty DAG
+        let builder = DagBuilder::new(SagaName::new("test-saga"));
+        let result = builder.build();
+        println!("{:?}", result);
+        assert!(matches!(result, Err(DagBuilderError::BadOutputNode)));
+
+        // error case: a DAG that ends with two nodes
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append_parallel(vec![
+            Node::constant("a", serde_json::Value::Null),
+            Node::constant("b", serde_json::Value::Null),
+        ]);
+        let result = builder.build();
+        println!("{:?}", result);
+        assert!(matches!(result, Err(DagBuilderError::BadOutputNode)));
+    }
+
+    #[test]
+    fn test_builder_empty_stage() {
+        // error case: a DAG with a 0-node stage in it
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append_parallel(vec![]);
+        let result = builder.build();
+        println!("{:?}", result);
+        assert!(matches!(result, Err(DagBuilderError::EmptyStage)));
+    }
+
+    #[test]
+    fn test_builder_duplicate_names() {
+        // error case: a DAG that duplicates names (direct ancestor)
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        let result = builder.build().unwrap_err();
+        println!("{:?}", result);
+        assert_eq!(result, DagBuilderError::DuplicateName(NodeName::new("a")));
+
+        // error case: a DAG that duplicates names (indirect ancestor)
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        builder.append_parallel(vec![
+            Node::constant("b", serde_json::Value::Null),
+            Node::constant("c", serde_json::Value::Null),
+        ]);
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        let result = builder.build().unwrap_err();
+        println!("{:?}", result);
+        assert_eq!(result, DagBuilderError::DuplicateName(NodeName::new("a")));
+
+        // error case: a DAG that duplicates names (parallel)
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        builder.append_parallel(vec![
+            Node::constant("b", serde_json::Value::Null),
+            Node::constant("b", serde_json::Value::Null),
+        ]);
+        let result = builder.build().unwrap_err();
+        println!("{:?}", result);
+        assert_eq!(result, DagBuilderError::DuplicateName(NodeName::new("b")));
+
+        // success case: a DAG that uses the same name for a node outside and
+        // inside a subsaga
+        let mut inner_builder = DagBuilder::new(SagaName::new("inner-saga"));
+        inner_builder.append(Node::constant("a", serde_json::Value::Null));
+        let inner_dag = inner_builder.build().unwrap();
+        let mut outer_builder = DagBuilder::new(SagaName::new("outer-saga"));
+        outer_builder.append(Node::constant("a", serde_json::Value::Null));
+        outer_builder.append(Node::subsaga("b", inner_dag, "a"));
+        let _ = outer_builder.build().unwrap();
+    }
+
+    #[test]
+    fn test_builder_bad_subsaga_params() {
+        let mut subsaga_builder = DagBuilder::new(SagaName::new("inner-saga"));
+        subsaga_builder.append(Node::constant("a", serde_json::Value::Null));
+        let subsaga_dag = subsaga_builder.build().unwrap();
+
+        // error case: subsaga depends on params node that doesn't exist
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        builder.append(Node::subsaga("b", subsaga_dag.clone(), "barf"));
+        let result = builder.build().unwrap_err();
+        println!("{:?}", result);
+        assert_eq!(
+            result,
+            DagBuilderError::BadSubsagaParams(
+                NodeName::new("b"),
+                NodeName::new("barf")
+            )
+        );
+
+        // error case: subsaga depends on params node that doesn't exist
+        // (itself)
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        builder.append(Node::subsaga("b", subsaga_dag.clone(), "b"));
+        let result = builder.build().unwrap_err();
+        println!("{:?}", result);
+        assert_eq!(
+            result,
+            DagBuilderError::BadSubsagaParams(
+                NodeName::new("b"),
+                NodeName::new("b")
+            )
+        );
+
+        // error case: subsaga depends on params node that doesn't exist
+        // (added in parallel)
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        builder.append_parallel(vec![
+            Node::constant("c", serde_json::Value::Null),
+            Node::subsaga("b", subsaga_dag.clone(), "c"),
+        ]);
+        let result = builder.build().unwrap_err();
+        println!("{:?}", result);
+        assert_eq!(
+            result,
+            DagBuilderError::BadSubsagaParams(
+                NodeName::new("b"),
+                NodeName::new("c")
+            )
+        );
     }
 }

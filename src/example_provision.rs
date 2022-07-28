@@ -169,7 +169,7 @@ fn server_alloc_subsaga() -> Dag {
         actions::SERVER_RESERVE.as_ref(),
     ));
 
-    d.build()
+    d.build().unwrap()
 }
 
 /// Create a dag that describes a demo "VM Provision" Saga
@@ -233,7 +233,10 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<SagaDag> {
     ));
     d.append(Node::action("print", "Print", actions::PRINT.as_ref()));
 
-    Arc::new(SagaDag::new(d.build(), serde_json::to_value(params).unwrap()))
+    Arc::new(SagaDag::new(
+        d.build().unwrap(),
+        serde_json::to_value(params).unwrap(),
+    ))
 }
 
 async fn demo_prov_instance_create(

@@ -808,10 +808,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     subsaga_start_index,
                     false,
                 );
-                // XXX-dap We should validate previously that the
-                // params_node_name exists!  Otherwise this would panic at
-                // runtime, which really sucks.  And it doesn't make sense to
-                // return an error here, either.
                 Arc::clone(tree.get(params_node_name).unwrap())
             }
             InternalNode::SubsagaEnd { .. }
@@ -1059,16 +1055,11 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 // instead change the logic that _finds_ the saga's output to
                 // look in the same place that we do here.  But this is a simple
                 // and clear way to do this.)
-                // XXX-dap What is the saga's output?  We have not previously
-                // defined that.  For now, we'll take the first immediate
-                // ancestor's output.  This is a little janky.  We should
-                // probably not explode if there's more than one, and really we
-                // shouldn't allow you to create that graph in the first place.
-                // DagBuilder::build() could return an error in this case.
-                // (There are other error cases it could check too, like adding
-                // a Subsaga whose params node does not precede it.) Still, we
-                // can't be sure a previous version didn't do that (or the
-                // database state isn't corrupt) so we shouldn't blow up.
+                // TODO-robustness we validate that there's exactly one final
+                // node when we build the DAG, but we should also validate it
+                // during recovery or else fail more gracefully here.  See #32.
+                // XXX-dap We should properly reify "saga output" by adding it
+                // to the result type for the saga.
                 let ancestors: Vec<_> = dag
                     .graph
                     .neighbors_directed(node_index, Incoming)

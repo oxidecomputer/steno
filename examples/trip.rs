@@ -201,7 +201,7 @@ fn make_trip_dag(params: TripParams) -> Arc<SagaDag> {
     ]);
 
     Arc::new(SagaDag::new(
-        builder.build(),
+        builder.build().expect("DAG was unexpectedly invalid"),
         serde_json::to_value(params).unwrap(),
     ))
 }
