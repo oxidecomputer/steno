@@ -1264,13 +1264,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
              */
             let (error_node_id, error_source) =
                 live_state.node_errors.iter().next().unwrap();
-            // XXX-dap error condition
             let error_node_name = self
                 .dag
                 .get(*error_node_id)
                 .unwrap()
                 .node_name()
-                .unwrap()
+                .expect("unexpected failure from unnamed node")
                 .clone();
             return SagaResult {
                 saga_id: self.saga_id,
