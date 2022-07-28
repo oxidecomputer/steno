@@ -208,7 +208,10 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<SagaDag> {
     // subsaga.  Do we need/want to enable that?
     // XXX-dap yes I think so
     let subsaga_params = ExampleSubsagaParams { number_of_things: 1 };
-    d.append(UserNode::constant("server_alloc_params", subsaga_params));
+    d.append(UserNode::constant(
+        "server_alloc_params",
+        serde_json::to_value(subsaga_params).unwrap(),
+    ));
     d.append(UserNode::subsaga(
         "server_alloc",
         server_alloc_subsaga(),

@@ -247,16 +247,13 @@ impl UserNode {
     /// Make a new constant node (see [`UserNode`])
     ///
     /// This node immediately emits `value`.
-    pub fn constant<N: AsRef<str>, V: Serialize>(
+    pub fn constant<N: AsRef<str>>(
         node_name: N,
-        value: V,
+        value: serde_json::Value,
     ) -> UserNode {
-        // XXX-dap unwrap
         UserNode {
             node_name: NodeName::new(node_name),
-            kind: UserNodeKind::Constant {
-                value: serde_json::to_value(value).unwrap(),
-            },
+            kind: UserNodeKind::Constant { value },
         }
     }
 
@@ -601,10 +598,18 @@ impl DagBuilder {
             let child_node_index = NodeIndex::from(child_node_index as u32);
             let node = subgraph.node_weight(child_node_index).unwrap().clone();
 
-            // DagFragments are not allowed to have Start/End nodes.  Given
-            // that, nodes are copied directly into the parent graph.
-            // XXX-dap TODO-cleanup make this an exhaustive match
-            assert!(!matches!(node, Node::Start { .. } | Node::End));
+            // Dags are not allowed to have Start/End nodes.  These are only
+            // added to `SagaDag`s.  Given that, we can copy the rest of the
+            // nodes directly into the parent graph.
+            match node {
+                Node::Start { .. } | Node::End => {
+                    panic!("subsaga Dag contained unexpected node: {:?}", node);
+                }
+                Node::Action { .. }
+                | Node::Constant { .. }
+                | Node::SubsagaStart { .. }
+                | Node::SubsagaEnd { .. } => (),
+            };
 
             // We already appended the start node
             let parent_node_index = self.graph.add_node(node);
