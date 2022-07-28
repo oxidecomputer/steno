@@ -8,10 +8,10 @@ use crate::ActionFuncResult;
 use crate::ActionRegistry;
 use crate::Dag;
 use crate::DagBuilder;
+use crate::Node;
 use crate::SagaDag;
 use crate::SagaName;
 use crate::SagaType;
-use crate::UserNode;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -158,12 +158,12 @@ pub fn load_example_actions(registry: &mut ActionRegistry<ExampleSagaType>) {
 fn server_alloc_subsaga() -> Dag {
     let name = SagaName::new("server-alloc");
     let mut d = DagBuilder::new(name);
-    d.append(UserNode::action(
+    d.append(Node::action(
         "server_id",
         "ServerPick",
         actions::SERVER_PICK.as_ref(),
     ));
-    d.append(UserNode::action(
+    d.append(Node::action(
         "server_reserve",
         "ServerReserve",
         actions::SERVER_RESERVE.as_ref(),
@@ -183,18 +183,18 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<SagaDag> {
     let name = SagaName::new("DemoVmProvision");
     let mut d = DagBuilder::new(name);
 
-    d.append(UserNode::action(
+    d.append(Node::action(
         "instance_id",
         "InstanceCreate",
         actions::INSTANCE_CREATE.as_ref(),
     ));
     d.append_parallel(vec![
-        UserNode::action(
+        Node::action(
             "instance_ip",
             "VpcAllocIp",
             actions::VPC_ALLOC_IP.as_ref(),
         ),
-        UserNode::action(
+        Node::action(
             "volume_id",
             "VolumeCreate",
             actions::VOLUME_CREATE.as_ref(),
@@ -205,33 +205,33 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<SagaDag> {
     // XXX-dap TODO-coverage put another node in parallel with the subsaga to
     // make sure that works.
     let subsaga_params = ExampleSubsagaParams { number_of_things: 1 };
-    d.append(UserNode::constant(
+    d.append(Node::constant(
         "server_alloc_params",
         serde_json::to_value(subsaga_params).unwrap(),
     ));
-    d.append(UserNode::subsaga(
+    d.append(Node::subsaga(
         "server_alloc",
         server_alloc_subsaga(),
         "server_alloc_params",
     ));
 
     // Append nodes that will run after the subsaga completes
-    d.append(UserNode::action(
+    d.append(Node::action(
         "instance_configure",
         "InstanceConfigure",
         actions::INSTANCE_CONFIGURE.as_ref(),
     ));
-    d.append(UserNode::action(
+    d.append(Node::action(
         "volume_attach",
         "VolumeAttach",
         actions::VOLUME_ATTACH.as_ref(),
     ));
-    d.append(UserNode::action(
+    d.append(Node::action(
         "instance_boot",
         "InstanceBoot",
         actions::INSTANCE_BOOT.as_ref(),
     ));
-    d.append(UserNode::action("print", "Print", actions::PRINT.as_ref()));
+    d.append(Node::action("print", "Print", actions::PRINT.as_ref()));
 
     Arc::new(SagaDag::new(d.build(), serde_json::to_value(params).unwrap()))
 }

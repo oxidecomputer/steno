@@ -1444,8 +1444,8 @@ impl TryFrom<SagaSerialized> for SagaLog {
 mod test {
     use super::*;
     use crate::{
-        ActionContext, ActionError, ActionFunc, DagBuilder, SagaId, SagaName,
-        UserNode,
+        ActionContext, ActionError, ActionFunc, DagBuilder, Node, SagaId,
+        SagaName,
     };
     use serde::{Deserialize, Serialize};
     use slog::Drain;
@@ -1532,7 +1532,7 @@ mod test {
         registry.register(Arc::clone(&action_n1));
 
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
-        builder.append(UserNode::action("n1_out", "n1", &*action_n1));
+        builder.append(Node::action("n1_out", "n1", &*action_n1));
         (
             Arc::new(registry),
             Arc::new(SagaDag::new(

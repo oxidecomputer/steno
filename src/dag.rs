@@ -8,16 +8,16 @@
 //! _nodes_, most of which are _actions_.  The facilities in this module are
 //! used to build up sagas.  It looks like this:
 //!
-//! At the lowest layer, we have [`UserNode`]s, which usually describe an
-//! action.  Use [`DagBuilder`] to assemble these into a [`Dag`].  The resulting
-//! `Dag` can be used in one of two ways:
+//! At the lowest layer, we have [`Node`]s, which usually describe an action.
+//! Use [`DagBuilder`] to assemble these into a [`Dag`].  The resulting `Dag`
+//! can be used in one of two ways:
 //!
 //! 1. When combined with parameters for the saga, the `Dag` becomes a
-//!    [`SagaDag`] and can be executed using the [`sec`].
+//!    [`SagaDag`] and can be executed using the [`crate::sec()`].
 //! 2. Alternatively, the `Dag` can be used as a _subsaga_ of some other saga.
-//!    To do this, use [`UserNode::subsaga`] to create a subsaga _node_
-//!    containing the subsaga `Dag`, then append this to the [`DagBuilder`]
-//!    that's used to construct the outer saga.
+//!    To do this, use [`Node::subsaga`] to create a subsaga _node_ containing
+//!    the subsaga `Dag`, then append this to the [`DagBuilder`] that's used to
+//!    construct the outer saga.
 // Note: The graph-related types here don't implement JSON schema because of
 // Graph and NodeIndex.
 
@@ -94,7 +94,7 @@ where
     }
 }
 
-/// Unique name for a saga [`UserNode`]
+/// Unique name for a saga [`Node`]
 ///
 /// Each node requires a string name that's unique within its DAG.  The name is
 /// used to identify its output.  Nodes that depend on a given node (either
@@ -193,11 +193,11 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
 ///
 /// There are three kinds of nodes you can add to a graph:
 ///
-/// * an _action_ (see [`UserNode::action`]), which executes a particular
-///   [`Action`] with an associated undo action
-/// * a _constant_ (see [`UserNode::constant`]), which is like an action that
+/// * an _action_ (see [`Node::action`]), which executes a particular [`Action`]
+///   with an associated undo action
+/// * a _constant_ (see [`Node::constant`]), which is like an action that
 ///   outputs a value that's known when the DAG is constructed
-/// * a _subsaga_ (see [`UserNode::subsaga`]), which executes another DAG in the
+/// * a _subsaga_ (see [`Node::subsaga`]), which executes another DAG in the
 ///   context of this saga
 ///
 /// Each of these node types has a `node_name` and produces an output.  Other
@@ -207,25 +207,25 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
 ///
 /// * The output of an action node is emitted by the action itself.
 /// * The output of a constant node is the value provided when the node was
-///   created (see [`UserNode::constant`]).
+///   created (see [`Node::constant`]).
 /// * The output of a subsaga node is the output of the subsaga itself.  Note
 ///   that the output of individual nodes from the subsaga DAG is _not_
 ///   available to other nodes in this DAG.  Only the final output is available.
 #[derive(Debug, Clone)]
-pub struct UserNode {
+pub struct Node {
     node_name: NodeName,
-    kind: UserNodeKind,
+    kind: NodeKind,
 }
 
 #[derive(Debug, Clone)]
-enum UserNodeKind {
+enum NodeKind {
     Action { label: String, action_name: ActionName },
     Constant { value: serde_json::Value },
     Subsaga { params_node_name: NodeName, dag: Dag },
 }
 
-impl UserNode {
-    /// Make a new action node (see [`UserNode`])
+impl Node {
+    /// Make a new action node (see [`Node`])
     ///
     /// This node is used to execute the given action.  The action's output will
     /// be available to dependent nodes by looking up the name `node_name`.  See
@@ -234,17 +234,17 @@ impl UserNode {
         node_name: N,
         label: L,
         action: &dyn Action<A>,
-    ) -> UserNode {
-        UserNode {
+    ) -> Node {
+        Node {
             node_name: NodeName::new(node_name),
-            kind: UserNodeKind::Action {
+            kind: NodeKind::Action {
                 label: label.as_ref().to_string(),
                 action_name: action.name(),
             },
         }
     }
 
-    /// Make a new constant node (see [`UserNode`])
+    /// Make a new constant node (see [`Node`])
     ///
     /// This node immediately emits `value`.  Why would you want this?  Suppose
     /// you're working with some saga action that expects input to come from
@@ -253,14 +253,14 @@ impl UserNode {
     pub fn constant<N: AsRef<str>>(
         node_name: N,
         value: serde_json::Value,
-    ) -> UserNode {
-        UserNode {
+    ) -> Node {
+        Node {
             node_name: NodeName::new(node_name),
-            kind: UserNodeKind::Constant { value },
+            kind: NodeKind::Constant { value },
         }
     }
 
-    /// Make a new subsaga node (see [`UserNode`])
+    /// Make a new subsaga node (see [`Node`])
     ///
     /// This is used to insert a subsaga into another saga.  The output of the
     /// subsaga will have name `node_name` in the outer saga.  The subsaga's DAG
@@ -270,10 +270,10 @@ impl UserNode {
         node_name: N1,
         dag: Dag,
         params_node_name: N2,
-    ) -> UserNode {
-        UserNode {
+    ) -> Node {
+        Node {
             node_name: NodeName::new(node_name),
-            kind: UserNodeKind::Subsaga {
+            kind: NodeKind::Subsaga {
                 params_node_name: NodeName::new(params_node_name),
                 dag,
             },
@@ -291,7 +291,7 @@ impl UserNode {
 /// the execution state of the saga here. That continues to reside in saga log
 /// consisting of `SagaNodeEvent`s.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub enum Node {
+pub enum InternalNode {
     Start { params: serde_json::Value },
     End,
     Action { name: NodeName, label: String, action_name: ActionName },
@@ -300,32 +300,34 @@ pub enum Node {
     SubsagaEnd { name: NodeName },
 }
 
-impl Node {
+impl InternalNode {
     pub fn node_name(&self) -> Option<&NodeName> {
         match self {
-            Node::Start { .. } | Node::End | Node::SubsagaStart { .. } => None,
-            Node::Action { name, .. } => Some(&name),
-            Node::Constant { name, .. } => Some(&name),
-            Node::SubsagaEnd { name, .. } => Some(&name),
+            InternalNode::Start { .. }
+            | InternalNode::End
+            | InternalNode::SubsagaStart { .. } => None,
+            InternalNode::Action { name, .. } => Some(&name),
+            InternalNode::Constant { name, .. } => Some(&name),
+            InternalNode::SubsagaEnd { name, .. } => Some(&name),
         }
     }
 
     pub fn label(&self) -> String {
         match self {
-            Node::Start { .. } => String::from("(start node)"),
-            Node::End => String::from("(end node)"),
-            Node::Action { label, .. } => label.clone(),
-            Node::Constant { value, .. } => {
+            InternalNode::Start { .. } => String::from("(start node)"),
+            InternalNode::End => String::from("(end node)"),
+            InternalNode::Action { label, .. } => label.clone(),
+            InternalNode::Constant { value, .. } => {
                 let value_as_json = serde_json::to_string(value)
                     .unwrap_or_else(|e| {
                         format!("(failed to serialize constant value: {:#})", e)
                     });
                 format!("(constant = {})", value_as_json)
             }
-            Node::SubsagaStart { saga_name, .. } => {
+            InternalNode::SubsagaStart { saga_name, .. } => {
                 format!("(subsaga start: {:?})", saga_name)
             }
-            Node::SubsagaEnd { .. } => String::from("(subsaga end)"),
+            InternalNode::SubsagaEnd { .. } => String::from("(subsaga end)"),
         }
     }
 }
@@ -339,13 +341,14 @@ pub struct SagaDag {
     /// the actual DAG representation
     ///
     /// Unlike [`Dag`], [`SagaDag`]'s graph can contain any type of [`Node`].
-    /// There is always exactly one [`Node::Start`] node and exactly one
-    /// [`Node::End`] node.  The graph can contain subsagas, which are always
-    /// bracketed by [`Node::SubsagaStart`] and [`Node::SubsagaEnd`] nodes.
-    pub(crate) graph: Graph<Node, ()>,
-    /// the index of the [`Node::Start`] node for this Saga
+    /// There is always exactly one [`InternalNode::Start`] node and exactly one
+    /// [`InternalNode::End`] node.  The graph can contain subsagas, which are
+    /// always bracketed by [`InternalNode::SubsagaStart`] and
+    /// [`InternalNode::SubsagaEnd`] nodes.
+    pub(crate) graph: Graph<InternalNode, ()>,
+    /// the index of the [`InternalNode::Start`] node for this Saga
     pub(crate) start_node: NodeIndex,
-    /// the index of the [`Node::End`] node for this Saga
+    /// the index of the [`InternalNode::End`] node for this Saga
     pub(crate) end_node: NodeIndex,
 }
 
@@ -355,8 +358,8 @@ impl SagaDag {
         // Wrap the DAG with a Start node (which stores the parameters) and an
         // end node so that we can easily tell when the saga has completed.
         let mut graph = dagfrag.graph;
-        let start_node = graph.add_node(Node::Start { params });
-        let end_node = graph.add_node(Node::End);
+        let start_node = graph.add_node(InternalNode::Start { params });
+        let end_node = graph.add_node(InternalNode::End);
 
         // The first-added nodes in the graph depend on the "start" node.
         for first_node in &dagfrag.first_nodes {
@@ -377,7 +380,7 @@ impl SagaDag {
     }
 
     /// Return a node given its index
-    pub(crate) fn get(&self, node_index: NodeIndex) -> Option<&Node> {
+    pub(crate) fn get(&self, node_index: NodeIndex) -> Option<&InternalNode> {
         self.graph.node_weight(node_index)
     }
 
@@ -407,7 +410,7 @@ impl SagaDag {
 /// the `dot` command.  You could put this into a file `graph.out` and run
 /// something like `dot -Tpng -o graph.png graph.out` to produce `graph.png`, a
 /// visual representation of the saga graph.
-pub struct DagDot<'a>(&'a Graph<Node, (), Directed, u32>);
+pub struct DagDot<'a>(&'a Graph<InternalNode, (), Directed, u32>);
 impl<'a> fmt::Display for DagDot<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let config = &[dot::Config::EdgeNoLabel];
@@ -422,8 +425,8 @@ impl<'a> fmt::Display for DagDot<'a> {
 /// (which requires providing input parameters).
 ///
 /// If you want to insert this `Dag` into another saga (as a subsaga), use
-/// [`UserNode::subsaga()`] to create a subsaga _node_ and append this to the
-/// outer saga's [`DagBuilder`].
+/// [`Node::subsaga()`] to create a subsaga _node_ and append this to the outer
+/// saga's [`DagBuilder`].
 ///
 /// This type is built with [`DagBuilder`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,14 +436,15 @@ pub struct Dag {
 
     /// the actual DAG representation
     ///
-    /// This graph does *not* contain a [`Node::Start`] or [`Node::End`] node.
-    /// Those only make sense for `Dag`s that will become top-level sagas (as
-    /// opposed to subsagas).  Instead, we keep track of the first group of
-    /// DAG (root nodes) and the last group of DAG nodes (leaf nodes).  Later,
-    /// we'll wrap this `Dag` in either [`SagaDag`] (for use as a top-level
-    /// saga), in which case we'll add the start and end nodes, or we'll use it
-    /// as a subsaga, in which case we'll add SubsagaStart and SubsagaEnd nodes.
-    graph: Graph<Node, ()>,
+    /// This graph does *not* contain a [`InternalNode::Start`] or
+    /// [`InternalNode::End`] node.  Those only make sense for `Dag`s that will
+    /// become top-level sagas (as opposed to subsagas).  Instead, we keep track
+    /// of the first group of DAG (root nodes) and the last group of DAG nodes
+    /// (leaf nodes).  Later, we'll wrap this `Dag` in either [`SagaDag`] (for
+    /// use as a top-level saga), in which case we'll add the start and end
+    /// nodes, or we'll use it as a subsaga, in which case we'll add
+    /// SubsagaStart and SubsagaEnd nodes.
+    graph: Graph<InternalNode, ()>,
 
     /// the initial nodes (root nodes) of the DAG
     first_nodes: Vec<NodeIndex>,
@@ -449,7 +453,8 @@ pub struct Dag {
     last_nodes: Vec<NodeIndex>,
 }
 
-/// Used to build a [`Dag`] that can then be executed as either a saga or subsaga
+/// Used to build a [`Dag`] that can then be executed as either a saga or
+/// subsaga
 ///
 /// Use [`DagBuilder::append()`] and [`DagBuilder::append_parallel()`] to add
 /// nodes to the graph.  Use [`DagBuilder::build()`] to finish construction and
@@ -461,7 +466,7 @@ pub struct DagBuilder {
     /// the actual DAG representation
     ///
     /// This looks the same as [`Dag`]'s `graph`.
-    graph: Graph<Node, ()>,
+    graph: Graph<InternalNode, ()>,
 
     /// the initial set of nodes (root nodes), if any have been added
     first_added: Option<Vec<NodeIndex>>,
@@ -472,9 +477,9 @@ pub struct DagBuilder {
     /// Some of these may run concurrently.
     ///
     /// The `append()`/`append_parallel()` functions are public.  As the names
-    /// imply, they append new nodes to the graph.  They also update "last_added"
-    /// so that the next set of nodes will depend on the ones that were just
-    /// added.
+    /// imply, they append new nodes to the graph.  They also update
+    /// "last_added" so that the next set of nodes will depend on the ones that
+    /// were just added.
     ///
     /// The `add_*()` functions are private, for use only by
     /// `append()`/`append_parallel()`.  These functions have a consistent
@@ -502,7 +507,7 @@ impl DagBuilder {
     /// The new node will depend on completion of all actions that were added in
     /// the last call to `append` or `append_parallel`.  The idea is to `append`
     /// a sequence of steps that run one after another.
-    pub fn append(&mut self, user_node: UserNode) {
+    pub fn append(&mut self, user_node: Node) {
         self.append_parallel(vec![user_node])
     }
 
@@ -512,7 +517,7 @@ impl DagBuilder {
     ///
     /// The new nodes will individually depend on completion of all actions that
     /// were added in the last call to `append()` or `append_parallel()`.
-    pub fn append_parallel(&mut self, user_nodes: Vec<UserNode>) {
+    pub fn append_parallel(&mut self, user_nodes: Vec<Node>) {
         let newnodes: Vec<NodeIndex> = user_nodes
             .into_iter()
             .map(|user_node| self.add_node(user_node))
@@ -543,31 +548,34 @@ impl DagBuilder {
     // set `self.last`.  They return the `NodeIndex` of the last thing they
     // added.
 
-    /// Adds any kind of [`UserNode`] to the graph
-    fn add_node(&mut self, user_node: UserNode) -> NodeIndex {
+    /// Adds any kind of [`Node`] to the graph
+    fn add_node(&mut self, user_node: Node) -> NodeIndex {
         match user_node.kind {
-            UserNodeKind::Action { label, action_name } => {
-                self.add_simple(Node::Action {
+            NodeKind::Action { label, action_name } => {
+                self.add_simple(InternalNode::Action {
                     name: user_node.node_name,
                     label,
                     action_name,
                 })
             }
-            UserNodeKind::Constant { value } => {
-                self.add_simple(Node::Constant {
+            NodeKind::Constant { value } => {
+                self.add_simple(InternalNode::Constant {
                     name: user_node.node_name,
                     value,
                 })
             }
-            UserNodeKind::Subsaga { params_node_name, dag } => {
+            NodeKind::Subsaga { params_node_name, dag } => {
                 self.add_subsaga(user_node.node_name, dag, params_node_name)
             }
         }
     }
 
-    /// Adds a `Node::Constant` or `Node::Action` to the graph
-    fn add_simple(&mut self, node: Node) -> NodeIndex {
-        assert!(matches!(node, Node::Constant { .. } | Node::Action { .. }));
+    /// Adds a `InternalNode::Constant` or `InternalNode::Action` to the graph
+    fn add_simple(&mut self, node: InternalNode) -> NodeIndex {
+        assert!(matches!(
+            node,
+            InternalNode::Constant { .. } | InternalNode::Action { .. }
+        ));
         let newnode = self.graph.add_node(node);
         self.depends_on_last(newnode);
         newnode
@@ -585,7 +593,7 @@ impl DagBuilder {
         subsaga_dag: Dag,
         params_node_name: NodeName,
     ) -> NodeIndex {
-        let node_start = Node::SubsagaStart {
+        let node_start = InternalNode::SubsagaStart {
             saga_name: subsaga_dag.saga_name.clone(),
             params_node_name: NodeName::new(params_node_name),
         };
@@ -603,13 +611,13 @@ impl DagBuilder {
             // added to `SagaDag`s.  Given that, we can copy the rest of the
             // nodes directly into the parent graph.
             match node {
-                Node::Start { .. } | Node::End => {
+                InternalNode::Start { .. } | InternalNode::End => {
                     panic!("subsaga Dag contained unexpected node: {:?}", node);
                 }
-                Node::Action { .. }
-                | Node::Constant { .. }
-                | Node::SubsagaStart { .. }
-                | Node::SubsagaEnd { .. } => (),
+                InternalNode::Action { .. }
+                | InternalNode::Constant { .. }
+                | InternalNode::SubsagaStart { .. }
+                | InternalNode::SubsagaEnd { .. } => (),
             };
 
             // We already appended the start node
@@ -645,7 +653,8 @@ impl DagBuilder {
 
         // Add a SubsagaEnd node that depends on the last nodes of the subsaga
         // DAG.
-        let subsaga_end = self.graph.add_node(Node::SubsagaEnd { name });
+        let subsaga_end =
+            self.graph.add_node(InternalNode::SubsagaEnd { name });
         for child_last_node in &subsaga_dag.last_nodes {
             let parent_last_node =
                 subsaga_idx_to_saga_idx.get(&child_last_node).unwrap();

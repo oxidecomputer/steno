@@ -1,6 +1,6 @@
 //! Manages execution of a saga
 
-use crate::dag::Node;
+use crate::dag::InternalNode;
 use crate::dag::NodeName;
 use crate::rust_features::ExpectNone;
 use crate::saga_action_error::ActionError;
@@ -456,15 +456,16 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             for node_index in &nodes_sorted {
                 let node = graph.node_weight(*node_index).unwrap();
                 let subsaga_start_index = match node {
-                    Node::Start { .. } | Node::SubsagaStart { .. } => {
+                    InternalNode::Start { .. }
+                    | InternalNode::SubsagaStart { .. } => {
                         // For a top-level start node or subsaga start node, the
                         // containing saga start node is itself.
                         *node_index
                     }
-                    Node::End
-                    | Node::Action { .. }
-                    | Node::Constant { .. }
-                    | Node::SubsagaEnd { .. } => {
+                    InternalNode::End
+                    | InternalNode::Action { .. }
+                    | InternalNode::Constant { .. }
+                    | InternalNode::SubsagaEnd { .. } => {
                         // For every other kind of node, first, there must be at
                         // least one ancestor.  And we must have already visited
                         // because we're iterating in topological order.  In
@@ -479,7 +480,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                         let immed_ancestor_node =
                             dag.get(immed_ancestor).unwrap();
                         let ancestor = match immed_ancestor_node {
-                            Node::SubsagaEnd { .. } => {
+                            InternalNode::SubsagaEnd { .. } => {
                                 let subsaga_start = *node_saga_start
                                     .get(&immed_ancestor)
                                     .unwrap();
@@ -740,14 +741,14 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     ) {
         let dag_node = self.dag.get(node_index).unwrap();
         let next_node_index = match dag_node {
-            Node::Start { .. } | Node::End => Some(node_index),
-            Node::Constant { name, value } => {
+            InternalNode::Start { .. } | InternalNode::End => Some(node_index),
+            InternalNode::Constant { name, value } => {
                 // XXX-dap validate no duplicates?
                 tree.insert(name.clone(), Arc::new(value.clone()));
                 // XXX-dap clones
                 Some(node_index)
             }
-            Node::Action { name, .. } => {
+            InternalNode::Action { name, .. } => {
                 /*
                  * If we're in this function, it's because we're looking at the
                  * ancestor of a node that's currently "Running".  All such
@@ -760,7 +761,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 tree.insert(name.clone(), live_state.node_output(node_index));
                 Some(node_index)
             }
-            Node::SubsagaEnd { name } => {
+            InternalNode::SubsagaEnd { name } => {
                 /*
                  * If we find a subsaga end node, then we'll emit the output of
                  * the saga.  Plus, skip up to the start of the containing saga
@@ -772,7 +773,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 Some(*next_node_index)
             }
 
-            Node::SubsagaStart { .. } => None,
+            InternalNode::SubsagaStart { .. } => None,
         };
 
         if let Some(next_node_index) = next_node_index {
@@ -792,8 +793,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let subsaga_start_index = self.node_saga_start[&node_index];
         let subsaga_start_node = self.dag.get(subsaga_start_index).unwrap();
         match subsaga_start_node {
-            Node::Start { params } => Arc::new(params.clone()), // XXX-dap clone
-            Node::SubsagaStart { params_node_name, .. } => {
+            InternalNode::Start { params } => Arc::new(params.clone()), // XXX-dap clone
+            InternalNode::SubsagaStart { params_node_name, .. } => {
                 // TODO-performance We're going to repeat this for every node in
                 // the subsaga.  We may as well cache it somewhere.  The tricky
                 // part is figuring out when to generate the value that accounts
@@ -813,10 +814,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 // return an error here, either.
                 Arc::clone(tree.get(params_node_name).unwrap())
             }
-            Node::SubsagaEnd { .. }
-            | Node::End
-            | Node::Action { .. }
-            | Node::Constant { .. } => {
+            InternalNode::SubsagaEnd { .. }
+            | InternalNode::End
+            | InternalNode::Action { .. }
+            | InternalNode::Constant { .. } => {
                 panic!(
                     "containing saga cannot have started with {:?}",
                     subsaga_start_node
@@ -1036,21 +1037,23 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let registry = &self.action_registry;
         let dag = &self.dag;
         match dag.get(node_index).unwrap() {
-            Node::Action { action_name: action, .. } => {
+            InternalNode::Action { action_name: action, .. } => {
                 registry.get(action).expect("missing action for node")
             }
 
-            Node::Constant { value, .. } => {
+            InternalNode::Constant { value, .. } => {
                 Arc::new(ActionConstant::new(value.clone()))
             }
 
-            Node::Start { .. } | Node::End | Node::SubsagaStart { .. } => {
+            InternalNode::Start { .. }
+            | InternalNode::End
+            | InternalNode::SubsagaStart { .. } => {
                 // These nodes are no-ops in terms of the action that happens at
                 // the node itself.
                 Arc::new(ActionConstant::new(serde_json::Value::Null))
             }
 
-            Node::SubsagaEnd { .. } => {
+            InternalNode::SubsagaEnd { .. } => {
                 // We record the subsaga's output here, as the output of the
                 // `SubsagaEnd` node.  (We don't _have_ to do this -- we could
                 // instead change the logic that _finds_ the saga's output to
@@ -1701,7 +1704,7 @@ impl SagaExecStatus {
 
 /* TODO */
 fn neighbors_all<F>(
-    graph: &Graph<Node, ()>,
+    graph: &Graph<InternalNode, ()>,
     node_id: &NodeIndex,
     direction: Direction,
     test: F,
