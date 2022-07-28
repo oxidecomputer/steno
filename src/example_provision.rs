@@ -351,7 +351,7 @@ async fn demo_prov_instance_boot(
     Ok(())
 }
 
-async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<()> {
+async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<String> {
     eprintln!("running action: {}", sgctx.node_label());
     eprintln!("printing final state:");
     let vm_instance_id = sgctx.lookup::<u64>("instance_id")?;
@@ -363,5 +363,5 @@ async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<()> {
     let server_id =
         sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id;
     eprintln!("  server id: {}", server_id);
-    Ok(())
+    Ok(String::from("it worked"))
 }

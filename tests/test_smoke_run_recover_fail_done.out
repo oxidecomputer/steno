@@ -35,3 +35,6 @@ recovered state
 +-- stage 10: failed: InstanceBoot (produces "instance_boot")
 +-- stage 11: abandoned: Print (produces "print")
 
+result: FAILURE
+failed at node:    "instance_boot"
+failed with error: error injected

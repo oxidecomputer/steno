@@ -1561,7 +1561,7 @@ mod test {
         sec.saga_start(saga_id).await.expect("failed to start saga running");
         let result = saga_future.await;
         let output = result.kind.unwrap();
-        assert_eq!(output.lookup_output::<i32>("n1_out").unwrap(), 1);
+        assert_eq!(output.lookup_node_output::<i32>("n1_out").unwrap(), 1);
         assert_eq!(context.get_count("do_n1"), 1);
         assert_eq!(context.get_count("undo_n1"), 0);
     }
@@ -1646,7 +1646,7 @@ mod test {
         sec.saga_start(saga_id).await.expect("failed to start saga running");
         let result = saga_future.await;
         let output = result.kind.unwrap();
-        assert_eq!(output.lookup_output::<i32>("n1_out").unwrap(), 1);
+        assert_eq!(output.lookup_node_output::<i32>("n1_out").unwrap(), 1);
         assert_eq!(context.get_count("do_n1"), 1);
         assert_eq!(context.get_count("undo_n1"), 0);
     }

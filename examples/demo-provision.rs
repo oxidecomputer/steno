@@ -253,7 +253,8 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     }
 
     sec.saga_start(saga_id).await.expect("failed to start saga");
-    future.await;
+    let result = future.await;
+    assert_eq!(saga_id, result.saga_id);
 
     let saga = sec
         .saga_get(saga_id)
@@ -263,6 +264,22 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         println!("*** finished saga ***");
         println!("\n*** final state ***");
         println!("{}", saga.state.status());
+
+        print!("result: ");
+        match result.kind {
+            Ok(success_case) => {
+                println!("SUCCESS");
+                println!(
+                    "final output: {:?}",
+                    success_case.saga_output::<String>().unwrap()
+                );
+            }
+            Err(error_case) => {
+                println!("FAILURE");
+                println!("failed at node:    {:?}", error_case.error_node_name);
+                println!("failed with error: {:#}", error_case.error_source);
+            }
+        }
     }
 
     if let Some(output_log_path) = &args.dump_to {

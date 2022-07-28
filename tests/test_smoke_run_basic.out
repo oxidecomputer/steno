@@ -17,3 +17,5 @@
 +-- stage 10: done: InstanceBoot (produces "instance_boot")
 +-- stage 11: done: Print (produces "print")
 
+result: SUCCESS
+final output: "it worked"

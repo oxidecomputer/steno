@@ -1058,8 +1058,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 // TODO-robustness we validate that there's exactly one final
                 // node when we build the DAG, but we should also validate it
                 // during recovery or else fail more gracefully here.  See #32.
-                // XXX-dap We should properly reify "saga output" by adding it
-                // to the result type for the saga.
                 let ancestors: Vec<_> = dag
                     .graph
                     .neighbors_directed(node_index, Incoming)
@@ -1283,10 +1281,19 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             })
             .collect();
 
+        // The output node is the (sole) ancestor of the "end" node.
+        let output_node_index = self
+            .dag
+            .graph
+            .neighbors_directed(self.dag.end_node, Incoming)
+            .next()
+            .unwrap();
+        let saga_output = live_state.node_output(output_node_index);
+
         SagaResult {
             saga_id: self.saga_id,
             saga_log: live_state.sglog.clone(),
-            kind: Ok(SagaResultOk { node_outputs }),
+            kind: Ok(SagaResultOk { saga_output, node_outputs }),
         }
     }
 
@@ -1541,10 +1548,21 @@ pub struct SagaResult {
  */
 #[derive(Clone, Debug)]
 pub struct SagaResultOk {
+    saga_output: Arc<serde_json::Value>,
     node_outputs: BTreeMap<NodeName, Arc<serde_json::Value>>,
 }
 
 impl SagaResultOk {
+    /**
+     * Returns the final output of the saga (the output from the last node)
+     */
+    pub fn saga_output<T: ActionData + 'static>(
+        &self,
+    ) -> Result<T, ActionError> {
+        serde_json::from_value((*self.saga_output).clone())
+            .map_err(ActionError::new_deserialize)
+    }
+
     /**
      * Returns the data produced by a node in the saga.
      *
@@ -1552,7 +1570,7 @@ impl SagaResultOk {
      *
      * If the saga has no node called `name`.
      */
-    pub fn lookup_output<T: ActionData + 'static>(
+    pub fn lookup_node_output<T: ActionData + 'static>(
         &self,
         name: &str,
     ) -> Result<T, ActionError> {

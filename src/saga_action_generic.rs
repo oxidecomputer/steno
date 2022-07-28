@@ -114,6 +114,8 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
      * Subsequent stages can access this data with [`ActionContext::lookup`].
      * This is the _only_ supported means of sharing state across actions within
      * a saga.
+     *
+     * The output of the last node in the DAG becomes the output of the saga.
      */
     fn do_it(
         &self,

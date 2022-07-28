@@ -100,20 +100,21 @@ async fn book_trip(
         Ok(success) => {
             println!(
                 "hotel:   {:?}",
-                success.lookup_output::<HotelReservation>("hotel")
+                success.lookup_node_output::<HotelReservation>("hotel")
             );
             println!(
                 "flight:  {:?}",
-                success.lookup_output::<FlightReservation>("flight")
+                success.lookup_node_output::<FlightReservation>("flight")
             );
             println!(
                 "car:     {:?}",
-                success.lookup_output::<CarReservation>("car")
+                success.lookup_node_output::<CarReservation>("car")
             );
             println!(
                 "payment: {:?}",
-                success.lookup_output::<PaymentConfirmation>("payment")
+                success.lookup_node_output::<PaymentConfirmation>("payment")
             );
+            println!("\nraw summary:\n{:?}", success.saga_output::<Summary>());
         }
         Err(error) => {
             println!("action failed: {}", error.error_node_name.as_ref());
@@ -128,6 +129,7 @@ mod actions {
     use super::TripSaga;
     use lazy_static::lazy_static;
     use std::sync::Arc;
+    use steno::new_action_noop_undo;
     use steno::Action;
     use steno::ActionFunc;
 
@@ -155,6 +157,8 @@ mod actions {
             super::saga_book_car,
             super::saga_cancel_car
         );
+        pub static ref PRINT: Arc<dyn Action<TripSaga>> =
+            new_action_noop_undo("print", super::saga_print);
     }
 }
 
@@ -168,6 +172,7 @@ fn load_trip_actions(registry: &mut ActionRegistry<TripSaga>) {
     registry.register(actions::HOTEL.clone());
     registry.register(actions::FLIGHT.clone());
     registry.register(actions::CAR.clone());
+    registry.register(actions::PRINT.clone());
 }
 
 /// Build the DAG for booking a trip
@@ -199,6 +204,8 @@ fn make_trip_dag(params: TripParams) -> Arc<SagaDag> {
         Node::action("flight", "BookFlight", actions::FLIGHT.as_ref()),
         Node::action("car", "BookCar", actions::CAR.as_ref()),
     ]);
+
+    builder.append(Node::action("output", "Print", actions::PRINT.as_ref()));
 
     Arc::new(SagaDag::new(
         builder.build().expect("DAG was unexpectedly invalid"),
@@ -247,6 +254,13 @@ struct FlightReservation(String);
 struct CarReservation(String);
 #[derive(Debug, Deserialize, Serialize)]
 struct PaymentConfirmation(String);
+#[derive(Debug, Deserialize, Serialize)]
+struct Summary {
+    car: CarReservation,
+    flight: FlightReservation,
+    hotel: HotelReservation,
+    payment: PaymentConfirmation,
+}
 
 // Saga action implementations
 
@@ -333,4 +347,15 @@ async fn saga_cancel_car(
     let confirmation: CarReservation = action_context.lookup("car")?;
     // ... (make request to another service -- must not fail)
     Ok(())
+}
+
+async fn saga_print(
+    action_context: ActionContext<TripSaga>,
+) -> Result<Summary, ActionError> {
+    Ok(Summary {
+        car: action_context.lookup("car")?,
+        flight: action_context.lookup("flight")?,
+        hotel: action_context.lookup("hotel")?,
+        payment: action_context.lookup("payment")?,
+    })
 }

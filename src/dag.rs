@@ -336,6 +336,8 @@ impl InternalNode {
 
 /// A [`Dag`] plus saga input parameters that together can be used to execute a
 /// saga
+///
+/// The output of the saga is the output of the last node in the DAG.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SagaDag {
     /// name of the saga (intended primarily for use by the consumer)
