@@ -1302,17 +1302,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         async move {
             let live_state = self.live_state.lock().await;
 
-            /*
-             * First, determine the maximum depth of each node.  Use this to
-             * figure out the list of nodes at each level of depth.  This
-             * information is used to figure out where to print each node's
-             * status vertically.
-             */
-            let mut max_depth_of_node: BTreeMap<NodeIndex, usize> =
-                BTreeMap::new();
-            max_depth_of_node.insert(self.dag.start_node, 0);
-            let mut nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>> =
-                BTreeMap::new();
             let mut node_exec_states = BTreeMap::new();
 
             let graph = &self.dag.graph;
@@ -1320,47 +1309,11 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             for node in topo_visitor.iter(graph) {
                 /* Record the current execution state for this node. */
                 node_exec_states.insert(node, live_state.node_exec_state(node));
-
-                /*
-                 * Compute the node's depth.  This must be 0 (already stored
-                 * above) for the root node and we don't care about doing this
-                 * for the end node.
-                 */
-                if let Some(d) = max_depth_of_node.get(&node) {
-                    assert_eq!(*d, 0);
-                    assert_eq!(node, self.dag.start_node);
-                    assert_eq!(max_depth_of_node.len(), 1);
-                    continue;
-                }
-
-                /*
-                 * We don't want to include the end node because we don't want
-                 * to try to print it later.  This should always be the last
-                 * iteration of the loop.
-                 */
-                if node == self.dag.end_node {
-                    continue;
-                }
-
-                let mut max_parent_depth: Option<usize> = None;
-                for p in graph.neighbors_directed(node, Incoming) {
-                    let parent_depth = *max_depth_of_node.get(&p).unwrap();
-                    match max_parent_depth {
-                        Some(x) if x >= parent_depth => (),
-                        _ => max_parent_depth = Some(parent_depth),
-                    };
-                }
-
-                let depth = max_parent_depth.unwrap() + 1;
-                max_depth_of_node.insert(node, depth);
-
-                nodes_at_depth.entry(depth).or_insert_with(Vec::new).push(node);
             }
 
             SagaExecStatus {
                 saga_id: self.saga_id,
                 dag: Arc::clone(&self.dag),
-                nodes_at_depth,
                 node_exec_states,
                 sglog: live_state.sglog.clone(),
             }
@@ -1627,7 +1580,6 @@ pub struct SagaResultErr {
 #[derive(Clone, Debug)]
 pub struct SagaExecStatus {
     saga_id: SagaId,
-    nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>>,
     node_exec_states: BTreeMap<NodeIndex, NodeExecState>,
     dag: Arc<SagaDag>,
     sglog: SagaLog,
@@ -1635,7 +1587,121 @@ pub struct SagaExecStatus {
 
 impl fmt::Display for SagaExecStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.print(f, 0)
+        let mut printer = SagaExecStatusPrinter::new(self);
+        printer.print(f)
+    }
+}
+
+struct SagaExecStatusPrinter<'a> {
+    status: &'a SagaExecStatus,
+    // The current node index. We don't actually know this until we perform the topological sort in print.
+    node_index: Option<NodeIndex>,
+    indent_level: usize,
+    printed: BTreeSet<NodeIndex>,
+}
+
+impl<'a> SagaExecStatusPrinter<'a> {
+    pub fn new(status: &'a SagaExecStatus) -> SagaExecStatusPrinter<'a> {
+        SagaExecStatusPrinter {
+            status,
+            node_index: None,
+            indent_level: 0,
+            printed: BTreeSet::new(),
+        }
+    }
+
+    pub fn print(&mut self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write_header(f)?;
+        let graph = &self.status.dag.graph;
+        let topo_visitor = Topo::new(graph);
+        let mut topo_iter = topo_visitor.iter(graph).peekable();
+        self.node_index = topo_iter.peek().cloned();
+
+        // Start walking the DAG in topological order
+        for idx in topo_iter {
+            // We already traversed this node
+            if self.printed.contains(&idx) {
+                continue;
+            }
+
+            self.print_node(f, idx)?;
+
+            let children: Vec<_> =
+                graph.neighbors_directed(idx, Outgoing).collect();
+
+            // Nodes with multiple children have those children execute in parallel.
+            //
+            // We want to display this via an indent. We also want to ensure
+            // that if a child is a subsaga that we display this subsaga
+            // indented with its children nested under itself. Subsagas
+            // themselves can contain parallel nodes and may be arbitrarily
+            // nested. We must show this via indents.
+            if children.len() > 1 {
+                let msg = "(actions in parallel)\n";
+                self.write_indented(f, msg)?;
+                self.indent_level += 1;
+                for idx in children {
+                    self.print_node(f, idx)?;
+                }
+                self.indent_level -= 1;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn print_node(
+        &mut self,
+        f: &mut fmt::Formatter<'_>,
+        idx: NodeIndex,
+    ) -> fmt::Result {
+        let node = self.status.dag.get(idx).unwrap();
+        let label = Self::mklabel(&node);
+        let state = &self.status.node_exec_states[&idx];
+        let msg = format!("{}: {}\n", state, label);
+
+        if let &InternalNode::SubsagaStart { .. } = &node {
+            self.indent_level += 1;
+        }
+
+        self.write_indented(f, &msg)?;
+
+        if let &InternalNode::SubsagaEnd { .. } = &node {
+            self.indent_level -= 1;
+        }
+        self.printed.insert(idx);
+
+        Ok(())
+    }
+
+    fn write_indented(
+        &self,
+        out: &mut fmt::Formatter<'_>,
+        msg: &str,
+    ) -> fmt::Result {
+        write!(out, "{:width$}+-- {}", "", msg, width = self.big_indent())
+    }
+
+    fn mklabel(node: &InternalNode) -> String {
+        if let Some(name) = node.node_name() {
+            format!("{} (produces {:?})", node.label(), name)
+        } else {
+            node.label()
+        }
+    }
+
+    fn big_indent(&self) -> usize {
+        self.indent_level * 8
+    }
+
+    fn write_header(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            out,
+            "{:width$}+ saga execution: {}\n",
+            "",
+            self.status.saga_id,
+            width = 0
+        )
     }
 }
 
@@ -1644,27 +1710,15 @@ impl SagaExecStatus {
         &self.sglog
     }
 
-    fn print(
+    /*  fn print(
         &self,
         out: &mut fmt::Formatter<'_>,
         indent_level: usize,
     ) -> fmt::Result {
         let big_indent = indent_level * 16;
-        write!(
-            out,
-            "{:width$}+ saga execution: {}\n",
-            "",
-            self.saga_id,
-            width = big_indent
-        )?;
+        self.write_header(out)?;
         for (d, nodes) in &self.nodes_at_depth {
-            write!(
-                out,
-                "{:width$}+-- stage {:>2}: ",
-                "",
-                d,
-                width = big_indent
-            )?;
+            Self::write_stage(out, d, indent_level)?;
             let mklabel = |node| {
                 let node = self.dag.get(node).unwrap();
                 if let Some(name) = node.node_name() {
@@ -1711,9 +1765,13 @@ impl SagaExecStatus {
 
         Ok(())
     }
+    */
 }
 
-/* TODO */
+/**
+* Return true if all neighbors of `node_id` in the given `direction`  
+* return true for the predicate `test`.
+*/
 fn neighbors_all<F>(
     graph: &Graph<InternalNode, ()>,
     node_id: &NodeIndex,
