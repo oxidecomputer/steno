@@ -1593,140 +1593,28 @@ impl SagaExecStatus {
         &self.sglog
     }
 
+    /// Generate an output order via the [`PrintOrderer`] and then write it
+    /// to the Formatter.
     pub fn print(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let output = self.print_order();
+        let orderer = PrintOrderer::new(&self.dag);
+        let output = orderer.print_order();
         self.write_header(f)?;
-        for (idx, indent_level) in output {
-            self.print_node(f, idx, indent_level)?;
+        for entry in output {
+            match entry {
+                PrintOrderEntry::Node { idx, indent_level } => {
+                    self.print_node(f, idx, indent_level)?;
+                }
+                PrintOrderEntry::Parallel { indent_level } => {
+                    Self::write_indented(
+                        f,
+                        indent_level,
+                        "(parallel actions):\n",
+                    )?;
+                }
+            }
         }
 
         Ok(())
-    }
-
-    // Generate a print order of indexes along with their indent_level
-    //
-    // We want to walk the DAG in topological order and print indents in the
-    // following scenarios:
-    //     * `Parallel` nodes have been reached
-    //     * A `SubsagaStart` node has been reached
-    //
-    // Importantly we must allow arbitrary nesting of subsagas and note
-    // that subsagas may contain parallel nodes. However, due to the way we
-    // constrain the DAGs with the [`DagBuilder`], we do not have to worry
-    // about parallel nodes spawning othert parallel nodes. In other words,
-    // all parallel nodes must complete before the next set of parallel nodes
-    // are run. This is because each call to [`DagBuilder::append_parallel`],
-    // results in a set of nodes known as `last_nodes` that must complete
-    // before any new nodes are added to the graph with `[DagBuilder::append]`
-    // or `[DagBuilder::append_parallel]`. Graphically, each `last_node`
-    // has an outgoing edge to  any nodes added in the next call to
-    // [`DagBuilder::append`] or [`DagBuilder::append_parallel`].
-    //
-    // The only way to have one parallel node lead to other nodes
-    // in its parallel branch is for the parallel node itself to be an
-    // [`InternalNode::SubsagaStart`].
-    //
-    fn print_order(&self) -> Vec<(NodeIndex, usize)> {
-        // TODO(AJS): Implement property based tests by generating random
-        // DAGs made up of constant nodes and subsagas and validating
-        // properties about them, such as:
-        //    * Any subsaga completes if a Subsaga start node is in a set of
-        //      parallel nodes.
-        //    * All parallel nodes print before any other node in the graph.
-
-        // A stack entry contains all parallel nodes that must run during a
-        // given indent level.
-        struct StackEntry {
-            indent_level: usize,
-            node_indexes: Vec<NodeIndex>,
-        }
-
-        let graph = &self.dag.graph;
-        let root = Topo::new(graph).iter(graph).next().unwrap();
-        let mut output = Vec::new();
-        let mut stack = Vec::<StackEntry>::new();
-        let mut idx = root;
-        let mut indent = 0;
-
-        // Start walking the graph
-        //
-        // When a set of child nodes are found, they are supposed to run
-        // in parallel. If any of the nodes is a subsaga, we want to start
-        // printing the subsaga. We push any remaining parallel nodes onto the
-        // stack so we can resume when we are done with the subsaga.
-        loop {
-            let node = self.dag.get(idx).unwrap();
-
-            // We want the SubsagaEnd node to bracket the indented subsaga
-            // nodes. We therefore outdent before printing.
-            if let &InternalNode::SubsagaEnd { .. } = node {
-                indent -= 1;
-            }
-
-            // Add the current node to the output
-            output.push((idx, indent));
-
-            // We want the SubsagaStart node to bracket the indented subsaga
-            // nodes. We therefore indent only after printing.
-            if let &InternalNode::SubsagaStart { .. } = node {
-                indent += 1;
-            }
-
-            // If we are in a subsaga with no parallel nodes at the current
-            // indent level we move further down the graph. Otherwise a
-            // parallel node has just printed, and we need to get the next
-            // parallel node off the stack.
-            match stack.last_mut() {
-                Some(entry) => {
-                    if entry.indent_level == indent {
-                        // Take the next parallel node if one exists
-                        match entry.node_indexes.pop() {
-                            Some(next_idx) => {
-                                // process this parallel node by
-                                // jumping to the top of the loop
-                                idx = next_idx;
-                                continue;
-                            }
-                            None => {
-                                // The stack frame is exhausted. We must pop it
-                                // de-indent, and then continue down the graph.
-                                let _ = stack.pop();
-                                indent -= 1;
-                            }
-                        }
-                    }
-                }
-                None => {
-                    // Continue down the graph
-                }
-            }
-
-            // We want to print the children in the order added, so we collect them
-            // in reverse order.
-            let mut children: Vec<NodeIndex> =
-                graph.neighbors_directed(idx, Outgoing).collect();
-            children.reverse();
-
-            // We are done
-            if children.len() == 0 && stack.is_empty() {
-                break;
-            }
-
-            if children.len() == 1 {
-                idx = children[0];
-            } else {
-                // Pick the first child to print
-                idx = children.pop().unwrap();
-                indent += 1;
-                // These nodes must run in parallel. Put the remainder on the stack.
-                stack.push(StackEntry {
-                    indent_level: indent,
-                    node_indexes: children,
-                });
-            }
-        }
-
-        output
     }
 
     fn print_node(
@@ -1777,6 +1665,180 @@ impl SagaExecStatus {
             self.saga_id,
             width = 0
         )
+    }
+}
+
+// An entry in the output Vec of the [`SagaExecStatus::print_order`] method.
+enum PrintOrderEntry {
+    // Print a message that parallelization has started
+    // The nodes themselves are ordered and indented properly
+    // so this is just to help with labeling and testing
+    Parallel { indent_level: usize },
+    Node { idx: NodeIndex, indent_level: usize },
+}
+
+// A stack entry contains all parallel nodes that must run during a
+// given indent level.
+#[derive(Debug, PartialEq)]
+enum StackEntry {
+    Parallel(Vec<NodeIndex>),
+    Subsaga,
+}
+
+// Order the printing of the Dag for SagaExecStatus
+struct PrintOrderer<'a> {
+    dag: &'a SagaDag,
+    output: Vec<PrintOrderEntry>,
+    stack: Vec<StackEntry>,
+    idx: NodeIndex,
+    indent_level: usize,
+}
+
+impl<'a> PrintOrderer<'a> {
+    pub fn new(dag: &'a SagaDag) -> PrintOrderer<'a> {
+        let idx = dag.start_node;
+        PrintOrderer {
+            dag,
+            output: Vec::new(),
+            stack: Vec::new(),
+            idx,
+            indent_level: 0,
+        }
+    }
+
+    fn output_current_node(&mut self) {
+        self.output.push(PrintOrderEntry::Node {
+            idx: self.idx,
+            indent_level: self.indent_level,
+        });
+    }
+
+    fn output_parallel(&mut self) {
+        self.output.push(PrintOrderEntry::Parallel {
+            indent_level: self.indent_level,
+        });
+    }
+
+    // Generate a print order of indexes along with their indent_level
+    //
+    // We want to walk the DAG in topological order and print indents in the
+    // following scenarios:
+    //     * `Parallel` nodes have been reached
+    //     * A `SubsagaStart` node has been reached
+    //
+    // Importantly we must allow arbitrary nesting of subsagas, which
+    // themselves may contain parallel nodes. However, due to the way we
+    // constrain the DAGs with the [`DagBuilder`], we do not have to worry
+    // about parallel nodes spawning othert parallel nodes. In other words,
+    // all parallel nodes must complete before the next set of parallel nodes
+    // are run. This is because each call to [`DagBuilder::append_parallel`],
+    // results in a set of nodes known as `last_nodes` that must complete
+    // before any new nodes are added to the graph with `[DagBuilder::append]`
+    // or `[DagBuilder::append_parallel]`. Graphically, each `last_node`
+    // has an outgoing edge to any nodes added in the next call to
+    // [`DagBuilder::append`] or [`DagBuilder::append_parallel`].
+    //
+    // The only way to have one parallel node lead to other nodes
+    // in its parallel branch is for the parallel node itself to be an
+    // [`InternalNode::SubsagaStart`].
+    fn print_order(mut self) -> Vec<PrintOrderEntry> {
+        // TODO(AJS): Implement property based tests by generating random
+        // DAGs made up of constant nodes and subsagas and validating
+        // properties about them, such as:
+        //    * Any subsaga completes if a Subsaga start node is in a set of
+        //      parallel nodes.
+        //    * All parallel nodes print before any other node in the graph.
+
+        // Start walking the graph
+        //
+        // When a set of child nodes are found, they are supposed to run
+        // in parallel. If any of the nodes is a subsaga, we want to start
+        // printing the subsaga. We push any remaining parallel nodes onto the
+        // stack so we can resume when we are done with the subsaga.
+        while self.idx != self.dag.end_node {
+            let node = self.dag.get(self.idx).unwrap();
+
+            if let &InternalNode::SubsagaStart { .. } = node {
+                // Add the current node to the output before indenting
+                self.output_current_node();
+                self.indent_level += 1;
+                self.stack.push(StackEntry::Subsaga);
+                self.descend();
+            } else if let &InternalNode::SubsagaEnd { .. } = node {
+                self.indent_level -= 1;
+                self.stack.pop();
+
+                // Add the current node to the output after de-indenting
+                self.output_current_node();
+
+                // Go to the next parallel node if there is one, otherwise descend.
+                if !self.next_parallel_node() {
+                    self.descend();
+                }
+            } else {
+                // Simple node
+                // Add the current node to the output
+                self.output_current_node();
+
+                // Go to the next parallel node if there is one, otherwise descend.
+                if !self.next_parallel_node() {
+                    self.descend();
+                }
+            }
+        }
+
+        assert!(self.stack.is_empty());
+        return self.output;
+    }
+
+    /// Descend down the graph
+    fn descend(&mut self) {
+        // We want to print the children in the order added, so we collect them
+        // in reverse order because we pop off the back of the Vec.
+        let mut children: Vec<NodeIndex> =
+            self.dag.graph.neighbors_directed(self.idx, Outgoing).collect();
+        children.reverse();
+
+        if children.len() == 0 {
+            // We are done
+            assert!(self.stack.is_empty());
+            assert_eq!(self.dag.end_node, self.idx);
+            return;
+        }
+
+        if children.len() == 1 {
+            self.idx = children[0];
+        } else {
+            self.output_parallel();
+            // Pick the first child to print
+            self.idx = children.pop().unwrap();
+            self.indent_level += 1;
+            // These nodes must run in parallel. Put the remainder on the stack.
+            self.stack.push(StackEntry::Parallel(children));
+        }
+    }
+
+    // Set the next parallel node if it exists.
+    //
+    // Return true if there is a parallel node.
+    //
+    // Side effects:
+    //   * If there is a parallel node we remove it from the nodes in the top
+    //     of the stack.
+    //   * If this is the last parallel node, we pop the top of the stack
+    //     and reduce the indent level.
+    fn next_parallel_node(&mut self) -> bool {
+        if let Some(StackEntry::Parallel(nodes)) = self.stack.last_mut() {
+            if let Some(next_idx) = nodes.pop() {
+                self.idx = next_idx;
+                return true;
+            } else {
+                // This is the last parallel node
+                self.indent_level -= 1;
+                self.stack.pop();
+            }
+        }
+        false
     }
 }
 
