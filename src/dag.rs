@@ -384,6 +384,10 @@ impl SagaDag {
         }
     }
 
+    pub fn saga_name(&self) -> &SagaName {
+        &self.saga_name
+    }
+
     /// Return a node given its index
     pub(crate) fn get(&self, node_index: NodeIndex) -> Option<&InternalNode> {
         self.graph.node_weight(node_index)
