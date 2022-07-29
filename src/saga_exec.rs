@@ -1650,6 +1650,38 @@ impl<'a> SagaExecStatusPrinter<'a> {
         Ok(())
     }
 
+    // Generate a print order of indexes
+    //
+    // We want to walk the DAG in topological order and print indents in the
+    // following scenarios:
+    //     * `Parallel` nodes have been reached
+    //     * A `SubsagaStart` node has been reached
+    //
+    // Importantly we must allow arbitrary nesting of subsagas and note
+    // that subsagas may contain parallel nodes. However, due to the way we
+    // constrain the DAGs with the [`DagBuilder`], we do not have to worry
+    // about parallel nodes spawning othert parallel nodes. In other words,
+    // all parallel nodes must complete before the next set of parallel nodes
+    // are run. This is because each call to [`DagBuilder::append_parallel`],
+    // results in a set of nodes known as `last_nodes` that must complete
+    // before any new nodes are added to the graph with `[DagBuilder::append]`
+    // or `[DagBuilder::append_parallel]`. Graphically, each `last_node`
+    // has an outgoing edge to  any nodes added in the next call to
+    // [`DagBuilder::append`] or [`DagBuilder::append_parallel`].
+    //
+    // The only way to have one parallel node lead to other nodes
+    // in its parallel branch is for the parallel node itself to be an
+    // [`InternalNode::SubsagaStart`].
+    fn print_order(&mut self) -> Vec<NodeIndex> {
+        // TODO: Implement this and use it rather than calculating the order
+        // directly in `print`. Doing it this way also allows us to generate
+        // arbitrary DAGs made up of Constant nodes and subsagas, and then verify
+        // properties about them, such as:
+        //    * Any subsaga completes if a Subsaga start node is in a set of parallel nodes.
+        //    * All parallel nodes print before any other node in the graph.
+        unimplemented!()
+    }
+
     fn print_node(
         &mut self,
         f: &mut fmt::Formatter<'_>,
