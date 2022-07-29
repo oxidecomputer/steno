@@ -1685,7 +1685,9 @@ enum StackEntry {
     Subsaga,
 }
 
-// Order the printing of the Dag for SagaExecStatus
+// Structure the Dag for printing as text
+//
+// See [`PrintOrderer::print_order`] for details.
 struct PrintOrderer<'a> {
     dag: &'a SagaDag,
     output: Vec<PrintOrderEntry>,
@@ -1726,20 +1728,27 @@ impl<'a> PrintOrderer<'a> {
     //     * `Parallel` nodes have been reached
     //     * A `SubsagaStart` node has been reached
     //
-    // Importantly we must allow arbitrary nesting of subsagas, which
-    // themselves may contain parallel nodes. However, due to the way we
-    // constrain the DAGs with the [`DagBuilder`], we do not have to worry
-    // about parallel nodes spawning othert parallel nodes. In other words,
-    // all parallel nodes must complete before the next set of parallel nodes
-    // are run. This is because each call to [`DagBuilder::append_parallel`],
-    // results in a set of nodes known as `last_nodes` that must complete
-    // before any new nodes are added to the graph with `[DagBuilder::append]`
-    // or `[DagBuilder::append_parallel]`. Graphically, each `last_node`
-    // has an outgoing edge to any nodes added in the next call to
-    // [`DagBuilder::append`] or [`DagBuilder::append_parallel`].
+    // We de-indent when:
+    //     * the last parallel node at an indent_level is run
+    //     * A `SubsagaEnd` node has been reached
     //
-    // The only way to have one parallel node lead to other nodes
-    // in its parallel branch is for the parallel node itself to be an
+    // Importantly we must allow arbitrary nesting of subsagas, which
+    // themselves may contain parallel nodes. However, due to the way
+    // we constrain the DAGs with the [`DagBuilder`], we do not have to
+    // worry about parallel nodes spawning othert parallel nodes directly.
+    // In other words, all parallel nodes must complete before the
+    // next set of parallel nodes are run. This is because each call to
+    // [`DagBuilder::append_parallel`], results in a set of nodes known as
+    // `last_nodes` that must complete before any new nodes are added to the
+    // graph with `[DagBuilder::append]` or `[DagBuilder::append_parallel]`.
+    // Graphically, each `last_node` has an outgoing edge to any
+    // nodes added in the next call to [`DagBuilder::append`] or
+    // [`DagBuilder::append_parallel`]. Thus when the last parallel node
+    // at a given level is done being printed we can descend the graph.
+    //
+    // The only way to have one parallel node lead to other nodes in
+    // its parallel branch that the other parallel nodes at its level
+    // don't also lead to is for the parallel node itself to be an
     // [`InternalNode::SubsagaStart`].
     fn print_order(mut self) -> Vec<PrintOrderEntry> {
         // TODO(AJS): Implement property based tests by generating random
@@ -1751,10 +1760,14 @@ impl<'a> PrintOrderer<'a> {
 
         // Start walking the graph
         //
-        // When a set of child nodes are found, they are supposed to run
-        // in parallel. If any of the nodes is a subsaga, we want to start
-        // printing the subsaga. We push any remaining parallel nodes onto the
-        // stack so we can resume when we are done with the subsaga.
+        // * Whenever a subsaga starts we want to print its children before any
+        //   parallel nodes.
+        // * Whenever a subsaga ends, we check to see if there are any
+        //   parallel nodes before we look for children.
+        // * Whenever there is a simple node, we check to see if there are
+        //   parallel nodes before we look for children.
+        //
+        // This results in
         while self.idx != self.dag.end_node {
             let node = self.dag.get(self.idx).unwrap();
 
@@ -1771,7 +1784,6 @@ impl<'a> PrintOrderer<'a> {
                 // Add the current node to the output after de-indenting
                 self.output_current_node();
 
-                // Go to the next parallel node if there is one, otherwise descend.
                 if !self.next_parallel_node() {
                     self.descend();
                 }
@@ -1780,7 +1792,6 @@ impl<'a> PrintOrderer<'a> {
                 // Add the current node to the output
                 self.output_current_node();
 
-                // Go to the next parallel node if there is one, otherwise descend.
                 if !self.next_parallel_node() {
                     self.descend();
                 }
