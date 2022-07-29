@@ -1584,70 +1584,26 @@ pub struct SagaExecStatus {
 
 impl fmt::Display for SagaExecStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut printer = SagaExecStatusPrinter::new(self);
-        printer.print(f)
+        self.print(f)
     }
 }
 
-struct SagaExecStatusPrinter<'a> {
-    status: &'a SagaExecStatus,
-    // The current node index. We don't actually know this until we perform the topological sort in print.
-    node_index: Option<NodeIndex>,
-    indent_level: usize,
-    printed: BTreeSet<NodeIndex>,
-}
-
-impl<'a> SagaExecStatusPrinter<'a> {
-    pub fn new(status: &'a SagaExecStatus) -> SagaExecStatusPrinter<'a> {
-        SagaExecStatusPrinter {
-            status,
-            node_index: None,
-            indent_level: 0,
-            printed: BTreeSet::new(),
-        }
+impl SagaExecStatus {
+    pub fn log(&self) -> &SagaLog {
+        &self.sglog
     }
 
-    pub fn print(&mut self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    pub fn print(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let output = self.print_order();
         self.write_header(f)?;
-        let graph = &self.status.dag.graph;
-        let topo_visitor = Topo::new(graph);
-        let mut topo_iter = topo_visitor.iter(graph).peekable();
-        self.node_index = topo_iter.peek().cloned();
-
-        // Start walking the DAG in topological order
-        for idx in topo_iter {
-            // We already traversed this node
-            if self.printed.contains(&idx) {
-                continue;
-            }
-
-            self.print_node(f, idx)?;
-
-            let children: Vec<_> =
-                graph.neighbors_directed(idx, Outgoing).collect();
-
-            // Nodes with multiple children have those children execute in parallel.
-            //
-            // We want to display this via an indent. We also want to ensure
-            // that if a child is a subsaga that we display this subsaga
-            // indented with its children nested under itself. Subsagas
-            // themselves can contain parallel nodes and may be arbitrarily
-            // nested. We must show this via indents.
-            if children.len() > 1 {
-                let msg = "(actions in parallel)\n";
-                self.write_indented(f, msg)?;
-                self.indent_level += 1;
-                for idx in children {
-                    self.print_node(f, idx)?;
-                }
-                self.indent_level -= 1;
-            }
+        for (idx, indent_level) in output {
+            self.print_node(f, idx, indent_level)?;
         }
 
         Ok(())
     }
 
-    // Generate a print order of indexes
+    // Generate a print order of indexes along with their indent_level
     //
     // We want to walk the DAG in topological order and print indents in the
     // following scenarios:
@@ -1669,47 +1625,136 @@ impl<'a> SagaExecStatusPrinter<'a> {
     // The only way to have one parallel node lead to other nodes
     // in its parallel branch is for the parallel node itself to be an
     // [`InternalNode::SubsagaStart`].
-    fn print_order(&mut self) -> Vec<NodeIndex> {
-        // TODO: Implement this and use it rather than calculating the order
-        // directly in `print`. Doing it this way also allows us to generate
-        // arbitrary DAGs made up of Constant nodes and subsagas, and then verify
+    //
+    fn print_order(&self) -> Vec<(NodeIndex, usize)> {
+        // TODO(AJS): Implement property based tests by generating random
+        // DAGs made up of constant nodes and subsagas and validating
         // properties about them, such as:
-        //    * Any subsaga completes if a Subsaga start node is in a set of parallel nodes.
+        //    * Any subsaga completes if a Subsaga start node is in a set of
+        //      parallel nodes.
         //    * All parallel nodes print before any other node in the graph.
-        unimplemented!()
+
+        // A stack entry contains all parallel nodes that must run during a
+        // given indent level.
+        struct StackEntry {
+            indent_level: usize,
+            node_indexes: Vec<NodeIndex>,
+        }
+
+        let graph = &self.dag.graph;
+        let root = Topo::new(graph).iter(graph).next().unwrap();
+        let mut output = Vec::new();
+        let mut stack = Vec::<StackEntry>::new();
+        let mut idx = root;
+        let mut indent = 0;
+
+        // Start walking the graph
+        //
+        // When a set of child nodes are found, they are supposed to run
+        // in parallel. If any of the nodes is a subsaga, we want to start
+        // printing the subsaga. We push any remaining parallel nodes onto the
+        // stack so we can resume when we are done with the subsaga.
+        loop {
+            let node = self.dag.get(idx).unwrap();
+
+            // We want the SubsagaEnd node to bracket the indented subsaga
+            // nodes. We therefore outdent before printing.
+            if let &InternalNode::SubsagaEnd { .. } = node {
+                indent -= 1;
+            }
+
+            // Add the current node to the output
+            output.push((idx, indent));
+
+            // We want the SubsagaStart node to bracket the indented subsaga
+            // nodes. We therefore indent only after printing.
+            if let &InternalNode::SubsagaStart { .. } = node {
+                indent += 1;
+            }
+
+            // If we are in a subsaga with no parallel nodes at the current
+            // indent level we move further down the graph. Otherwise a
+            // parallel node has just printed, and we need to get the next
+            // parallel node off the stack.
+            match stack.last_mut() {
+                Some(entry) => {
+                    if entry.indent_level == indent {
+                        // Take the next parallel node if one exists
+                        match entry.node_indexes.pop() {
+                            Some(next_idx) => {
+                                // process this parallel node by
+                                // jumping to the top of the loop
+                                idx = next_idx;
+                                continue;
+                            }
+                            None => {
+                                // The stack frame is exhausted. We must pop it
+                                // de-indent, and then continue down the graph.
+                                let _ = stack.pop();
+                                indent -= 1;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    // Continue down the graph
+                }
+            }
+
+            // We want to print the children in the order added, so we collect them
+            // in reverse order.
+            let mut children: Vec<NodeIndex> =
+                graph.neighbors_directed(idx, Outgoing).collect();
+            children.reverse();
+
+            // We are done
+            if children.len() == 0 && stack.is_empty() {
+                break;
+            }
+
+            if children.len() == 1 {
+                idx = children[0];
+            } else {
+                // Pick the first child to print
+                idx = children.pop().unwrap();
+                indent += 1;
+                // These nodes must run in parallel. Put the remainder on the stack.
+                stack.push(StackEntry {
+                    indent_level: indent,
+                    node_indexes: children,
+                });
+            }
+        }
+
+        output
     }
 
     fn print_node(
-        &mut self,
+        &self,
         f: &mut fmt::Formatter<'_>,
         idx: NodeIndex,
+        indent_level: usize,
     ) -> fmt::Result {
-        let node = self.status.dag.get(idx).unwrap();
+        let node = self.dag.get(idx).unwrap();
         let label = Self::mklabel(&node);
-        let state = &self.status.node_exec_states[&idx];
+        let state = &self.node_exec_states[&idx];
         let msg = format!("{}: {}\n", state, label);
-
-        if let &InternalNode::SubsagaEnd { .. } = &node {
-            self.indent_level -= 1;
-        }
-
-        self.write_indented(f, &msg)?;
-
-        if let &InternalNode::SubsagaStart { .. } = &node {
-            self.indent_level += 1;
-        }
-
-        self.printed.insert(idx);
-
+        Self::write_indented(f, indent_level, &msg)?;
         Ok(())
     }
 
     fn write_indented(
-        &self,
         out: &mut fmt::Formatter<'_>,
+        indent_level: usize,
         msg: &str,
     ) -> fmt::Result {
-        write!(out, "{:width$}+-- {}", "", msg, width = self.big_indent())
+        write!(
+            out,
+            "{:width$}+-- {}",
+            "",
+            msg,
+            width = Self::big_indent(indent_level)
+        )
     }
 
     fn mklabel(node: &InternalNode) -> String {
@@ -1720,8 +1765,8 @@ impl<'a> SagaExecStatusPrinter<'a> {
         }
     }
 
-    fn big_indent(&self) -> usize {
-        self.indent_level * 8
+    fn big_indent(indent_level: usize) -> usize {
+        indent_level * 8
     }
 
     fn write_header(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1729,73 +1774,10 @@ impl<'a> SagaExecStatusPrinter<'a> {
             out,
             "{:width$}+ saga execution: {}\n",
             "",
-            self.status.saga_id,
+            self.saga_id,
             width = 0
         )
     }
-}
-
-impl SagaExecStatus {
-    pub fn log(&self) -> &SagaLog {
-        &self.sglog
-    }
-
-    /*  fn print(
-        &self,
-        out: &mut fmt::Formatter<'_>,
-        indent_level: usize,
-    ) -> fmt::Result {
-        let big_indent = indent_level * 16;
-        self.write_header(out)?;
-        for (d, nodes) in &self.nodes_at_depth {
-            Self::write_stage(out, d, indent_level)?;
-            let mklabel = |node| {
-                let node = self.dag.get(node).unwrap();
-                if let Some(name) = node.node_name() {
-                    format!("{} (produces {:?})", node.label(), name)
-                } else {
-                    node.label()
-                }
-            };
-            if nodes.len() == 1 {
-                let node = nodes[0];
-                let node_label = mklabel(nodes[0]);
-                let node_state = &self.node_exec_states[&node];
-                write!(out, "{}: {}\n", node_state, node_label)?;
-            } else {
-                write!(out, "+ (actions in parallel)\n")?;
-                for node in nodes {
-                    let node_label = mklabel(*node);
-                    let node_state = &self.node_exec_states[&node];
-                    // TODO(AJS) - fix this when subsaga nodes added
-                    //let child_sagas = self.child_sagas.get(&node);
-                    //let subsaga_char =
-                    //    if child_sagas.is_some() { '+' } else { '-' };
-                    let subsaga_char = '-';
-
-                    write!(
-                        out,
-                        "{:width$}{:>14}+-{} {}: {}\n",
-                        "",
-                        "",
-                        subsaga_char,
-                        node_state,
-                        node_label,
-                        width = big_indent
-                    )?;
-
-                    //if let Some(sagas) = child_sagas {
-                    //  for c in sagas {
-                    //    c.print(out, indent_level + 1)?;
-                    //}
-                    //}
-                }
-            }
-        }
-
-        Ok(())
-    }
-    */
 }
 
 /**
