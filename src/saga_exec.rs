@@ -1657,15 +1657,16 @@ impl<'a> SagaExecStatusPrinter<'a> {
         let state = &self.status.node_exec_states[&idx];
         let msg = format!("{}: {}\n", state, label);
 
-        if let &InternalNode::SubsagaStart { .. } = &node {
-            self.indent_level += 1;
+        if let &InternalNode::SubsagaEnd { .. } = &node {
+            self.indent_level -= 1;
         }
 
         self.write_indented(f, &msg)?;
 
-        if let &InternalNode::SubsagaEnd { .. } = &node {
-            self.indent_level -= 1;
+        if let &InternalNode::SubsagaStart { .. } = &node {
+            self.indent_level += 1;
         }
+
         self.printed.insert(idx);
 
         Ok(())
