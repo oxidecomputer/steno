@@ -1672,6 +1672,7 @@ impl SagaExecStatus {
 }
 
 // An entry in the output Vec of the [`SagaExecStatus::print_order`] method.
+#[derive(Debug, PartialEq)]
 enum PrintOrderEntry {
     // Print a message that parallelization has started
     // The nodes themselves are ordered and indented properly
@@ -1800,6 +1801,9 @@ impl<'a> PrintOrderer<'a> {
                 }
             }
         }
+
+        // Output the end node
+        self.output_current_node();
 
         assert!(self.stack.is_empty());
         return self.output;
@@ -2106,5 +2110,46 @@ where
 
     fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()> {
         self.inject_error(node_id).boxed()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{DagBuilder, Node, SagaDag, SagaName};
+
+    #[test]
+    fn test_print_order_no_subsagas_no_parallel() {
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        builder.append(Node::constant("b", serde_json::Value::Null));
+        let dag = builder.build().unwrap();
+        let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
+        let orderer = PrintOrderer::new(&saga_dag);
+        let entries = orderer.print_order();
+
+        // There are 4 entries (start + end + 2 constant nodes);
+        assert_eq!(4, entries.len());
+
+        let mut nodes = Vec::new();
+
+        // There are no indents
+        for entry in entries {
+            match entry {
+                PrintOrderEntry::Node { idx, indent_level } => {
+                    nodes.push(saga_dag.get(idx).unwrap());
+                    assert_eq!(indent_level, 0);
+                }
+                _ => panic!("No parallel nodes should exist"),
+            }
+        }
+
+        // Assert the node order is what is expected
+        assert!(matches!(nodes[0], InternalNode::Start { .. }));
+        assert!(matches!(nodes[1], InternalNode::Constant { name: a, .. } 
+            if a == &NodeName::new("a")));
+        assert!(matches!(nodes[2], InternalNode::Constant { name: b, .. }
+            if b == &NodeName::new("b")));
+        assert!(matches!(nodes[3], InternalNode::End));
     }
 }
