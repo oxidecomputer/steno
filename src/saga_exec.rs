@@ -1811,11 +1811,8 @@ impl<'a> PrintOrderer<'a> {
 
     /// Descend down the graph
     fn descend(&mut self) {
-        // We want to print the children in the order added, so we collect them
-        // in reverse order because we pop off the back of the Vec.
         let mut children: Vec<NodeIndex> =
             self.dag.graph.neighbors_directed(self.idx, Outgoing).collect();
-        children.reverse();
 
         if children.len() == 0 {
             // We are done
@@ -2118,11 +2115,40 @@ mod test {
     use super::*;
     use crate::{DagBuilder, Node, SagaDag, SagaName};
 
+    // Return a constant node with a null value
+    fn constant(name: &str) -> Node {
+        Node::constant(name, serde_json::Value::Null)
+    }
+
+    // Assert that the names match the NodeNames of the constant nodes at the given
+    // indexes.
+    fn names_match(
+        names: &[&str],
+        indexes: &[NodeIndex],
+        dag: &SagaDag,
+    ) -> bool {
+        assert_eq!(names.len(), indexes.len());
+        for i in 0..names.len() {
+            if !name_matches(names[i], indexes[i], dag) {
+                return false;
+            }
+        }
+        true
+    }
+    fn name_matches(name: &str, idx: NodeIndex, dag: &SagaDag) -> bool {
+        let node = dag.get(idx).unwrap();
+        matches!(
+             node,
+             InternalNode::Constant { name: a, .. }
+               if a == &NodeName::new(name)
+        )
+    }
+
     #[test]
     fn test_print_order_no_subsagas_no_parallel() {
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
-        builder.append(Node::constant("a", serde_json::Value::Null));
-        builder.append(Node::constant("b", serde_json::Value::Null));
+        builder.append(constant("a"));
+        builder.append(constant("b"));
         let dag = builder.build().unwrap();
         let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
         let orderer = PrintOrderer::new(&saga_dag);
@@ -2146,10 +2172,65 @@ mod test {
 
         // Assert the node order is what is expected
         assert!(matches!(nodes[0], InternalNode::Start { .. }));
-        assert!(matches!(nodes[1], InternalNode::Constant { name: a, .. } 
-            if a == &NodeName::new("a")));
+        assert!(matches!(nodes[1], InternalNode::Constant { name: a, .. }
+                            if a == &NodeName::new("a")));
         assert!(matches!(nodes[2], InternalNode::Constant { name: b, .. }
-            if b == &NodeName::new("b")));
+                            if b == &NodeName::new("b")));
         assert!(matches!(nodes[3], InternalNode::End));
+    }
+
+    #[test]
+    fn test_print_order_parallel_nodes_no_subsagas() {
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(constant("a"));
+        builder.append_parallel(vec![constant("b"), constant("c")]);
+        builder.append(constant("d"));
+        let dag = builder.build().unwrap();
+        let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
+        let orderer = PrintOrderer::new(&saga_dag);
+        let entries = orderer.print_order();
+
+        // start, end, 4 constant nodes, a parallel entry
+        assert_eq!(7, entries.len());
+
+        let mut actual_indexes = Vec::new();
+        // Ensure the order is what we expect
+        for i in 0..7 {
+            match entries[i] {
+                PrintOrderEntry::Node { idx, indent_level } => match i {
+                    0 => {
+                        assert_eq!(indent_level, 0);
+                        let node = saga_dag.get(idx).unwrap();
+                        assert!(matches!(node, InternalNode::Start { .. }));
+                    }
+                    1 | 5 => {
+                        // This is a constant node, so push its index
+                        assert_eq!(indent_level, 0);
+                        actual_indexes.push(idx);
+                    }
+                    3..=4 => {
+                        // This is a constant node, so push its index
+                        assert_eq!(indent_level, 1);
+                        actual_indexes.push(idx);
+                    }
+                    6 => {
+                        assert_eq!(indent_level, 0);
+                        let node = saga_dag.get(idx).unwrap();
+                        assert!(matches!(node, InternalNode::End));
+                    }
+                    _ => panic!("invalid entry"),
+                },
+
+                PrintOrderEntry::Parallel { indent_level } => {
+                    // We print a parallel label before indenting
+                    assert_eq!(2, i);
+                    // The parallel entry itself is not indented
+                    assert_eq!(indent_level, 0);
+                }
+            }
+        }
+
+        let expected_names = vec!["a", "b", "c", "d"];
+        assert!(names_match(&expected_names, &actual_indexes, &saga_dag));
     }
 }
