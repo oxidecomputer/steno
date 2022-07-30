@@ -20,6 +20,7 @@ use crate::SagaNodeEvent;
 use crate::SagaNodeId;
 use crate::SagaType;
 use anyhow::anyhow;
+use anyhow::Context;
 use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::lock::Mutex;
@@ -1560,6 +1561,7 @@ impl SagaResultOk {
         &self,
     ) -> Result<T, ActionError> {
         serde_json::from_value((*self.saga_output).clone())
+            .context("final saga output")
             .map_err(ActionError::new_deserialize)
     }
 
@@ -1584,6 +1586,7 @@ impl SagaResultOk {
             });
         // TODO-cleanup double-asterisk seems odd?
         serde_json::from_value((**output_json).clone())
+            .context("final node output")
             .map_err(ActionError::new_deserialize)
     }
 }
@@ -1832,6 +1835,7 @@ impl<UserType: SagaType> ActionContext<UserType> {
             .unwrap_or_else(|| panic!("no ancestor called \"{}\"", name));
         // TODO-cleanup double-asterisk seems ridiculous
         serde_json::from_value((**item).clone())
+            .with_context(|| format!("output from earlier node {:?}", name))
             .map_err(ActionError::new_deserialize)
     }
 
@@ -1846,6 +1850,11 @@ impl<UserType: SagaType> ActionContext<UserType> {
         &self,
     ) -> Result<T, ActionError> {
         serde_json::from_value((*self.saga_params).clone())
+            .with_context(|| {
+                let as_str = serde_json::to_string(&self.saga_params)
+                    .unwrap_or_else(|_| format!("{:?}", self.saga_params));
+                format!("saga params ({})", as_str)
+            })
             .map_err(ActionError::new_deserialize)
     }
 

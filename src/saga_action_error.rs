@@ -4,6 +4,7 @@ use crate::saga_action_generic::ActionData;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fmt::Display;
 use thiserror::Error;
 
 /**
@@ -139,8 +140,8 @@ impl ActionError {
         ActionError::SerializeFailed { message: source.to_string() }
     }
 
-    pub fn new_deserialize(source: serde_json::Error) -> ActionError {
-        ActionError::DeserializeFailed { message: source.to_string() }
+    pub fn new_deserialize<E: Display>(source: E) -> ActionError {
+        ActionError::DeserializeFailed { message: format!("{:#}", source) }
     }
 
     pub fn new_subsaga(source: anyhow::Error) -> ActionError {
