@@ -2105,6 +2105,7 @@ where
 mod test {
     use super::*;
     use crate::{DagBuilder, Node, SagaDag, SagaName};
+    use std::fmt::Write;
 
     // Return a constant node with a null value
     fn constant(name: &str) -> Node {
@@ -2113,26 +2114,81 @@ mod test {
 
     // Assert that the names match the NodeNames of the constant nodes at the given
     // indexes.
-    fn names_match(
+    fn constant_names_match(
         names: &[&str],
         indexes: &[NodeIndex],
         dag: &SagaDag,
     ) -> bool {
         assert_eq!(names.len(), indexes.len());
         for i in 0..names.len() {
-            if !name_matches(names[i], indexes[i], dag) {
+            if !constant_name_matches(names[i], indexes[i], dag) {
                 return false;
             }
         }
         true
     }
-    fn name_matches(name: &str, idx: NodeIndex, dag: &SagaDag) -> bool {
+    fn constant_name_matches(
+        name: &str,
+        idx: NodeIndex,
+        dag: &SagaDag,
+    ) -> bool {
         let node = dag.get(idx).unwrap();
         matches!(
              node,
              InternalNode::Constant { name: a, .. }
                if a == &NodeName::new(name)
         )
+    }
+
+    fn is_start_node(idx: NodeIndex, dag: &SagaDag) -> bool {
+        if let InternalNode::Start { .. } = dag.get(idx).unwrap() {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_end_node(idx: NodeIndex, dag: &SagaDag) -> bool {
+        if let InternalNode::End = dag.get(idx).unwrap() {
+            true
+        } else {
+            false
+        }
+    }
+
+    // Used to see the output structure to help write tests
+    fn print_for_testing(
+        entries: &Vec<PrintOrderEntry>,
+        dag: &SagaDag,
+    ) -> String {
+        let mut out = String::new();
+        for entry in entries {
+            match entry {
+                PrintOrderEntry::Node { idx, indent_level } => {
+                    let node = dag.get(*idx).unwrap();
+                    write!(&mut out, "{}{:?}\n", spaces(*indent_level), node)
+                        .unwrap();
+                }
+                PrintOrderEntry::Parallel { indent_level } => {
+                    write!(
+                        &mut out,
+                        "{}{:?}\n",
+                        spaces(*indent_level),
+                        "Parallel: "
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        out
+    }
+
+    fn spaces(indent_level: usize) -> String {
+        let num_spaces = indent_level * 4;
+        (0..num_spaces).fold(String::new(), |mut acc, _| {
+            acc.push(' ');
+            acc
+        })
     }
 
     #[test]
@@ -2148,13 +2204,13 @@ mod test {
         // There are 4 entries (start + end + 2 constant nodes);
         assert_eq!(4, entries.len());
 
-        let mut nodes = Vec::new();
+        let mut indexes = Vec::new();
 
         // There are no indents
         for entry in entries {
             match entry {
                 PrintOrderEntry::Node { idx, indent_level } => {
-                    nodes.push(saga_dag.get(idx).unwrap());
+                    indexes.push(idx);
                     assert_eq!(indent_level, 0);
                 }
                 _ => panic!("No parallel nodes should exist"),
@@ -2162,12 +2218,10 @@ mod test {
         }
 
         // Assert the node order is what is expected
-        assert!(matches!(nodes[0], InternalNode::Start { .. }));
-        assert!(matches!(nodes[1], InternalNode::Constant { name: a, .. }
-                            if a == &NodeName::new("a")));
-        assert!(matches!(nodes[2], InternalNode::Constant { name: b, .. }
-                            if b == &NodeName::new("b")));
-        assert!(matches!(nodes[3], InternalNode::End));
+        assert!(is_start_node(indexes[0], &saga_dag));
+        assert!(constant_name_matches("a", indexes[1], &saga_dag));
+        assert!(constant_name_matches("b", indexes[2], &saga_dag));
+        assert!(is_end_node(indexes[3], &saga_dag));
     }
 
     #[test]
@@ -2191,8 +2245,7 @@ mod test {
                 PrintOrderEntry::Node { idx, indent_level } => match i {
                     0 => {
                         assert_eq!(indent_level, 0);
-                        let node = saga_dag.get(idx).unwrap();
-                        assert!(matches!(node, InternalNode::Start { .. }));
+                        assert!(is_start_node(idx, &saga_dag));
                     }
                     1 | 5 => {
                         // This is a constant node, so push its index
@@ -2206,8 +2259,7 @@ mod test {
                     }
                     6 => {
                         assert_eq!(indent_level, 0);
-                        let node = saga_dag.get(idx).unwrap();
-                        assert!(matches!(node, InternalNode::End));
+                        assert!(is_end_node(idx, &saga_dag));
                     }
                     _ => panic!("invalid entry"),
                 },
@@ -2222,6 +2274,85 @@ mod test {
         }
 
         let expected_names = vec!["a", "b", "c", "d"];
-        assert!(names_match(&expected_names, &actual_indexes, &saga_dag));
+        assert!(constant_names_match(
+            &expected_names,
+            &actual_indexes,
+            &saga_dag
+        ));
+    }
+
+    #[test]
+    fn test_print_order_nested_parallel_nodes_and_subsagas() {
+        let mut nested_subsaga =
+            DagBuilder::new(SagaName::new("test-nested-subsaga"));
+        nested_subsaga.append(constant("a"));
+        nested_subsaga.append_parallel(vec![constant("b"), constant("c")]);
+        nested_subsaga.append(constant("d"));
+        let nested_subsaga_dag = nested_subsaga.build().unwrap();
+
+        let mut subsaga = DagBuilder::new(SagaName::new("test-subsaga"));
+        subsaga.append(constant("a"));
+        subsaga.append_parallel(vec![constant("b"), constant("c")]);
+        subsaga.append(constant("d"));
+        subsaga.append(Node::subsaga("e", nested_subsaga_dag.clone(), "d"));
+        subsaga.append_parallel(vec![
+            constant("f"),
+            Node::subsaga("g", nested_subsaga_dag, "e"),
+            constant("h"),
+        ]);
+        subsaga.append(constant("i"));
+        let subsaga_dag = subsaga.build().unwrap();
+
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(constant("a"));
+        builder.append_parallel(vec![constant("b"), constant("c")]);
+        builder.append(constant("d"));
+        builder.append(Node::subsaga("e", subsaga_dag, "d"));
+        let dag = builder.build().unwrap();
+        let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
+        let orderer = PrintOrderer::new(&saga_dag);
+        let entries = orderer.print_order();
+
+        // It's super tedious to test by asserting on each entry as in the
+        // prior tests. Instead, we generate a string and compare it to expected output.
+        // The output is generated by the test, so it won't change, and we can use
+        // a different format for actual `SagaExecStatus` output.
+        let actual = print_for_testing(&entries, &saga_dag);
+        let expected = "\
+Start { params: Null }
+Constant { name: \"a\", value: Null }
+\"Parallel: \"
+    Constant { name: \"b\", value: Null }
+    Constant { name: \"c\", value: Null }
+Constant { name: \"d\", value: Null }
+SubsagaStart { saga_name: SagaName(\"test-subsaga\"), params_node_name: \"d\" }
+    Constant { name: \"a\", value: Null }
+    \"Parallel: \"
+        Constant { name: \"b\", value: Null }
+        Constant { name: \"c\", value: Null }
+    Constant { name: \"d\", value: Null }
+    SubsagaStart { saga_name: SagaName(\"test-nested-subsaga\"), params_node_name: \"d\" }
+        Constant { name: \"a\", value: Null }
+        \"Parallel: \"
+            Constant { name: \"b\", value: Null }
+            Constant { name: \"c\", value: Null }
+        Constant { name: \"d\", value: Null }
+    SubsagaEnd { name: \"e\" }
+    \"Parallel: \"
+        Constant { name: \"f\", value: Null }
+        SubsagaStart { saga_name: SagaName(\"test-nested-subsaga\"), params_node_name: \"e\" }
+            Constant { name: \"a\", value: Null }
+            \"Parallel: \"
+                Constant { name: \"b\", value: Null }
+                Constant { name: \"c\", value: Null }
+            Constant { name: \"d\", value: Null }
+        SubsagaEnd { name: \"g\" }
+        Constant { name: \"h\", value: Null }
+    Constant { name: \"i\", value: Null }
+SubsagaEnd { name: \"e\" }
+End
+";
+
+        assert_eq!(actual, expected);
     }
 }
