@@ -33,17 +33,19 @@ digraph {
 
 *** initial state ***
 + saga execution: 049b2522-308d-442e-bc65-9bfaef863597
-+-- stage  1: blocked: InstanceCreate (produces "instance_id")
-+-- stage  2: + (actions in parallel)
-              +-- blocked: VpcAllocIp (produces "instance_ip")
-              +-- blocked: VolumeCreate (produces "volume_id")
-+-- stage  3: blocked: (constant = {"number_of_things":1}) (produces "server_alloc_params")
-+-- stage  4: blocked: (subsaga start: SagaName("server-alloc"))
-+-- stage  5: blocked: ServerPick (produces "server_id")
-+-- stage  6: blocked: ServerReserve (produces "server_reserve")
-+-- stage  7: blocked: (subsaga end) (produces "server_alloc")
-+-- stage  8: blocked: InstanceConfigure (produces "instance_configure")
-+-- stage  9: blocked: VolumeAttach (produces "volume_attach")
-+-- stage 10: blocked: InstanceBoot (produces "instance_boot")
-+-- stage 11: blocked: Print (produces "print")
++-- queued-todo: (start node)
++-- blocked: InstanceCreate (produces "instance_id")
++-- (parallel actions):
+        +-- blocked: VpcAllocIp (produces "instance_ip")
+        +-- blocked: VolumeCreate (produces "volume_id")
++-- blocked: (constant = {"number_of_things":1}) (produces "server_alloc_params")
++-- blocked: (subsaga start: SagaName("server-alloc"))
+        +-- blocked: ServerPick (produces "server_id")
+        +-- blocked: ServerReserve (produces "server_reserve")
++-- blocked: (subsaga end) (produces "server_alloc")
++-- blocked: InstanceConfigure (produces "instance_configure")
++-- blocked: VolumeAttach (produces "volume_attach")
++-- blocked: InstanceBoot (produces "instance_boot")
++-- blocked: Print (produces "print")
++-- blocked: (end node)
 

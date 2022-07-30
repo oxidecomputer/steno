@@ -1,19 +1,21 @@
 recovering from log: -
 recovered state
 + saga execution: 049b2522-308d-442e-bc65-9bfaef863597
-+-- stage  1: queued-undo: InstanceCreate (produces "instance_id")
-+-- stage  2: + (actions in parallel)
-              +-- undone: VpcAllocIp (produces "instance_ip")
-              +-- undone: VolumeCreate (produces "volume_id")
-+-- stage  3: undone: (constant = {"number_of_things":1}) (produces "server_alloc_params")
-+-- stage  4: undone: (subsaga start: SagaName("server-alloc"))
-+-- stage  5: undone: ServerPick (produces "server_id")
-+-- stage  6: undone: ServerReserve (produces "server_reserve")
-+-- stage  7: undone: (subsaga end) (produces "server_alloc")
-+-- stage  8: undone: InstanceConfigure (produces "instance_configure")
-+-- stage  9: undone: VolumeAttach (produces "volume_attach")
-+-- stage 10: failed: InstanceBoot (produces "instance_boot")
-+-- stage 11: abandoned: Print (produces "print")
++-- done: (start node)
++-- queued-undo: InstanceCreate (produces "instance_id")
++-- (parallel actions):
+        +-- undone: VpcAllocIp (produces "instance_ip")
+        +-- undone: VolumeCreate (produces "volume_id")
++-- undone: (constant = {"number_of_things":1}) (produces "server_alloc_params")
++-- undone: (subsaga start: SagaName("server-alloc"))
+        +-- undone: ServerPick (produces "server_id")
+        +-- undone: ServerReserve (produces "server_reserve")
++-- undone: (subsaga end) (produces "server_alloc")
++-- undone: InstanceConfigure (produces "instance_configure")
++-- undone: VolumeAttach (produces "volume_attach")
++-- failed: InstanceBoot (produces "instance_boot")
++-- abandoned: Print (produces "print")
++-- abandoned: (end node)
 
 
 *** running saga ***
@@ -21,19 +23,21 @@ recovered state
 
 *** final state ***
 + saga execution: 049b2522-308d-442e-bc65-9bfaef863597
-+-- stage  1: undone: InstanceCreate (produces "instance_id")
-+-- stage  2: + (actions in parallel)
-              +-- undone: VpcAllocIp (produces "instance_ip")
-              +-- undone: VolumeCreate (produces "volume_id")
-+-- stage  3: undone: (constant = {"number_of_things":1}) (produces "server_alloc_params")
-+-- stage  4: undone: (subsaga start: SagaName("server-alloc"))
-+-- stage  5: undone: ServerPick (produces "server_id")
-+-- stage  6: undone: ServerReserve (produces "server_reserve")
-+-- stage  7: undone: (subsaga end) (produces "server_alloc")
-+-- stage  8: undone: InstanceConfigure (produces "instance_configure")
-+-- stage  9: undone: VolumeAttach (produces "volume_attach")
-+-- stage 10: failed: InstanceBoot (produces "instance_boot")
-+-- stage 11: abandoned: Print (produces "print")
++-- undone: (start node)
++-- undone: InstanceCreate (produces "instance_id")
++-- (parallel actions):
+        +-- undone: VpcAllocIp (produces "instance_ip")
+        +-- undone: VolumeCreate (produces "volume_id")
++-- undone: (constant = {"number_of_things":1}) (produces "server_alloc_params")
++-- undone: (subsaga start: SagaName("server-alloc"))
+        +-- undone: ServerPick (produces "server_id")
+        +-- undone: ServerReserve (produces "server_reserve")
++-- undone: (subsaga end) (produces "server_alloc")
++-- undone: InstanceConfigure (produces "instance_configure")
++-- undone: VolumeAttach (produces "volume_attach")
++-- failed: InstanceBoot (produces "instance_boot")
++-- abandoned: Print (produces "print")
++-- abandoned: (end node)
 
 result: FAILURE
 failed at node:    "instance_boot"
