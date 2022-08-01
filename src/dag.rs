@@ -502,11 +502,20 @@ pub struct DagBuilder {
     node_names: BTreeSet<NodeName>,
 
     /// error from any builder operation (returned by `build()`)
-    error: Option<DagBuilderError>,
+    error: Option<DagBuilderErrorKind>,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum DagBuilderError {
+#[error("building saga \"{saga_name}\": {kind:#}")]
+pub struct DagBuilderError {
+    saga_name: SagaName,
+
+    #[source]
+    kind: DagBuilderErrorKind,
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+enum DagBuilderErrorKind {
     #[error("saga must end with exactly one node")]
     /// The saga ended with zero nodes (if it was empty) or more than one node.
     /// Sagas are required to end with a single node that emits the output for
@@ -514,7 +523,7 @@ pub enum DagBuilderError {
     BadOutputNode,
 
     #[error(
-        "subsaga node {0:?} has parameters that come from node {:1?}, but it \
+        "subsaga node {0:?} has parameters that come from node {1:?}, but it \
         does not depend on any such node"
     )]
     /// A subsaga was appended whose parameters were supposed to come from a
@@ -573,7 +582,7 @@ impl DagBuilder {
         // creating two separate connected components of the DAG, which violates
         // all kinds of assumptions.
         if user_nodes.len() == 0 {
-            self.error = Some(DagBuilderError::EmptyStage);
+            self.error = Some(DagBuilderErrorKind::EmptyStage);
             return;
         }
 
@@ -598,7 +607,7 @@ impl DagBuilder {
                 if !self.node_names.contains(&params_node_name)
                     && self.error.is_none()
                 {
-                    self.error = Some(DagBuilderError::BadSubsagaParams(
+                    self.error = Some(DagBuilderErrorKind::BadSubsagaParams(
                         node.node_name.clone(),
                         params_node_name.clone(),
                     ));
@@ -613,7 +622,7 @@ impl DagBuilder {
         // node (added in the same call), we wouldn't catch the problem.
         for node in &user_nodes {
             if !self.node_names.insert(node.node_name.clone()) {
-                self.error = Some(DagBuilderError::DuplicateName(
+                self.error = Some(DagBuilderErrorKind::DuplicateName(
                     node.node_name.clone(),
                 ));
                 return;
@@ -785,12 +794,18 @@ impl DagBuilder {
     pub fn build(self) -> Result<Dag, DagBuilderError> {
         // If we ran into a problem along the way, report it now.
         if let Some(error) = self.error {
-            return Err(error);
+            return Err(DagBuilderError {
+                saga_name: self.saga_name.clone(),
+                kind: error,
+            });
         }
 
         // Every saga must end in exactly one leaf node.
         if self.last_added.len() != 1 {
-            return Err(DagBuilderError::BadOutputNode);
+            return Err(DagBuilderError {
+                saga_name: self.saga_name.clone(),
+                kind: DagBuilderErrorKind::BadOutputNode,
+            });
         }
 
         Ok(Dag {
@@ -805,7 +820,7 @@ impl DagBuilder {
 #[cfg(test)]
 mod test {
     use super::DagBuilder;
-    use super::DagBuilderError;
+    use super::DagBuilderErrorKind;
     use super::Node;
     use super::NodeName;
     use super::SagaName;
@@ -816,7 +831,21 @@ mod test {
         let builder = DagBuilder::new(SagaName::new("test-saga"));
         let result = builder.build();
         println!("{:?}", result);
-        assert!(matches!(result, Err(DagBuilderError::BadOutputNode)));
+        match result {
+            Ok(_) => panic!("unexpected success"),
+            Err(error) => {
+                assert_eq!(error.saga_name.to_string(), "test-saga");
+                assert!(matches!(
+                    error.kind,
+                    DagBuilderErrorKind::BadOutputNode
+                ));
+                assert_eq!(
+                    error.to_string(),
+                    "building saga \"test-saga\": \
+                    saga must end with exactly one node"
+                );
+            }
+        };
 
         // error case: a DAG that ends with two nodes
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
@@ -826,7 +855,10 @@ mod test {
         ]);
         let result = builder.build();
         println!("{:?}", result);
-        assert!(matches!(result, Err(DagBuilderError::BadOutputNode)));
+        assert!(matches!(
+            result.unwrap_err().kind,
+            DagBuilderErrorKind::BadOutputNode
+        ));
     }
 
     #[test]
@@ -836,7 +868,13 @@ mod test {
         builder.append_parallel(vec![]);
         let result = builder.build();
         println!("{:?}", result);
-        assert!(matches!(result, Err(DagBuilderError::EmptyStage)));
+        let error = result.unwrap_err();
+        assert!(matches!(error.kind, DagBuilderErrorKind::EmptyStage));
+        assert_eq!(
+            error.to_string(),
+            "building saga \"test-saga\": \
+            attempted to append 0 nodes in parallel"
+        );
     }
 
     #[test]
@@ -845,9 +883,17 @@ mod test {
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
         builder.append(Node::constant("a", serde_json::Value::Null));
         builder.append(Node::constant("a", serde_json::Value::Null));
-        let result = builder.build().unwrap_err();
-        println!("{:?}", result);
-        assert_eq!(result, DagBuilderError::DuplicateName(NodeName::new("a")));
+        let error = builder.build().unwrap_err();
+        println!("{:?}", error);
+        assert_eq!(
+            error.kind,
+            DagBuilderErrorKind::DuplicateName(NodeName::new("a"))
+        );
+        assert_eq!(
+            error.to_string(),
+            "building saga \"test-saga\": \
+            name was used multiple times in the same Dag: \"a\""
+        );
 
         // error case: a DAG that duplicates names (indirect ancestor)
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
@@ -857,9 +903,12 @@ mod test {
             Node::constant("c", serde_json::Value::Null),
         ]);
         builder.append(Node::constant("a", serde_json::Value::Null));
-        let result = builder.build().unwrap_err();
-        println!("{:?}", result);
-        assert_eq!(result, DagBuilderError::DuplicateName(NodeName::new("a")));
+        let error = builder.build().unwrap_err();
+        println!("{:?}", error);
+        assert_eq!(
+            error.kind,
+            DagBuilderErrorKind::DuplicateName(NodeName::new("a"))
+        );
 
         // error case: a DAG that duplicates names (parallel)
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
@@ -868,9 +917,12 @@ mod test {
             Node::constant("b", serde_json::Value::Null),
             Node::constant("b", serde_json::Value::Null),
         ]);
-        let result = builder.build().unwrap_err();
-        println!("{:?}", result);
-        assert_eq!(result, DagBuilderError::DuplicateName(NodeName::new("b")));
+        let error = builder.build().unwrap_err();
+        println!("{:?}", error);
+        assert_eq!(
+            error.kind,
+            DagBuilderErrorKind::DuplicateName(NodeName::new("b"))
+        );
 
         // success case: a DAG that uses the same name for a node outside and
         // inside a subsaga
@@ -893,14 +945,20 @@ mod test {
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
         builder.append(Node::constant("a", serde_json::Value::Null));
         builder.append(Node::subsaga("b", subsaga_dag.clone(), "barf"));
-        let result = builder.build().unwrap_err();
-        println!("{:?}", result);
+        let error = builder.build().unwrap_err();
+        println!("{:?}", error);
         assert_eq!(
-            result,
-            DagBuilderError::BadSubsagaParams(
+            error.kind,
+            DagBuilderErrorKind::BadSubsagaParams(
                 NodeName::new("b"),
                 NodeName::new("barf")
             )
+        );
+        assert_eq!(
+            error.to_string(),
+            "building saga \"test-saga\": \
+            subsaga node \"b\" has parameters that come from node \"barf\", \
+            but it does not depend on any such node"
         );
 
         // error case: subsaga depends on params node that doesn't exist
@@ -908,11 +966,11 @@ mod test {
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
         builder.append(Node::constant("a", serde_json::Value::Null));
         builder.append(Node::subsaga("b", subsaga_dag.clone(), "b"));
-        let result = builder.build().unwrap_err();
-        println!("{:?}", result);
+        let error = builder.build().unwrap_err();
+        println!("{:?}", error);
         assert_eq!(
-            result,
-            DagBuilderError::BadSubsagaParams(
+            error.kind,
+            DagBuilderErrorKind::BadSubsagaParams(
                 NodeName::new("b"),
                 NodeName::new("b")
             )
@@ -926,11 +984,11 @@ mod test {
             Node::constant("c", serde_json::Value::Null),
             Node::subsaga("b", subsaga_dag.clone(), "c"),
         ]);
-        let result = builder.build().unwrap_err();
-        println!("{:?}", result);
+        let error = builder.build().unwrap_err();
+        println!("{:?}", error);
         assert_eq!(
-            result,
-            DagBuilderError::BadSubsagaParams(
+            error.kind,
+            DagBuilderErrorKind::BadSubsagaParams(
                 NodeName::new("b"),
                 NodeName::new("c")
             )
