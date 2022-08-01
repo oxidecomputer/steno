@@ -2365,3 +2365,109 @@ End
         assert_eq!(actual, expected);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::{DagBuilder, Node, SagaDag, SagaName};
+    use proptest::prelude::*;
+    use std::fmt::Write;
+
+    // The type we want to generate values of. Its an abstract description of
+    // the nodes of a DAG.
+    //
+    // These "descriptions" map to the operations we are going to perform:
+    //  * [`Dag::append`]
+    //  * [`Dag::append_parallel`]
+    //  * [`Dag::append_subsaga`]
+    //
+    // Specifically, `NodeDesc::Constant` results in a call to `Dag::append`
+    // with a constant node, `NodeDesc::Parallel` results in a call to
+    // `Dag::append_parallel`, and  `NodeDesc::Subsaga` results in a call to
+    // `Dag::append_subsaga`.
+    //
+    // The `Parallel` and  `Subsaga` variants are recursive and as such the
+    // specific inner nodes will be constructed as necessary, with a separate
+    // `DagBuilder` for subsaga nodes as needed.
+    //
+    // There is one complication to this recursive definition, however: There
+    // is really no such thing as a `Parallel` node. It's a pseudo node type
+    // that results in a call to `Dag::append_parallel`  on the given saga or
+    // subsaga. But `Dag::append_parallel` can only be called on vectors of
+    // real [`Node`]s. Thus we can't have a recursive generation of parallel
+    // nodes inside parallel nodes directly, because it's nonsensical to say
+    // something like `builder.append_parallel(builder.append_parallel)`. We
+    // run into this issue because we want to use the recursive generative
+    // abilities of `proptest` in order to generate arbitrary nestings of
+    // subsagas and constant nodes inside subsagas and the outer subsagas, and
+    // with liberal usage of `append_parallel` as appropriate. We could write
+    // a bunch of different types and do a whole lot of mapping to generate
+    // subsagas, limiting each one with code to some depth and ensuring we
+    // only call append parallel as needed, but in the end subsagas are still
+    // recursive, and we really don't want to worry about generating actual
+    // matching numbers of subsaga start and subsaga end nodes. So we end up
+    // just describing a slightly broken recursive definition for what our node
+    // structure looks like.
+    //
+    // The great thing about this, is that proptest knows how to generate this
+    // structure and shrink it efficiently. Moreover, it's easy to rectify
+    // our issue with directly nested `NodeDesc::Parallel` variants. In
+    // `arb_nodedesc()` below, we ensure through the use of `prop_map`,
+    // that whenever we see a `Parallel` inner node we wrap it in a subsaga,
+    // rather than generating a new parallel node. In other words, we ensure
+    // that `NodeDesc::Parallel` only constains `NodeDesc::Constant` and
+    // `NodeDesc::Subsaga` variants.
+
+    #[derive(Clone, Debug)]
+    enum NodeDesc {
+        Constant,
+        Parallel(Vec<NodeDesc>),
+        Subsaga(Vec<NodeDesc>),
+    }
+
+    impl NodeDesc {
+        fn is_parallel(&self) -> bool {
+            if let NodeDesc::Parallel(_) = *self {
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    fn arb_nodedesc() -> impl Strategy<Value = NodeDesc> {
+        // Configuration for recursive generation
+        // See https://altsysrq.github.io/proptest-book/proptest/tutorial/recursive.html
+        let num_levels = 8;
+        let max_size = 256;
+        let items_per_collection = 10;
+        let leaf = prop_oneof![Just(NodeDesc::Constant)];
+
+        leaf.prop_recursive(
+            num_levels,
+            max_size,
+            items_per_collection,
+            |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 2..10).prop_map(|v| {
+                        // Ensure that Parallel nodes do not contain parallel nodes
+                        if v.iter().any(|node_desc| node_desc.is_parallel()) {
+                            NodeDesc::Subsaga(v)
+                        } else {
+                            NodeDesc::Parallel(v)
+                        }
+                    }),
+                    prop::collection::vec(inner, 1..10)
+                        .prop_map(NodeDesc::Subsaga)
+                ]
+            },
+        )
+    }
+
+    proptest! {
+        #[test]
+        fn prints_correctly(nodes in prop::collection::vec(arb_nodedesc(), 1..10)) {
+            println!("{:#?}", nodes);
+        }
+    }
+}
