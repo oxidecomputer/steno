@@ -2369,7 +2369,7 @@ End
 #[cfg(test)]
 mod proptests {
     use super::*;
-    use crate::{DagBuilder, Node, SagaDag, SagaName};
+    use crate::{Dag, DagBuilder, Node, SagaDag, SagaName};
     use proptest::prelude::*;
     use std::fmt::Write;
 
@@ -2417,7 +2417,6 @@ mod proptests {
     // rather than generating a new parallel node. In other words, we ensure
     // that `NodeDesc::Parallel` only constains `NodeDesc::Constant` and
     // `NodeDesc::Subsaga` variants.
-
     #[derive(Clone, Debug)]
     enum NodeDesc {
         Constant,
@@ -2435,6 +2434,7 @@ mod proptests {
         }
     }
 
+    // Create an arbitrary `NodeDesc` using proptest generation
     fn arb_nodedesc() -> impl Strategy<Value = NodeDesc> {
         // Configuration for recursive generation
         // See https://altsysrq.github.io/proptest-book/proptest/tutorial/recursive.html
@@ -2464,10 +2464,88 @@ mod proptests {
         )
     }
 
+    fn new_dag(nodes: &Vec<NodeDesc>, depth: usize) -> Dag {
+        // The outermost dag that will become the SagaDag
+        let name = SagaName::new(&format!("test-saga-{}", depth));
+        let mut dag = DagBuilder::new(name);
+
+        // For simplicity, we always just use "0" for the params_node_name of
+        // subsagas. Every saga has one so it works, and we are only testing
+        // structure, not saga behavior.
+        let params_node_name = "0";
+
+        // Always append a node named "0", so our lookups work for subsaga params
+        dag.append(Node::constant(params_node_name, serde_json::Value::Null));
+
+        // Node names are just numbers that we can increment and convert to strings.
+        // Each DAG uses the same set, since they are namespaced.
+        let mut node_name = 1;
+
+        for node in nodes {
+            match node {
+                NodeDesc::Constant => {
+                    dag.append(Node::constant(
+                        &node_name.to_string(),
+                        serde_json::Value::Null,
+                    ));
+                    node_name += 1;
+                }
+                NodeDesc::Parallel(parallel_nodes) => {
+                    let mut output = Vec::with_capacity(parallel_nodes.len());
+                    for node in parallel_nodes {
+                        match node {
+                            NodeDesc::Constant => {
+                                output.push(Node::constant(
+                                    &node_name.to_string(),
+                                    serde_json::Value::Null,
+                                ));
+                                node_name += 1;
+                            }
+                            NodeDesc::Subsaga(subsaga_nodes) => {
+                                // Recurse
+                                let subsaga_dag =
+                                    new_dag(subsaga_nodes, depth + 1);
+                                output.push(Node::subsaga(
+                                    &node_name.to_string(),
+                                    subsaga_dag,
+                                    params_node_name,
+                                ));
+                                node_name += 1;
+                            }
+                            NodeDesc::Parallel(_) => panic!(
+                                "Strategy Generation Error: Nested `NodeDesc::Parallel` not allowed!"
+                            ),
+                        }
+                    }
+                    dag.append_parallel(output);
+                }
+                NodeDesc::Subsaga(subsaga_nodes) => {
+                    let subsaga_dag = new_dag(subsaga_nodes, depth + 1);
+                    dag.append(Node::subsaga(
+                        &node_name.to_string(),
+                        subsaga_dag,
+                        params_node_name,
+                    ));
+                    node_name += 1;
+                }
+            }
+        }
+
+        // Always push a single constant node, just to ensure there is always one saga output node.
+        dag.append(Node::constant(
+            &node_name.to_string(),
+            serde_json::Value::Null,
+        ));
+
+        dag.build().unwrap()
+    }
+
     proptest! {
         #[test]
         fn prints_correctly(nodes in prop::collection::vec(arb_nodedesc(), 1..10)) {
             println!("{:#?}", nodes);
+            let dag = new_dag(&nodes, 0);
+            println!("{:#?}", dag);
         }
     }
 }
