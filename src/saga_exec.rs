@@ -2117,7 +2117,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{Dag, DagBuilder, Node, SagaDag, SagaName};
+    use crate::{DagBuilder, Node, SagaDag, SagaName};
     use petgraph::graph::NodeIndex;
     use std::fmt::Write;
 
@@ -2369,10 +2369,13 @@ End
 
         assert_eq!(actual, expected);
     }
+}
 
-    /*************************
-     * Property based testing below here
-     ***************************/
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::{Dag, DagBuilder, Node, SagaDag, SagaName};
+    use petgraph::graph::NodeIndex;
     use proptest::prelude::*;
 
     // The type we want to generate values of. Its an abstract description of
