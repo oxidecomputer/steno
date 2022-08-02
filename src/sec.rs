@@ -1093,6 +1093,7 @@ impl Sec {
          */
         let saga_create = SagaCreateParams {
             id: saga_id,
+            name: dag.saga_name.clone(),
             dag: serialized_dag.clone(),
             state: SagaCachedState::Running,
         };

@@ -3,6 +3,7 @@
  */
 
 use crate::SagaId;
+use crate::SagaName;
 use crate::SagaNodeEvent;
 use anyhow::Context;
 use async_trait::async_trait;
@@ -57,6 +58,11 @@ pub trait SecStore: fmt::Debug + Send + Sync {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SagaCreateParams {
     pub id: SagaId,
+    // The saga name doesn't strictly speaking need to be a separate field here
+    // because it's contained within `dag`.  However, the name is useful to the
+    // consumer.  And they're not supposed to be picking apart `dag`.  So we
+    // pull it out for them.
+    pub name: SagaName,
     pub dag: serde_json::Value,
     pub state: SagaCachedState,
 }
