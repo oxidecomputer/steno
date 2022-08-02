@@ -2598,14 +2598,13 @@ End
                             panic!("No actions should exist!")
                         }
                         InternalNode::Constant { .. } => {
+                            let parallel = appended_in_parallel(dag, *idx);
                             if *indent_level == 0 && indent_stack.is_empty() {
                                 // We are at the top level, and not in a
-                                // parallel node. Any of this node's children
-                                // should only have one ancestor.
-                                prop_assert!(!appended_in_parallel(dag, *idx));
+                                // parallel node.
+                                prop_assert!(!parallel);
                                 continue;
                             }
-                            let parallel = appended_in_parallel(dag, *idx);
                             if indent_stack.len() == *indent_level {
                                 // This node is part of a subsaga or is a
                                 // parallel node.
@@ -2649,6 +2648,10 @@ End
                                     indent_stack.len() - 1,
                                     *indent_level
                                 );
+
+                                // This node has multiple ancestors, meaning that its parents were appended in parallel
+                                prop_assert!(num_ancestors(dag, *idx) > 1);
+
                                 prop_assert_eq!(
                                     &IndentStackEntry::Parallel,
                                     indent_stack.last().unwrap()
