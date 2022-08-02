@@ -1682,6 +1682,7 @@ enum PrintOrderEntry {
 }
 
 impl PrintOrderEntry {
+    #[allow(unused)]
     fn is_node(&self) -> bool {
         if let PrintOrderEntry::Node { .. } = *self {
             true
@@ -2117,6 +2118,7 @@ where
 mod test {
     use super::*;
     use crate::{Dag, DagBuilder, Node, SagaDag, SagaName};
+    use petgraph::graph::NodeIndex;
     use std::fmt::Write;
 
     // Return a constant node with a null value
@@ -2540,23 +2542,193 @@ End
         dag.build().unwrap()
     }
 
+    // Is this stack frame an indent from a parallel node or a subsaga,
+    #[derive(Debug, Clone, PartialEq)]
+    enum IndentStackEntry {
+        Parallel,
+        Subsaga,
+    }
+
+    fn num_ancestors(dag: &SagaDag, idx: NodeIndex) -> usize {
+        dag.graph.edges_directed(idx, Direction::Incoming).count()
+    }
+
+    // Pick a child of a node and see how many ancestors it has.
+    //
+    // If there is only one ancestor, it must be from the current node,
+    // which indicates that the current node was not appended in parallel.
+    fn num_ancestors_of_child(dag: &SagaDag, idx: NodeIndex) -> usize {
+        let child = dag
+            .graph
+            .neighbors_directed(idx, Direction::Outgoing)
+            .next()
+            .unwrap();
+        dag.graph.edges_directed(child, Direction::Incoming).count()
+    }
+
+    fn appended_in_parallel(dag: &SagaDag, idx: NodeIndex) -> bool {
+        num_ancestors_of_child(dag, idx) > 1
+    }
+
+    // Indents must adhere to the following properties:
+    //   * They must only increment or decrement by `1` at a time
+    //   * Increments only come from Parallel print entries or SubsagaStart nodes
+    //   * Decrements only come from Parallel print entries ending or SubsagaEnd nodes
+    fn property_indents_are_correct(
+        entries: &Vec<PrintOrderEntry>,
+        dag: &SagaDag,
+    ) -> Result<(), TestCaseError> {
+        let mut indent_stack = Vec::new();
+        for entry in entries {
+            match entry {
+                PrintOrderEntry::Node { idx, indent_level } => {
+                    let node = dag.get(*idx).unwrap();
+                    match node {
+                        InternalNode::Start { .. } => {
+                            // Start nodes should always be at indent 0
+                            prop_assert_eq!(0, *indent_level);
+                            prop_assert_eq!(indent_stack.len(), *indent_level);
+                        }
+                        InternalNode::End { .. } => {
+                            // End nodes should always be at indent 0
+                            prop_assert_eq!(0, *indent_level);
+                            prop_assert_eq!(indent_stack.len(), *indent_level);
+                        }
+                        InternalNode::Action { .. } => {
+                            panic!("No actions should exist!")
+                        }
+                        InternalNode::Constant { .. } => {
+                            if *indent_level == 0 && indent_stack.is_empty() {
+                                // We are at the top level, and not in a
+                                // parallel node. Any of this node's children
+                                // should only have one ancestor.
+                                prop_assert!(!appended_in_parallel(dag, *idx));
+                                continue;
+                            }
+                            let parallel = appended_in_parallel(dag, *idx);
+                            if indent_stack.len() == *indent_level {
+                                // This node is part of a subsaga or is a
+                                // parallel node.
+                                if let &IndentStackEntry::Subsaga =
+                                    indent_stack.last().unwrap()
+                                {
+                                    prop_assert!(!parallel);
+                                } else {
+                                    prop_assert!(parallel);
+                                }
+                            } else {
+                                // This is the first node after all the
+                                // parallel nodes. We don't explicitly track
+                                // this in the print order.
+                                //
+                                // It can only be a de-indent
+                                prop_assert_eq!(
+                                    indent_stack.len() - 1,
+                                    *indent_level
+                                );
+                                // The last indent had to be a parallel indent
+                                prop_assert_eq!(
+                                    &IndentStackEntry::Parallel,
+                                    indent_stack.last().unwrap()
+                                );
+                                // This node was not appended in parallel
+                                prop_assert!(!parallel);
+
+                                // This node has multiple ancestors, meaning that its parents were appended in parallel
+                                prop_assert!(num_ancestors(dag, *idx) > 1);
+
+                                // We need to pop the stack to get back in sync with the Dag
+                                indent_stack.pop();
+                            }
+                        }
+                        InternalNode::SubsagaStart { .. } => {
+                            // We must compensate for not having an explicit
+                            // end of parallel entry in the PrintOutput
+                            if indent_stack.len() != *indent_level {
+                                prop_assert_eq!(
+                                    indent_stack.len() - 1,
+                                    *indent_level
+                                );
+                                prop_assert_eq!(
+                                    &IndentStackEntry::Parallel,
+                                    indent_stack.last().unwrap()
+                                );
+                                // The last parallel node has already been seen in the
+                                // print output, because the indent_level has been
+                                // reduced. Pop the stack to compensate.
+                                indent_stack.pop();
+                            }
+                            indent_stack.push(IndentStackEntry::Subsaga);
+                        }
+                        InternalNode::SubsagaEnd { .. } => {
+                            // SubsagaEnd nodes should always be at the
+                            // de-indented and aligned with the outer indent level.
+                            prop_assert!(!indent_stack.is_empty());
+                            prop_assert_eq!(
+                                indent_stack.len() - 1,
+                                *indent_level
+                            );
+                            prop_assert_eq!(
+                                indent_stack.last().unwrap(),
+                                &IndentStackEntry::Subsaga
+                            );
+                            // We need to pop the stack to get back in sync with the Dag
+                            indent_stack.pop();
+                        }
+                    }
+                }
+                PrintOrderEntry::Parallel { indent_level } => {
+                    // Two append parallel calls can arrive in a row. Since
+                    // we don't keep track of when parallel sections end
+                    // explicitly, we have to check the indent_level to see if
+                    // it matches the stack. This is similar to what we do in
+                    // the `else` clause of `InternalNode::Constant`.
+                    if indent_stack.len() == *indent_level {
+                        if !indent_stack.is_empty() {
+                            // If we are not at the top level, the innermost
+                            // indent must be a subsaga
+                            prop_assert_eq!(
+                                &IndentStackEntry::Subsaga,
+                                indent_stack.last().unwrap()
+                            );
+                        }
+                    } else {
+                        prop_assert_eq!(
+                            &IndentStackEntry::Parallel,
+                            indent_stack.last().unwrap()
+                        );
+                        prop_assert_eq!(indent_stack.len() - 1, *indent_level);
+                        // The last parallel node has already been seen in the
+                        // priint output, because the indent_level has been
+                        // reduced. Pop the stack to compensate.
+                        indent_stack.pop();
+                    }
+                    indent_stack.push(IndentStackEntry::Parallel);
+                }
+            }
+        }
+        Ok(())
+    }
+
     proptest! {
         #[test]
         fn prints_correctly(nodes in prop::collection::vec(arb_nodedesc(), 1..10)) {
-            println!("{:#?}", nodes);
+            //println!("{:#?}", nodes);
             let dag = new_dag(&nodes, 0);
-            println!("{:#?}", dag);
+            //println!("{:#?}", dag);
 
             let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
             let orderer = PrintOrderer::new(&saga_dag);
             let entries = orderer.print_order();
-            let print_order = super::test::print_for_testing(&entries, &saga_dag);
-            println!("{}", print_order);
+            //println!("{:#?}", entries);
 
             // Property 1: The number of actual ordered node entries equals
             // the number of nodes in the dag
             let num_nodes = entries.iter().filter(|e| e.is_node()).count();
             prop_assert_eq!(num_nodes, saga_dag.graph.node_count());
+
+            // Property 2: Indents relate to subsagas or parallel nodes
+            property_indents_are_correct(&entries, &saga_dag)?;
         }
     }
 }
