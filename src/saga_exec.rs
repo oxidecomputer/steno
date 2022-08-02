@@ -1681,6 +1681,16 @@ enum PrintOrderEntry {
     Node { idx: NodeIndex, indent_level: usize },
 }
 
+impl PrintOrderEntry {
+    fn is_node(&self) -> bool {
+        if let PrintOrderEntry::Node { .. } = *self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
 // A stack entry contains all parallel nodes that must run during a
 // given indent level.
 #[derive(Debug, PartialEq)]
@@ -1755,13 +1765,6 @@ impl<'a> PrintOrderer<'a> {
     // don't also lead to is for the parallel node itself to be an
     // [`InternalNode::SubsagaStart`].
     fn print_order(mut self) -> Vec<PrintOrderEntry> {
-        // TODO(AJS): Implement property based tests by generating random
-        // DAGs made up of constant nodes and subsagas and validating
-        // properties about them, such as:
-        //    * Any subsaga completes if a Subsaga start node is in a set of
-        //      parallel nodes.
-        //    * All parallel nodes print before any other node in the graph.
-
         // Start walking the graph
         //
         // * Whenever a subsaga starts we want to print its children before any
@@ -2113,7 +2116,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{DagBuilder, Node, SagaDag, SagaName};
+    use crate::{Dag, DagBuilder, Node, SagaDag, SagaName};
     use std::fmt::Write;
 
     // Return a constant node with a null value
@@ -2364,14 +2367,11 @@ End
 
         assert_eq!(actual, expected);
     }
-}
 
-#[cfg(test)]
-mod proptests {
-    use super::*;
-    use crate::{Dag, DagBuilder, Node, SagaDag, SagaName};
+    /*************************
+     * Property based testing below here
+     ***************************/
     use proptest::prelude::*;
-    use std::fmt::Write;
 
     // The type we want to generate values of. Its an abstract description of
     // the nodes of a DAG.
@@ -2546,6 +2546,17 @@ mod proptests {
             println!("{:#?}", nodes);
             let dag = new_dag(&nodes, 0);
             println!("{:#?}", dag);
+
+            let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
+            let orderer = PrintOrderer::new(&saga_dag);
+            let entries = orderer.print_order();
+            let print_order = super::test::print_for_testing(&entries, &saga_dag);
+            println!("{}", print_order);
+
+            // Property 1: The number of actual ordered node entries equals
+            // the number of nodes in the dag
+            let num_nodes = entries.iter().filter(|e| e.is_node()).count();
+            prop_assert_eq!(num_nodes, saga_dag.graph.node_count());
         }
     }
 }
