@@ -2397,31 +2397,31 @@ mod proptests {
     //
     // There is one complication to this recursive definition, however: There
     // is really no such thing as a `Parallel` node. It's a pseudo node type
-    // that results in a call to `Dag::append_parallel`  on the given saga or
-    // subsaga. But `Dag::append_parallel` can only be called on vectors of
-    // real [`Node`]s. Thus we can't have a recursive generation of parallel
+    // that results in a call to [`Dag::append_parallel`]  on the given saga
+    // or subsaga. But [`Dag::append_parallel`] can only be called on vectors
+    // of real [`Node`]s. Thus we can't have a recursive generation of parallel
     // nodes inside parallel nodes directly, because it's nonsensical to say
     // something like `builder.append_parallel(builder.append_parallel)`. We
     // run into this issue because we want to use the recursive generative
     // abilities of `proptest` in order to generate arbitrary nestings of
-    // subsagas and constant nodes inside subsagas and the outer subsagas, and
-    // with liberal usage of `append_parallel` as appropriate. We could write
+    // subsagas and constant nodes inside subsagas and the outer saga, with
+    // liberal usage of [`Dag::append_parallel`] as appropriate. We could write
     // a bunch of different types and do a whole lot of mapping to generate
     // subsagas, limiting each one with code to some depth and ensuring we
-    // only call append parallel as needed, but in the end subsagas are still
-    // recursive, and we really don't want to worry about generating actual
-    // matching numbers of subsaga start and subsaga end nodes. So we end up
-    // just describing a slightly broken recursive definition for what our node
-    // structure looks like.
+    // only call [`Dag::append_parallel`] as needed, but in the end subsagas
+    // are still recursive, and we really don't want to worry about generating
+    // actual matching numbers of subsaga start and subsaga end nodes. So we
+    // end up just describing a slightly broken recursive definition for what
+    // our node structure looks like.
     //
-    // The great thing about this, is that proptest knows how to generate this
-    // structure and shrink it efficiently. Moreover, it's easy to rectify
-    // our issue with directly nested `NodeDesc::Parallel` variants. In
-    // `arb_nodedesc()` below, we ensure through the use of `prop_map`,
-    // that whenever we see a `Parallel` inner node we wrap it in a subsaga,
-    // rather than generating a new parallel node. In other words, we ensure
-    // that `NodeDesc::Parallel` only constains `NodeDesc::Constant` and
-    // `NodeDesc::Subsaga` variants.
+    // The great thing about utilizing propptest for recursive generation,
+    // is that proptest knows how to generate this structure and shrink it
+    // **efficiently**. Moreover, it's easy to rectify our issue with directly
+    // nested `NodeDesc::Parallel` variants. In `arb_nodedesc()` below, we
+    // ensure through the use of `prop_map`, that whenever we see a `Parallel`
+    // inner node we wrap it in a subsaga, rather than generating a new
+    // parallel node. In other words, we ensure that `NodeDesc::Parallel` only
+    // constains `NodeDesc::Constant` and `NodeDesc::Subsaga` variants.
     #[derive(Clone, Debug)]
     enum NodeDesc {
         Constant,
@@ -2454,6 +2454,7 @@ mod proptests {
             items_per_collection,
             |inner| {
                 prop_oneof![
+                    // Parallel nodes must contain at least 2 nodes
                     prop::collection::vec(inner.clone(), 2..10).prop_map(|v| {
                         // Ensure that Parallel nodes do not contain parallel nodes
                         if v.iter().any(|node_desc| node_desc.is_parallel()) {
@@ -2462,6 +2463,7 @@ mod proptests {
                             NodeDesc::Parallel(v)
                         }
                     }),
+                    // Subsagas must contain at least one node
                     prop::collection::vec(inner, 1..10)
                         .prop_map(NodeDesc::Subsaga)
                 ]
@@ -2469,13 +2471,17 @@ mod proptests {
         )
     }
 
+    // Create a Dag from the proptest generated `Vec<NodeDesc>`.
+    //
+    // Note that this method recurses in order to create subsagas.
     fn new_dag(nodes: &Vec<NodeDesc>, depth: usize) -> Dag {
         // The outermost dag that will become the SagaDag
         let name = SagaName::new(&format!("test-saga-{}", depth));
         let mut dag = DagBuilder::new(name);
 
-        // For simplicity, we always just use "0" for the params_node_name of
-        // subsagas. Every saga has one so it works, and we are only testing
+        // For simplicity, we always just use "0" for the `params_node_name`
+        // of subsagas. Every saga has one of these nodes, so it works fine.
+        // We don't really care about the values because we are only testing
         // structure, not saga behavior.
         let params_node_name = "0";
 
@@ -2536,7 +2542,8 @@ mod proptests {
             }
         }
 
-        // Always push a single constant node, just to ensure there is always one saga output node.
+        // Always append a single constant node, just to ensure there is always
+        // one saga output node.
         dag.append(Node::constant(
             &node_name.to_string(),
             serde_json::Value::Null,
@@ -2575,8 +2582,10 @@ mod proptests {
 
     // Indents must adhere to the following properties:
     //   * They must only increment or decrement by `1` at a time
-    //   * Increments only come from Parallel print entries or SubsagaStart nodes
-    //   * Decrements only come from Parallel print entries ending or SubsagaEnd nodes
+    //   * Increments only come from Parallel print entries or SubsagaStart
+    //     nodes
+    //   * Decrements only come from Parallel print entries ending or SubsagaEnd
+    //     nodes
     fn property_indents_are_correct(
         entries: &Vec<PrintOrderEntry>,
         dag: &SagaDag,
