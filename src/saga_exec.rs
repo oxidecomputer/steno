@@ -713,7 +713,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     // Many of these properties may be validated when we construct the saga DAG.
     // Checking them again here makes sure that we gracefully handle a case
     // where we got an invalid DAG in some other way (e.g., bad database state).
-    // See DagBuilderError for more informatino about these conditions.
+    // See `DagBuilderError` for more information about these conditions.
     fn validate_saga(
         saga: &SagaDag,
         registry: &ActionRegistry<UserType>,
