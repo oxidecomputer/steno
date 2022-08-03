@@ -1,15 +1,21 @@
 recovering from log: -
 recovered state
 + saga execution: 049b2522-308d-442e-bc65-9bfaef863597
-+-- stage  1: done: InstanceCreate (produces "instance_id")
-+-- stage  2: + (actions in parallel)
-              +-- done: VpcAllocIp (produces "instance_ip")
-              +-- done: VolumeCreate (produces "volume_id")
-              +-- done: ServerAlloc (subsaga) (produces "server_id")
-+-- stage  3: done: InstanceConfigure (produces "instance_configure")
-+-- stage  4: done: VolumeAttach (produces "volume_attach")
-+-- stage  5: queued-todo: InstanceBoot (produces "instance_boot")
-+-- stage  6: blocked: Print (produces "print")
++-- done: (start node)
++-- done: InstanceCreate (produces "instance_id")
++-- (parallel actions):
+        +-- done: VpcAllocIp (produces "instance_ip")
+        +-- done: VolumeCreate (produces "volume_id")
++-- done: (constant = {"number_of_things":1}) (produces "server_alloc_params")
++-- done: (subsaga start: "server-alloc")
+        +-- done: ServerPick (produces "server_id")
+        +-- done: ServerReserve (produces "server_reserve")
++-- done: (subsaga end) (produces "server_alloc")
++-- done: InstanceConfigure (produces "instance_configure")
++-- done: VolumeAttach (produces "volume_attach")
++-- queued-todo: InstanceBoot (produces "instance_boot")
++-- blocked: Print (produces "print")
++-- blocked: (end node)
 
 
 *** running saga ***
@@ -17,13 +23,21 @@ recovered state
 
 *** final state ***
 + saga execution: 049b2522-308d-442e-bc65-9bfaef863597
-+-- stage  1: done: InstanceCreate (produces "instance_id")
-+-- stage  2: + (actions in parallel)
-              +-- done: VpcAllocIp (produces "instance_ip")
-              +-- done: VolumeCreate (produces "volume_id")
-              +-- done: ServerAlloc (subsaga) (produces "server_id")
-+-- stage  3: done: InstanceConfigure (produces "instance_configure")
-+-- stage  4: done: VolumeAttach (produces "volume_attach")
-+-- stage  5: done: InstanceBoot (produces "instance_boot")
-+-- stage  6: done: Print (produces "print")
++-- done: (start node)
++-- done: InstanceCreate (produces "instance_id")
++-- (parallel actions):
+        +-- done: VpcAllocIp (produces "instance_ip")
+        +-- done: VolumeCreate (produces "volume_id")
++-- done: (constant = {"number_of_things":1}) (produces "server_alloc_params")
++-- done: (subsaga start: "server-alloc")
+        +-- done: ServerPick (produces "server_id")
+        +-- done: ServerReserve (produces "server_reserve")
++-- done: (subsaga end) (produces "server_alloc")
++-- done: InstanceConfigure (produces "instance_configure")
++-- done: VolumeAttach (produces "volume_attach")
++-- done: InstanceBoot (produces "instance_boot")
++-- done: Print (produces "print")
++-- done: (end node)
 
+result: SUCCESS
+final output: "it worked"

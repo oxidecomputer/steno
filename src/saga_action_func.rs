@@ -10,6 +10,7 @@ use crate::saga_action_generic::ActionResult;
 use crate::saga_action_generic::SagaType;
 use crate::saga_action_generic::UndoResult;
 use crate::saga_exec::ActionContext;
+use crate::ActionName;
 use futures::future::BoxFuture;
 use std::any::type_name;
 use std::fmt;
@@ -69,6 +70,7 @@ where
  * undo action
  */
 pub struct ActionFunc<ActionFuncType, UndoFuncType> {
+    name: ActionName,
     action_func: ActionFuncType,
     undo_func: UndoFuncType,
 }
@@ -83,11 +85,13 @@ impl<ActionFuncType, UndoFuncType> ActionFunc<ActionFuncType, UndoFuncType> {
      * interfaces of its own so there's generally no need to have the specific
      * type.)
      */
-    pub fn new_action<UserType, ActionFuncOutput>(
+    pub fn new_action<Name, UserType, ActionFuncOutput>(
+        name: Name,
         action_func: ActionFuncType,
         undo_func: UndoFuncType,
     ) -> Arc<dyn Action<UserType>>
     where
+        Name: AsRef<str>,
         UserType: SagaType,
         for<'c> ActionFuncType: ActionFn<
             'c,
@@ -97,7 +101,11 @@ impl<ActionFuncType, UndoFuncType> ActionFunc<ActionFuncType, UndoFuncType> {
         ActionFuncOutput: ActionData,
         for<'c> UndoFuncType: ActionFn<'c, UserType, Output = UndoResult>,
     {
-        Arc::new(ActionFunc { action_func, undo_func })
+        Arc::new(ActionFunc {
+            name: ActionName::new(name.as_ref()),
+            action_func,
+            undo_func,
+        })
     }
 }
 
@@ -109,10 +117,12 @@ impl<ActionFuncType, UndoFuncType> ActionFunc<ActionFuncType, UndoFuncType> {
  * Given a function `f`, return an `ActionFunc` that uses `f` as the action and
  * provides a no-op undo function (which does nothing and always succeeds).
  */
-pub fn new_action_noop_undo<UserType, ActionFuncType, ActionFuncOutput>(
+pub fn new_action_noop_undo<Name, UserType, ActionFuncType, ActionFuncOutput>(
+    name: Name,
     f: ActionFuncType,
 ) -> Arc<dyn Action<UserType>>
 where
+    Name: AsRef<str>,
     UserType: SagaType,
     for<'c> ActionFuncType: ActionFn<
         'c,
@@ -122,7 +132,7 @@ where
     ActionFuncOutput: ActionData,
 {
     // TODO-log
-    ActionFunc::new_action(f, |_| async { Ok(()) })
+    ActionFunc::new_action(name, f, |_| async { Ok(()) })
 }
 
 impl<UserType, ActionFuncType, ActionFuncOutput, UndoFuncType> Action<UserType>
@@ -162,6 +172,10 @@ where
         sgctx: ActionContext<UserType>,
     ) -> BoxFuture<'_, UndoResult> {
         Box::pin(self.undo_func.act(sgctx))
+    }
+
+    fn name(&self) -> ActionName {
+        self.name.clone()
     }
 }
 

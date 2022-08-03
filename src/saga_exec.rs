@@ -1,22 +1,27 @@
 //! Manages execution of a saga
 
+use crate::dag::InternalNode;
+use crate::dag::NodeName;
 use crate::rust_features::ExpectNone;
 use crate::saga_action_error::ActionError;
 use crate::saga_action_generic::Action;
+use crate::saga_action_generic::ActionConstant;
 use crate::saga_action_generic::ActionData;
 use crate::saga_action_generic::ActionInjectError;
 use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
-use crate::saga_template::SagaId;
-use crate::saga_template::SagaTemplateMetadata;
 use crate::sec::SecExecClient;
+use crate::ActionRegistry;
 use crate::SagaCachedState;
+use crate::SagaDag;
+use crate::SagaId;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
 use crate::SagaNodeId;
-use crate::SagaTemplate;
 use crate::SagaType;
 use anyhow::anyhow;
+use anyhow::ensure;
+use anyhow::Context;
 use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::lock::Mutex;
@@ -64,7 +69,7 @@ trait SagaNodeRest<UserType: SagaType>: Send + Sync {
     fn propagate(
         &self,
         exec: &SagaExecutor<UserType>,
-        live_state: &mut SagaExecLiveState<UserType>,
+        live_state: &mut SagaExecLiveState,
     );
     fn log_event(&self) -> SagaNodeEventType;
 }
@@ -77,16 +82,16 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsDone> {
     fn propagate(
         &self,
         exec: &SagaExecutor<UserType>,
-        live_state: &mut SagaExecLiveState<UserType>,
+        live_state: &mut SagaExecLiveState,
     ) {
-        let graph = &exec.saga_metadata.graph;
+        let graph = &exec.dag.graph;
         assert!(!live_state.node_errors.contains_key(&self.node_id));
         live_state
             .node_outputs
             .insert(self.node_id, Arc::clone(&self.state.0))
             .expect_none("node finished twice (storing output)");
 
-        if self.node_id == exec.saga_metadata.end_node {
+        if self.node_id == exec.dag.end_node {
             /*
              * If we've completed the last node, the saga is done.
              */
@@ -133,9 +138,9 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsFailed> {
     fn propagate(
         &self,
         exec: &SagaExecutor<UserType>,
-        live_state: &mut SagaExecLiveState<UserType>,
+        live_state: &mut SagaExecLiveState,
     ) {
-        let graph = &exec.saga_metadata.graph;
+        let graph = &exec.dag.graph;
         assert!(!live_state.node_outputs.contains_key(&self.node_id));
         live_state
             .node_errors
@@ -168,9 +173,9 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsFailed> {
              * it trivially "undone" and propagate that.
              */
             live_state.exec_state = SagaCachedState::Unwinding;
-            assert_ne!(self.node_id, exec.saga_metadata.end_node);
+            assert_ne!(self.node_id, exec.dag.end_node);
             let new_node = SagaNode {
-                node_id: exec.saga_metadata.end_node,
+                node_id: exec.dag.end_node,
                 state: SgnsUndone(UndoMode::ActionNeverRan),
             };
             new_node.propagate(exec, live_state);
@@ -186,16 +191,16 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
     fn propagate(
         &self,
         exec: &SagaExecutor<UserType>,
-        live_state: &mut SagaExecLiveState<UserType>,
+        live_state: &mut SagaExecLiveState,
     ) {
-        let graph = &exec.saga_metadata.graph;
+        let graph = &exec.dag.graph;
         assert_eq!(live_state.exec_state, SagaCachedState::Unwinding);
         live_state
             .nodes_undone
             .insert(self.node_id, self.state.0)
             .expect_none("node already undone");
 
-        if self.node_id == exec.saga_metadata.start_node {
+        if self.node_id == exec.dag.start_node {
             /*
              * If we've undone the start node, the saga is done.
              */
@@ -292,9 +297,8 @@ struct TaskCompletion<UserType: SagaType> {
  * Context provided to the (tokio) task that executes an action
  */
 struct TaskParams<UserType: SagaType> {
-    saga_metadata: Arc<SagaTemplateMetadata>,
+    dag: Arc<SagaDag>,
     user_context: Arc<UserType::ExecContextType>,
-    user_saga_params: Arc<UserType::SagaParamsType>,
 
     /**
      * Handle to the saga's live state
@@ -302,7 +306,7 @@ struct TaskParams<UserType: SagaType> {
      * This is used only to update state for status purposes.  We want to avoid
      * any tight coupling between this task and the internal state.
      */
-    live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
+    live_state: Arc<Mutex<SagaExecLiveState>>,
 
     /** id of the graph node whose action we're running */
     node_id: NodeIndex,
@@ -310,7 +314,9 @@ struct TaskParams<UserType: SagaType> {
     done_tx: mpsc::Sender<TaskCompletion<UserType>>,
     /** Ancestor tree for this node.  See [`ActionContext`]. */
     // TODO-cleanup there's no reason this should be an Arc.
-    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
+    ancestor_tree: Arc<BTreeMap<NodeName, Arc<serde_json::Value>>>,
+    /** Saga parameters for the closest enclosing saga */
+    saga_params: Arc<serde_json::Value>,
     /** The action itself that we're executing. */
     action: Arc<dyn Action<UserType>>,
 }
@@ -346,7 +352,8 @@ pub struct SagaExecutor<UserType: SagaType> {
     #[allow(dead_code)]
     log: slog::Logger,
 
-    saga_metadata: Arc<SagaTemplateMetadata>,
+    dag: Arc<SagaDag>,
+    action_registry: Arc<ActionRegistry<UserType>>,
 
     /** Channel for monitoring execution completion */
     finish_tx: broadcast::Sender<()>,
@@ -354,9 +361,11 @@ pub struct SagaExecutor<UserType: SagaType> {
     /** Unique identifier for this saga (an execution of a saga template) */
     saga_id: SagaId,
 
-    live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
+    /** For each node, the NodeIndex of the start of its saga or subsaga */
+    node_saga_start: BTreeMap<NodeIndex, NodeIndex>,
+
+    live_state: Arc<Mutex<SagaExecLiveState>>,
     user_context: Arc<UserType::ExecContextType>,
-    user_saga_params: Arc<UserType::SagaParamsType>,
 }
 
 #[derive(Debug)]
@@ -370,27 +379,21 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     pub fn new(
         log: slog::Logger,
         saga_id: SagaId,
-        saga_template: Arc<SagaTemplate<UserType>>,
+        dag: Arc<SagaDag>,
+        registry: Arc<ActionRegistry<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
-        user_saga_params: UserType::SagaParamsType,
         sec_hdl: SecExecClient,
-    ) -> SagaExecutor<UserType> {
+    ) -> Result<SagaExecutor<UserType>, anyhow::Error> {
         let sglog = SagaLog::new_empty(saga_id);
-
-        /*
-         * The only errors that can be returned from new_recover() are never
-         * expected in this context.
-         */
         SagaExecutor::new_recover(
             log,
             saga_id,
-            saga_template,
+            dag,
+            registry,
             user_context,
-            user_saga_params,
             sec_hdl,
             sglog,
         )
-        .unwrap()
     }
 
     /**
@@ -400,12 +403,17 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     pub fn new_recover(
         log: slog::Logger,
         saga_id: SagaId,
-        saga_template: Arc<SagaTemplate<UserType>>,
+        dag: Arc<SagaDag>,
+        registry: Arc<ActionRegistry<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
-        user_saga_params: UserType::SagaParamsType,
         sec_hdl: SecExecClient,
         sglog: SagaLog,
     ) -> Result<SagaExecutor<UserType>, anyhow::Error> {
+        /* Before anything else, do some basic checks on the DAG. */
+        Self::validate_saga(&dag, &registry).with_context(|| {
+            format!("validating saga {:?}", dag.saga_name())
+        })?;
+
         /*
          * During recovery, there's a fine line between operational errors and
          * programmer errors.  If we discover semantically invalid saga state,
@@ -417,10 +425,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
          * not a result of corrupted database state.
          */
         let forward = !sglog.unwinding();
-        let user_saga_params = Arc::new(user_saga_params);
         let mut live_state = SagaExecLiveState {
-            saga_template: Arc::clone(&saga_template),
-            saga_metadata: Arc::new(saga_template.metadata().clone()),
             exec_state: if forward {
                 SagaCachedState::Running
             } else {
@@ -432,27 +437,85 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             node_outputs: BTreeMap::new(),
             nodes_undone: BTreeMap::new(),
             node_errors: BTreeMap::new(),
-            child_sagas: BTreeMap::new(),
             sglog,
             injected_errors: BTreeSet::new(),
             sec_hdl,
             saga_id,
         };
         let mut loaded = BTreeSet::new();
-        let saga_metadata = Arc::clone(&live_state.saga_metadata);
-        let graph = &saga_metadata.graph;
+        let graph = &dag.graph;
+
+        /*
+         * Precompute a mapping from each node to the start of its containing
+         * saga or subsaga.  This is used for quickly finding each node's saga
+         * parameters and also when building ancestor trees for skipping over
+         * entire subsagas.
+         */
+        let nodes_sorted = toposort(&graph, None).expect("saga DAG had cycles");
+        let node_saga_start = {
+            let mut node_saga_start = BTreeMap::new();
+            for node_index in &nodes_sorted {
+                let node = graph.node_weight(*node_index).unwrap();
+                let subsaga_start_index = match node {
+                    InternalNode::Start { .. }
+                    | InternalNode::SubsagaStart { .. } => {
+                        // For a top-level start node or subsaga start node, the
+                        // containing saga start node is itself.
+                        *node_index
+                    }
+                    InternalNode::End
+                    | InternalNode::Action { .. }
+                    | InternalNode::Constant { .. }
+                    | InternalNode::SubsagaEnd { .. } => {
+                        // For every other kind of node, first, there must be at
+                        // least one ancestor.  And we must have already visited
+                        // because we're iterating in topological order.  In
+                        // most cases, this node's saga starts at the same node
+                        // as its ancestor.  However, if the ancestor is a
+                        // SubsagaEnd, then we need to skip over the whole
+                        // subsaga.
+                        let immed_ancestor = graph
+                            .neighbors_directed(*node_index, petgraph::Incoming)
+                            .next()
+                            .unwrap();
+                        let immed_ancestor_node =
+                            dag.get(immed_ancestor).unwrap();
+                        let ancestor = match immed_ancestor_node {
+                            InternalNode::SubsagaEnd { .. } => {
+                                let subsaga_start = *node_saga_start
+                                    .get(&immed_ancestor)
+                                    .unwrap();
+                                graph
+                                    .neighbors_directed(
+                                        subsaga_start,
+                                        petgraph::Incoming,
+                                    )
+                                    .next()
+                                    .unwrap()
+                            }
+                            _ => immed_ancestor,
+                        };
+
+                        *node_saga_start.get(&ancestor).expect(
+                            "expected to compute ancestor's \
+                                subsaga start node first",
+                        )
+                    }
+                };
+                node_saga_start.insert(*node_index, subsaga_start_index);
+            }
+            node_saga_start
+        };
 
         /*
          * Iterate in the direction of current execution: for normal execution,
          * a standard topological sort.  For unwinding, reverse that.
          */
         let graph_nodes = {
-            let mut nodes =
-                toposort(&graph, None).expect("saga DAG had cycles");
+            let mut nodes = nodes_sorted;
             if !forward {
                 nodes.reverse();
             }
-
             nodes
         };
 
@@ -624,8 +687,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         /*
          * Check our done conditions.
          */
-        if live_state.node_outputs.contains_key(&saga_metadata.end_node)
-            || live_state.nodes_undone.contains_key(&saga_metadata.start_node)
+        if live_state.node_outputs.contains_key(&dag.end_node)
+            || live_state.nodes_undone.contains_key(&dag.start_node)
         {
             live_state.mark_saga_done();
         }
@@ -634,13 +697,90 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         Ok(SagaExecutor {
             log,
-            saga_metadata,
+            dag,
             finish_tx,
             saga_id,
             user_context,
-            user_saga_params,
             live_state: Arc::new(Mutex::new(live_state)),
+            action_registry: Arc::clone(&registry),
+            node_saga_start,
         })
+    }
+
+    /**
+     * Validates some basic properties of the saga
+     */
+    // Many of these properties may be validated when we construct the saga DAG.
+    // Checking them again here makes sure that we gracefully handle a case
+    // where we got an invalid DAG in some other way (e.g., bad database state).
+    // See `DagBuilderError` for more information about these conditions.
+    fn validate_saga(
+        saga: &SagaDag,
+        registry: &ActionRegistry<UserType>,
+    ) -> Result<(), anyhow::Error> {
+        let mut nsubsaga_start = 0;
+        let mut nsubsaga_end = 0;
+
+        for node_index in saga.graph.node_indices() {
+            let node = &saga.graph[node_index];
+            match node {
+                InternalNode::Start { .. } => {
+                    ensure!(
+                        node_index == saga.start_node,
+                        "found start node at unexpected index {:?}",
+                        node_index
+                    );
+                }
+                InternalNode::End => {
+                    ensure!(
+                        node_index == saga.end_node,
+                        "found end node at unexpected index {:?}",
+                        node_index
+                    );
+                }
+                InternalNode::Action { name, action_name, .. } => {
+                    let action = registry.get(&action_name);
+                    ensure!(
+                        action.is_ok(),
+                        "action for node {:?} not registered: {:?}",
+                        name,
+                        action_name
+                    );
+                }
+                InternalNode::Constant { .. } => (),
+                InternalNode::SubsagaStart { .. } => {
+                    nsubsaga_start += 1;
+                }
+                InternalNode::SubsagaEnd { .. } => {
+                    nsubsaga_end += 1;
+                }
+            }
+        }
+
+        ensure!(
+            saga.start_node.index() < saga.graph.node_count(),
+            "bad saga graph (missing start node)",
+        );
+        ensure!(
+            saga.end_node.index() < saga.graph.node_count(),
+            "bad saga graph (missing end node)",
+        );
+        ensure!(
+            nsubsaga_start == nsubsaga_end,
+            "bad saga graph (found {} subsaga start nodes \
+            but {} subsaga end nodes)",
+            nsubsaga_start,
+            nsubsaga_end
+        );
+
+        let nend_ancestors =
+            saga.graph.neighbors_directed(saga.end_node, Incoming).count();
+        ensure!(
+            nend_ancestors == 1,
+            "expected saga to end with exactly one node"
+        );
+
+        Ok(())
     }
 
     /**
@@ -654,18 +794,17 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
      */
     fn make_ancestor_tree(
         &self,
-        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
-        live_state: &SagaExecLiveState<UserType>,
-        node: NodeIndex,
+        tree: &mut BTreeMap<NodeName, Arc<serde_json::Value>>,
+        live_state: &SagaExecLiveState,
+        node_index: NodeIndex,
         include_self: bool,
     ) {
         if include_self {
-            self.make_ancestor_tree_node(tree, live_state, node);
+            self.make_ancestor_tree_node(tree, live_state, node_index);
             return;
         }
 
-        let ancestors =
-            self.saga_metadata.graph.neighbors_directed(node, Incoming);
+        let ancestors = self.dag.graph.neighbors_directed(node_index, Incoming);
         for ancestor in ancestors {
             self.make_ancestor_tree_node(tree, live_state, ancestor);
         }
@@ -673,26 +812,91 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
     fn make_ancestor_tree_node(
         &self,
-        tree: &mut BTreeMap<String, Arc<serde_json::Value>>,
-        live_state: &SagaExecLiveState<UserType>,
-        node: NodeIndex,
+        tree: &mut BTreeMap<NodeName, Arc<serde_json::Value>>,
+        live_state: &SagaExecLiveState,
+        node_index: NodeIndex,
     ) {
-        if node == self.saga_metadata.start_node {
-            return;
+        let dag_node = self.dag.get(node_index).unwrap();
+
+        // Record any output from the current node.
+        match dag_node {
+            InternalNode::Constant { name, .. }
+            | InternalNode::Action { name, .. }
+            | InternalNode::SubsagaEnd { name, .. } => {
+                // TODO-cleanup This implementation may encounter the same node
+                // twice.  This feels a little sloppy and inefficient.
+                let output = live_state.node_output(node_index);
+                tree.insert(name.clone(), output);
+            }
+            InternalNode::Start { .. }
+            | InternalNode::End
+            | InternalNode::SubsagaStart { .. } => (),
         }
 
-        /*
-         * If we're in this function, it's because we're looking at the ancestor
-         * of a node that's currently "Running".  All such ancestors must be
-         * "Done".  If they had never reached "Done", then we should never have
-         * started working on the current node.  If they were "Done" but moved
-         * on to one of the undoing states, then that implies we've already
-         * finished undoing descendants, which would include the current node.
-         */
-        let name = self.saga_metadata.node_name(&node).unwrap().to_owned();
-        let output = live_state.node_output(node);
-        tree.insert(name, output);
-        self.make_ancestor_tree(tree, live_state, node, false);
+        // Figure out where to resume the traversal.
+        let resume_node = match dag_node {
+            InternalNode::SubsagaStart { .. } => {
+                // We were traversing nodes in a subsaga and we're now done.
+                None
+            }
+            InternalNode::SubsagaEnd { .. } => {
+                // We're traversing nodes in a saga that contains a subsaga.
+                // Skip over the subsaga.
+                Some(*self.node_saga_start.get(&node_index).unwrap())
+            }
+            InternalNode::Constant { .. }
+            | InternalNode::Action { .. }
+            | InternalNode::Start { .. }
+            | InternalNode::End => {
+                // Ordinary traversal -- keep going from where we are.
+                Some(node_index)
+            }
+        };
+
+        if let Some(resume_node) = resume_node {
+            self.make_ancestor_tree(tree, live_state, resume_node, false);
+        }
+    }
+
+    /// Returns the saga parameters for the current node
+    // If this node is not within a subsaga, then these will be the top-level
+    // saga parameters.  If this node is contained within a subsaga, then these
+    // will be the parameters of the _subsaga_.
+    fn saga_params_for(
+        &self,
+        live_state: &SagaExecLiveState,
+        node_index: NodeIndex,
+    ) -> Arc<serde_json::Value> {
+        let subsaga_start_index = self.node_saga_start[&node_index];
+        let subsaga_start_node = self.dag.get(subsaga_start_index).unwrap();
+        match subsaga_start_node {
+            InternalNode::Start { params } => params.clone(),
+            InternalNode::SubsagaStart { params_node_name, .. } => {
+                // TODO-performance We're going to repeat this for every node in
+                // the subsaga.  We may as well cache it somewhere.  The tricky
+                // part is figuring out when to generate the value that accounts
+                // for all the cases where we may land here, including recovery
+                // (in which case we may not have executed the SubsagaStart
+                // node since crashing) and for undo actions in the subsaga.
+                let mut tree = BTreeMap::new();
+                self.make_ancestor_tree(
+                    &mut tree,
+                    live_state,
+                    subsaga_start_index,
+                    false,
+                );
+                Arc::clone(tree.get(params_node_name).unwrap())
+            }
+            InternalNode::SubsagaEnd { .. }
+            | InternalNode::End
+            | InternalNode::Action { .. }
+            | InternalNode::Constant { .. } => {
+                panic!(
+                    "containing saga cannot have started with {:?}",
+                    subsaga_start_node
+                );
+            }
+        }
     }
 
     /**
@@ -737,8 +941,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
          * completion of the compensating action.  We bound this channel's size
          * at twice the graph node count for this worst case.
          */
-        let (tx, mut rx) =
-            mpsc::channel(2 * self.saga_metadata.graph.node_count());
+        let (tx, mut rx) = mpsc::channel(2 * self.dag.graph.node_count());
 
         loop {
             self.kick_off_ready(&tx).await;
@@ -837,27 +1040,22 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 false,
             );
 
+            let saga_params = self.saga_params_for(&live_state, node_id);
             let sgaction = if live_state.injected_errors.contains(&node_id) {
                 Arc::new(ActionInjectError {}) as Arc<dyn Action<UserType>>
             } else {
-                Arc::clone(
-                    live_state
-                        .saga_template
-                        .launchers
-                        .get(&node_id)
-                        .expect("missing action for node"),
-                )
+                self.node_action(&live_state, node_id)
             };
 
             let task_params = TaskParams {
-                saga_metadata: Arc::clone(&self.saga_metadata),
+                dag: Arc::clone(&self.dag),
                 live_state: Arc::clone(&self.live_state),
                 node_id,
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
+                saga_params,
                 action: sgaction,
                 user_context: Arc::clone(&self.user_context),
-                user_saga_params: Arc::clone(&self.user_saga_params),
             };
 
             let task = tokio::spawn(SagaExecutor::exec_node(task_params));
@@ -886,25 +1084,68 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 true,
             );
 
-            let sgaction = live_state
-                .saga_template
-                .launchers
-                .get(&node_id)
-                .expect("missing action for node");
-
+            let saga_params = self.saga_params_for(&live_state, node_id);
+            let sgaction = self.node_action(&live_state, node_id);
             let task_params = TaskParams {
-                saga_metadata: Arc::clone(&self.saga_metadata),
+                dag: Arc::clone(&self.dag),
                 live_state: Arc::clone(&self.live_state),
                 node_id,
                 done_tx: tx.clone(),
                 ancestor_tree: Arc::new(ancestor_tree),
-                action: Arc::clone(sgaction),
+                saga_params,
+                action: sgaction,
                 user_context: Arc::clone(&self.user_context),
-                user_saga_params: Arc::clone(&self.user_saga_params),
             };
 
             let task = tokio::spawn(SagaExecutor::undo_node(task_params));
             live_state.node_task(node_id, task);
+        }
+    }
+
+    fn node_action(
+        &self,
+        live_state: &SagaExecLiveState,
+        node_index: NodeIndex,
+    ) -> Arc<dyn Action<UserType>> {
+        let registry = &self.action_registry;
+        let dag = &self.dag;
+        match dag.get(node_index).unwrap() {
+            InternalNode::Action { action_name: action, .. } => {
+                // This condition was checked in SagaExec::validate_saga().  It
+                // shouldn't be possible to blow this assertion.
+                registry.get(action).expect("missing action for node")
+            }
+
+            InternalNode::Constant { value, .. } => {
+                Arc::new(ActionConstant::new(Arc::clone(value)))
+            }
+
+            InternalNode::Start { .. }
+            | InternalNode::End
+            | InternalNode::SubsagaStart { .. } => {
+                // These nodes are no-ops in terms of the action that happens at
+                // the node itself.
+                Arc::new(ActionConstant::new(Arc::new(serde_json::Value::Null)))
+            }
+
+            InternalNode::SubsagaEnd { .. } => {
+                // We record the subsaga's output here, as the output of the
+                // `SubsagaEnd` node.  (We don't _have_ to do this -- we could
+                // instead change the logic that _finds_ the saga's output to
+                // look in the same place that we do here.  But this is a simple
+                // and clear way to do this.)
+                // TODO-robustness we validate that there's exactly one final
+                // node when we build the DAG, but we should also validate it
+                // during recovery or else fail more gracefully here.  See #32.
+                let ancestors: Vec<_> = dag
+                    .graph
+                    .neighbors_directed(node_index, Incoming)
+                    .collect();
+                assert_eq!(ancestors.len(), 1);
+                Arc::new(ActionConstant::new(
+                    live_state.node_output(ancestors[0]),
+                ))
+            }
         }
     }
 
@@ -946,11 +1187,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         let exec_future = task_params.action.do_it(ActionContext {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
+            saga_params: Arc::clone(&task_params.saga_params),
             node_id,
-            live_state: Arc::clone(&task_params.live_state),
-            saga_metadata: Arc::clone(&task_params.saga_metadata),
+            dag: Arc::clone(&task_params.dag),
             user_context: Arc::clone(&task_params.user_context),
-            user_saga_params: Arc::clone(&task_params.user_saga_params),
         });
         let result = exec_future.await;
         let node: Box<dyn SagaNodeRest<UserType>> = match result {
@@ -1001,11 +1241,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         let exec_future = task_params.action.undo_it(ActionContext {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
+            saga_params: Arc::clone(&task_params.saga_params),
             node_id,
-            live_state: Arc::clone(&task_params.live_state),
-            saga_metadata: Arc::clone(&task_params.saga_metadata),
+            dag: Arc::clone(&task_params.dag),
             user_context: Arc::clone(&task_params.user_context),
-            user_saga_params: Arc::clone(&task_params.user_saga_params),
         });
         /*
          * TODO-robustness We have to figure out what it means to fail here and
@@ -1080,11 +1319,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .expect("attempted to get result while saga still running?");
         assert_eq!(live_state.exec_state, SagaCachedState::Done);
 
-        if live_state.nodes_undone.contains_key(&self.saga_metadata.start_node)
-        {
-            assert!(live_state
-                .nodes_undone
-                .contains_key(&self.saga_metadata.end_node));
+        if live_state.nodes_undone.contains_key(&self.dag.start_node) {
+            assert!(live_state.nodes_undone.contains_key(&self.dag.end_node));
 
             /*
              * Choosing the first node_id in node_errors will find the
@@ -1097,10 +1333,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             let (error_node_id, error_source) =
                 live_state.node_errors.iter().next().unwrap();
             let error_node_name = self
-                .saga_metadata
-                .node_name(error_node_id)
+                .dag
+                .get(*error_node_id)
                 .unwrap()
-                .to_string();
+                .node_name()
+                .expect("unexpected failure from unnamed node")
+                .clone();
             return SagaResult {
                 saga_id: self.saga_id,
                 saga_log: live_state.sglog.clone(),
@@ -1116,25 +1354,27 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .node_outputs
             .iter()
             .filter_map(|(node_id, node_output)| {
-                let start_node = &self.saga_metadata.start_node;
-                let end_node = &self.saga_metadata.end_node;
-                if *node_id == *start_node || *node_id == *end_node {
-                    None
-                } else {
-                    let node_name = self
-                        .saga_metadata
-                        .node_name(node_id)
-                        .unwrap()
-                        .to_owned();
-                    Some((node_name, Arc::clone(node_output)))
-                }
+                self.dag.get(*node_id).unwrap().node_name().map(|node_name| {
+                    (node_name.clone(), Arc::clone(node_output))
+                })
             })
             .collect();
+
+        // The output node is the (sole) ancestor of the "end" node.
+        // There must be exactly one.  This was checked in
+        // SagaExec::validate_dag().
+        let output_node_index = self
+            .dag
+            .graph
+            .neighbors_directed(self.dag.end_node, Incoming)
+            .next()
+            .unwrap();
+        let saga_output = live_state.node_output(output_node_index);
 
         SagaResult {
             saga_id: self.saga_id,
             saga_log: live_state.sglog.clone(),
-            kind: Ok(SagaResultOk { node_outputs }),
+            kind: Ok(SagaResultOk { saga_output, node_outputs }),
         }
     }
 
@@ -1142,88 +1382,19 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         async move {
             let live_state = self.live_state.lock().await;
 
-            /*
-             * First, determine the maximum depth of each node.  Use this to
-             * figure out the list of nodes at each level of depth.  This
-             * information is used to figure out where to print each node's
-             * status vertically.
-             */
-            let mut max_depth_of_node: BTreeMap<NodeIndex, usize> =
-                BTreeMap::new();
-            max_depth_of_node.insert(self.saga_metadata.start_node, 0);
-            let mut nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>> =
-                BTreeMap::new();
             let mut node_exec_states = BTreeMap::new();
-            let mut child_sagas = BTreeMap::new();
 
-            let graph = &self.saga_metadata.graph;
+            let graph = &self.dag.graph;
             let topo_visitor = Topo::new(graph);
             for node in topo_visitor.iter(graph) {
                 /* Record the current execution state for this node. */
                 node_exec_states.insert(node, live_state.node_exec_state(node));
-
-                /*
-                 * If there's a child saga for this node, construct its status.
-                 */
-                if let Some(child_ids) = live_state.child_sagas.get(&node) {
-                    /*
-                     * TODO-correctness check lock order.  This seems okay
-                     * because we always take locks from parent -> child and
-                     * there cannot be cycles.
-                     */
-                    let mut statuses = Vec::new();
-                    for c in child_ids {
-                        let child_view =
-                            live_state.sec_hdl.saga_get(*c).await.unwrap();
-                        statuses.push(child_view.state.status().clone());
-                    }
-                    child_sagas
-                        .insert(node, statuses)
-                        .expect_none("duplicate child status");
-                }
-
-                /*
-                 * Compute the node's depth.  This must be 0 (already stored
-                 * above) for the root node and we don't care about doing this
-                 * for the end node.
-                 */
-                if let Some(d) = max_depth_of_node.get(&node) {
-                    assert_eq!(*d, 0);
-                    assert_eq!(node, self.saga_metadata.start_node);
-                    assert_eq!(max_depth_of_node.len(), 1);
-                    continue;
-                }
-
-                /*
-                 * We don't want to include the end node because we don't want
-                 * to try to print it later.  This should always be the last
-                 * iteration of the loop.
-                 */
-                if node == self.saga_metadata.end_node {
-                    continue;
-                }
-
-                let mut max_parent_depth: Option<usize> = None;
-                for p in graph.neighbors_directed(node, Incoming) {
-                    let parent_depth = *max_depth_of_node.get(&p).unwrap();
-                    match max_parent_depth {
-                        Some(x) if x >= parent_depth => (),
-                        _ => max_parent_depth = Some(parent_depth),
-                    };
-                }
-
-                let depth = max_parent_depth.unwrap() + 1;
-                max_depth_of_node.insert(node, depth);
-
-                nodes_at_depth.entry(depth).or_insert_with(Vec::new).push(node);
             }
 
             SagaExecStatus {
                 saga_id: self.saga_id,
-                saga_metadata: Arc::clone(&self.saga_metadata),
-                nodes_at_depth,
+                dag: Arc::clone(&self.dag),
                 node_exec_states,
-                child_sagas,
                 sglog: live_state.sglog.clone(),
             }
         }
@@ -1251,10 +1422,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
  * TODO This would be a good place for a debug log.
  */
 #[derive(Debug)]
-struct SagaExecLiveState<UserType: SagaType> {
-    saga_template: Arc<SagaTemplate<UserType>>,
-    saga_metadata: Arc<SagaTemplateMetadata>,
-
+struct SagaExecLiveState {
     /** Unique identifier for this saga (an execution of a saga template) */
     saga_id: SagaId,
 
@@ -1277,9 +1445,6 @@ struct SagaExecLiveState<UserType: SagaType> {
     nodes_undone: BTreeMap<NodeIndex, UndoMode>,
     /** Errors produced by failed actions. */
     node_errors: BTreeMap<NodeIndex, ActionError>,
-
-    /** Child sagas created by a node (for status and control) */
-    child_sagas: BTreeMap<NodeIndex, Vec<SagaId>>,
 
     /** Persistent state */
     sglog: SagaLog,
@@ -1324,7 +1489,7 @@ impl fmt::Display for NodeExecState {
     }
 }
 
-impl<UserType: SagaType> SagaExecLiveState<UserType> {
+impl SagaExecLiveState {
     /*
      * TODO-design The current implementation does not use explicit state.  In
      * most cases, this made things better than before because each hunk of code
@@ -1417,10 +1582,22 @@ pub struct SagaResult {
  */
 #[derive(Clone, Debug)]
 pub struct SagaResultOk {
-    node_outputs: BTreeMap<String, Arc<serde_json::Value>>,
+    saga_output: Arc<serde_json::Value>,
+    node_outputs: BTreeMap<NodeName, Arc<serde_json::Value>>,
 }
 
 impl SagaResultOk {
+    /**
+     * Returns the final output of the saga (the output from the last node)
+     */
+    pub fn saga_output<T: ActionData + 'static>(
+        &self,
+    ) -> Result<T, ActionError> {
+        serde_json::from_value((*self.saga_output).clone())
+            .context("final saga output")
+            .map_err(ActionError::new_deserialize)
+    }
+
     /**
      * Returns the data produced by a node in the saga.
      *
@@ -1428,15 +1605,21 @@ impl SagaResultOk {
      *
      * If the saga has no node called `name`.
      */
-    pub fn lookup_output<T: ActionData + 'static>(
+    pub fn lookup_node_output<T: ActionData + 'static>(
         &self,
         name: &str,
     ) -> Result<T, ActionError> {
-        let output_json = self.node_outputs.get(name).unwrap_or_else(|| {
-            panic!("node with name \"{}\": not part of this saga", name)
-        });
+        let key = NodeName::new(name);
+        let output_json =
+            self.node_outputs.get(&key).unwrap_or_else(|| {
+                panic!(
+                    "node with name \"{}\": not part of this saga",
+                    key.as_ref(),
+                )
+            });
         // TODO-cleanup double-asterisk seems odd?
         serde_json::from_value((**output_json).clone())
+            .context("final node output")
             .map_err(ActionError::new_deserialize)
     }
 }
@@ -1467,7 +1650,7 @@ impl SagaResultOk {
  */
 #[derive(Clone, Debug)]
 pub struct SagaResultErr {
-    pub error_node_name: String,
+    pub error_node_name: NodeName,
     pub error_source: ActionError,
 }
 
@@ -1477,16 +1660,14 @@ pub struct SagaResultErr {
 #[derive(Clone, Debug)]
 pub struct SagaExecStatus {
     saga_id: SagaId,
-    nodes_at_depth: BTreeMap<usize, Vec<NodeIndex>>,
     node_exec_states: BTreeMap<NodeIndex, NodeExecState>,
-    child_sagas: BTreeMap<NodeIndex, Vec<SagaExecStatus>>,
-    saga_metadata: Arc<SagaTemplateMetadata>,
+    dag: Arc<SagaDag>,
     sglog: SagaLog,
 }
 
 impl fmt::Display for SagaExecStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.print(f, 0)
+        self.print(f)
     }
 }
 
@@ -1495,76 +1676,277 @@ impl SagaExecStatus {
         &self.sglog
     }
 
-    fn print(
-        &self,
-        out: &mut fmt::Formatter<'_>,
-        indent_level: usize,
-    ) -> fmt::Result {
-        let big_indent = indent_level * 16;
-        write!(
-            out,
-            "{:width$}+ saga execution: {}\n",
-            "",
-            self.saga_id,
-            width = big_indent
-        )?;
-        for (d, nodes) in &self.nodes_at_depth {
-            write!(
-                out,
-                "{:width$}+-- stage {:>2}: ",
-                "",
-                d,
-                width = big_indent
-            )?;
-            if nodes.len() == 1 {
-                let node = nodes[0];
-                let node_label = format!(
-                    "{} (produces \"{}\")",
-                    self.saga_metadata.node_label(&node).unwrap(),
-                    self.saga_metadata.node_name(&node).unwrap()
-                );
-                let node_state = &self.node_exec_states[&node];
-                write!(out, "{}: {}\n", node_state, node_label)?;
-            } else {
-                write!(out, "+ (actions in parallel)\n")?;
-                for node in nodes {
-                    let node_label = format!(
-                        "{} (produces \"{}\")",
-                        self.saga_metadata.node_label(&node).unwrap(),
-                        self.saga_metadata.node_name(&node).unwrap()
-                    );
-                    let node_state = &self.node_exec_states[&node];
-                    let child_sagas = self.child_sagas.get(&node);
-                    let subsaga_char =
-                        if child_sagas.is_some() { '+' } else { '-' };
-
-                    write!(
-                        out,
-                        "{:width$}{:>14}+-{} {}: {}\n",
-                        "",
-                        "",
-                        subsaga_char,
-                        node_state,
-                        node_label,
-                        width = big_indent
+    /// Generate an output order via the [`PrintOrderer`] and then write it
+    /// to the Formatter.
+    pub fn print(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let orderer = PrintOrderer::new(&self.dag);
+        let output = orderer.print_order();
+        self.write_header(f)?;
+        for entry in output {
+            match entry {
+                PrintOrderEntry::Node { idx, indent_level } => {
+                    self.print_node(f, idx, indent_level)?;
+                }
+                PrintOrderEntry::Parallel { indent_level } => {
+                    Self::write_indented(
+                        f,
+                        indent_level,
+                        "(parallel actions):\n",
                     )?;
-
-                    if let Some(sagas) = child_sagas {
-                        for c in sagas {
-                            c.print(out, indent_level + 1)?;
-                        }
-                    }
                 }
             }
         }
 
         Ok(())
     }
+
+    fn print_node(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        idx: NodeIndex,
+        indent_level: usize,
+    ) -> fmt::Result {
+        let node = self.dag.get(idx).unwrap();
+        let label = Self::mklabel(&node);
+        let state = &self.node_exec_states[&idx];
+        let msg = format!("{}: {}\n", state, label);
+        Self::write_indented(f, indent_level, &msg)?;
+        Ok(())
+    }
+
+    fn write_indented(
+        out: &mut fmt::Formatter<'_>,
+        indent_level: usize,
+        msg: &str,
+    ) -> fmt::Result {
+        write!(
+            out,
+            "{:width$}+-- {}",
+            "",
+            msg,
+            width = Self::big_indent(indent_level)
+        )
+    }
+
+    fn mklabel(node: &InternalNode) -> String {
+        if let Some(name) = node.node_name() {
+            format!("{} (produces {:?})", node.label(), name)
+        } else {
+            node.label()
+        }
+    }
+
+    fn big_indent(indent_level: usize) -> usize {
+        indent_level * 8
+    }
+
+    fn write_header(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            out,
+            "{:width$}+ saga execution: {}\n",
+            "",
+            self.saga_id,
+            width = 0
+        )
+    }
 }
 
-/* TODO */
+// An entry in the output Vec of the [`SagaExecStatus::print_order`] method.
+#[derive(Debug, PartialEq)]
+enum PrintOrderEntry {
+    // Print a message that parallelization has started
+    // The nodes themselves are ordered and indented properly
+    // so this is just to help with labeling and testing
+    Parallel { indent_level: usize },
+    Node { idx: NodeIndex, indent_level: usize },
+}
+
+impl PrintOrderEntry {
+    #[allow(unused)]
+    fn is_node(&self) -> bool {
+        if let PrintOrderEntry::Node { .. } = *self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// A stack entry contains all parallel nodes that must run during a
+// given indent level.
+#[derive(Debug, PartialEq)]
+enum StackEntry {
+    Parallel(Vec<NodeIndex>),
+    Subsaga,
+}
+
+// Structure the Dag for printing as text
+//
+// See [`PrintOrderer::print_order`] for details.
+struct PrintOrderer<'a> {
+    dag: &'a SagaDag,
+    output: Vec<PrintOrderEntry>,
+    stack: Vec<StackEntry>,
+    idx: NodeIndex,
+    indent_level: usize,
+}
+
+impl<'a> PrintOrderer<'a> {
+    pub fn new(dag: &'a SagaDag) -> PrintOrderer<'a> {
+        let idx = dag.start_node;
+        PrintOrderer {
+            dag,
+            output: Vec::new(),
+            stack: Vec::new(),
+            idx,
+            indent_level: 0,
+        }
+    }
+
+    fn output_current_node(&mut self) {
+        self.output.push(PrintOrderEntry::Node {
+            idx: self.idx,
+            indent_level: self.indent_level,
+        });
+    }
+
+    fn output_parallel(&mut self) {
+        self.output.push(PrintOrderEntry::Parallel {
+            indent_level: self.indent_level,
+        });
+    }
+
+    // Generate a print order of indexes along with their indent_level
+    //
+    // We want to walk the DAG in topological order and print indents in the
+    // following scenarios:
+    //     * `Parallel` nodes have been reached
+    //     * A `SubsagaStart` node has been reached
+    //
+    // We de-indent when:
+    //     * the last parallel node at an indent_level is run
+    //     * A `SubsagaEnd` node has been reached
+    //
+    // Importantly we must allow arbitrary nesting of subsagas, which
+    // themselves may contain parallel nodes. However, due to the way
+    // we constrain the DAGs with the [`DagBuilder`], we do not have to
+    // worry about parallel nodes spawning othert parallel nodes directly.
+    // In other words, all parallel nodes must complete before the
+    // next set of parallel nodes are run. This is because each call to
+    // [`DagBuilder::append_parallel`], results in a set of nodes known as
+    // `last_nodes` that must complete before any new nodes are added to the
+    // graph with `[DagBuilder::append]` or `[DagBuilder::append_parallel]`.
+    // Graphically, each `last_node` has an outgoing edge to any
+    // nodes added in the next call to [`DagBuilder::append`] or
+    // [`DagBuilder::append_parallel`]. Thus when the last parallel node
+    // at a given level is done being printed we can descend the graph.
+    //
+    // The only way to have one parallel node lead to other nodes in
+    // its parallel branch that the other parallel nodes at its level
+    // don't also lead to is for the parallel node itself to be an
+    // [`InternalNode::SubsagaStart`].
+    fn print_order(mut self) -> Vec<PrintOrderEntry> {
+        // Start walking the graph
+        //
+        // * Whenever a subsaga starts we want to print its children before any
+        //   parallel nodes.
+        // * Whenever a subsaga ends, we check to see if there are any
+        //   parallel nodes before we look for children.
+        // * Whenever there is a simple node, we check to see if there are
+        //   parallel nodes before we look for children.
+        //
+        // This results in
+        while self.idx != self.dag.end_node {
+            let node = self.dag.get(self.idx).unwrap();
+
+            if let &InternalNode::SubsagaStart { .. } = node {
+                // Add the current node to the output before indenting
+                self.output_current_node();
+                self.indent_level += 1;
+                self.stack.push(StackEntry::Subsaga);
+                self.descend();
+            } else if let &InternalNode::SubsagaEnd { .. } = node {
+                self.indent_level -= 1;
+                self.stack.pop();
+
+                // Add the current node to the output after de-indenting
+                self.output_current_node();
+
+                if !self.next_parallel_node() {
+                    self.descend();
+                }
+            } else {
+                // Simple node
+                // Add the current node to the output
+                self.output_current_node();
+
+                if !self.next_parallel_node() {
+                    self.descend();
+                }
+            }
+        }
+
+        // Output the end node
+        self.output_current_node();
+
+        assert!(self.stack.is_empty());
+        return self.output;
+    }
+
+    /// Descend down the graph
+    fn descend(&mut self) {
+        let mut children: Vec<NodeIndex> =
+            self.dag.graph.neighbors_directed(self.idx, Outgoing).collect();
+
+        if children.len() == 0 {
+            // We are done
+            assert!(self.stack.is_empty());
+            assert_eq!(self.dag.end_node, self.idx);
+            return;
+        }
+
+        if children.len() == 1 {
+            self.idx = children[0];
+        } else {
+            self.output_parallel();
+            // Pick the first child to print
+            self.idx = children.pop().unwrap();
+            self.indent_level += 1;
+            // These nodes must run in parallel. Put the remainder on the stack.
+            self.stack.push(StackEntry::Parallel(children));
+        }
+    }
+
+    // Set the next parallel node if it exists.
+    //
+    // Return true if there is a parallel node.
+    //
+    // Side effects:
+    //   * If there is a parallel node we remove it from the nodes in the top
+    //     of the stack.
+    //   * If this is the last parallel node, we pop the top of the stack
+    //     and reduce the indent level.
+    fn next_parallel_node(&mut self) -> bool {
+        if let Some(StackEntry::Parallel(nodes)) = self.stack.last_mut() {
+            if let Some(next_idx) = nodes.pop() {
+                self.idx = next_idx;
+                return true;
+            } else {
+                // This is the last parallel node
+                self.indent_level -= 1;
+                self.stack.pop();
+            }
+        }
+        false
+    }
+}
+
+/**
+* Return true if all neighbors of `node_id` in the given `direction`  
+* return true for the predicate `test`.
+*/
 fn neighbors_all<F>(
-    graph: &Graph<String, ()>,
+    graph: &Graph<InternalNode, ()>,
     node_id: &NodeIndex,
     direction: Direction,
     test: F,
@@ -1650,24 +2032,22 @@ fn recovery_validate_parent(
 
 /**
  * Action's handle to the saga subsystem
- *
- * Any APIs that are useful for actions should hang off this object.  It should
- * have enough state to know which node is invoking the API.
  */
+// Any APIs that are useful for actions should hang off this object.  It should
+// have enough state to know which node is invoking the API.
 pub struct ActionContext<UserType: SagaType> {
-    ancestor_tree: Arc<BTreeMap<String, Arc<serde_json::Value>>>,
+    ancestor_tree: Arc<BTreeMap<NodeName, Arc<serde_json::Value>>>,
     node_id: NodeIndex,
-    saga_metadata: Arc<SagaTemplateMetadata>,
-    live_state: Arc<Mutex<SagaExecLiveState<UserType>>>,
+    dag: Arc<SagaDag>,
     user_context: Arc<UserType::ExecContextType>,
-    user_saga_params: Arc<UserType::SagaParamsType>,
+    saga_params: Arc<serde_json::Value>,
 }
 
 impl<UserType: SagaType> ActionContext<UserType> {
     /**
      * Retrieves a piece of data stored by a previous (ancestor) node in the
-     * current saga.  The data is identified by `name`.
-     *
+     * current saga.  The data is identified by `name`, the name of the ancestor
+     * node.
      *
      * # Panics
      *
@@ -1678,88 +2058,42 @@ impl<UserType: SagaType> ActionContext<UserType> {
         &self,
         name: &str,
     ) -> Result<T, ActionError> {
+        // TODO: Remove this unnecessary allocation via `Borrow/Cow`
+        let key = name.to_string();
         let item = self
             .ancestor_tree
-            .get(name)
+            .get(&NodeName::new(key))
             .unwrap_or_else(|| panic!("no ancestor called \"{}\"", name));
         // TODO-cleanup double-asterisk seems ridiculous
         serde_json::from_value((**item).clone())
+            .with_context(|| format!("output from earlier node {:?}", name))
             .map_err(ActionError::new_deserialize)
     }
 
     /**
-     * Execute a new saga based on `template` within this saga and wait for it
-     * to complete
+     * Returns the saga parameters for the current action
      *
-     * `template` is considered a "child" saga of the current saga, meaning that
-     * control actions (like pause) on the current saga will affect the child
-     * and status reporting of the current saga will show the status of the
-     * child.
+     * If this action is being run as a subsaga, this returns the saga
+     * parameters for the subsaga.  This way actions don't have to care whether
+     * they're running in a saga or not.
      */
-    /*
-     * TODO Is there some way to prevent people from instantiating their own
-     * SagaExecutor by mistake instead?  Even better: if they do that, can we
-     * detect that they're part of a saga already somehow and make the new
-     * one a child saga?
-     * TODO Would this be better done by having an ActionSaga that
-     * executed a Saga as an action?  This way we would know when the
-     * Saga was constructed what the whole graph looks like, instead of only
-     * knowing about child sagas once we start executing the node that
-     * creates them.
-     * TODO-design The only reason that we require ChildType::ExecContextType ==
-     * UserType::ExecContextType is so that we can clone the user_context.  We
-     * could just as well have the caller pass in a user context instead here,
-     * and then they could use this to execute child sagas with different
-     * context objects.  We don't anticipate needing this but there's no reason
-     * we couldn't do it here, provided it's easy for users to clone the context
-     * we give them (which actually may not be true today because they only get
-     * a reference to their own context object).
-     */
-    pub async fn child_saga<ChildType>(
+    pub fn saga_params<T: ActionData + 'static>(
         &self,
-        saga_id: SagaId,
-        template: Arc<SagaTemplate<ChildType>>,
-        template_name: String,
-        initial_params: ChildType::SagaParamsType,
-    ) -> Result<BoxFuture<'static, SagaResult>, ActionError>
-    where
-        ChildType: SagaType<ExecContextType = UserType::ExecContextType>,
-    {
-        /*
-         * TODO-liveness TODO-robustness We probably don't need the live_state
-         * lock held for actually creating the child saga.  In general, it would
-         * be nice not to hold that when we're using the sec_hdl because those
-         * calls can generally hang indefinitely on the database, and our caller
-         * won't be able to even query our state while the lock is held.
-         */
-        let future = {
-            let mut live_state = self.live_state.lock().await;
-            let future = live_state
-                .sec_hdl
-                .child_saga(
-                    saga_id,
-                    Arc::clone(&self.user_context),
-                    template,
-                    template_name,
-                    initial_params,
-                )
-                .await?;
-            live_state
-                .child_sagas
-                .entry(self.node_id)
-                .or_insert_with(Vec::new)
-                .push(saga_id);
-            future
-        };
-
-        Ok(async move { future.await }.boxed())
+    ) -> Result<T, ActionError> {
+        serde_json::from_value((*self.saga_params).clone())
+            .with_context(|| {
+                let as_str = serde_json::to_string(&self.saga_params)
+                    .unwrap_or_else(|_| format!("{:?}", self.saga_params));
+                format!("saga params ({})", as_str)
+            })
+            .map_err(ActionError::new_deserialize)
     }
 
     /**
      * Returns the human-readable label for the current saga node
      */
-    pub fn node_label(&self) -> &str {
-        self.saga_metadata.node_label(&self.node_id).unwrap()
+    pub fn node_label(&self) -> String {
+        self.dag.get(self.node_id).unwrap().label()
     }
 
     /**
@@ -1767,13 +2101,6 @@ impl<UserType: SagaType> ActionContext<UserType> {
      */
     pub fn user_data(&self) -> &UserType::ExecContextType {
         &self.user_context
-    }
-
-    /**
-     * Returns the consumer-provided parameters for the current saga
-     */
-    pub fn saga_params(&self) -> &UserType::SagaParamsType {
-        &self.user_saga_params
     }
 }
 
@@ -1796,13 +2123,11 @@ impl From<NodeIndex> for SagaNodeId {
  */
 // TODO Consider how we do map internal node indexes to stable node ids.
 // TODO clean up this interface
-async fn record_now<T>(
-    live_state: &mut SagaExecLiveState<T>,
+async fn record_now(
+    live_state: &mut SagaExecLiveState,
     node: NodeIndex,
     event_type: SagaNodeEventType,
-) where
-    T: SagaType,
-{
+) {
     let saga_id = live_state.saga_id;
     let node_id = node.into();
 
@@ -1843,8 +2168,7 @@ pub trait SagaExecManager: fmt::Debug + Send + Sync {
      * Replaces the action at the specified node with one that just generates an
      * error
      *
-     * See [`SagaTemplateMetadata::node_for_name`] to get the node_id for a
-     * node.
+     * See [`Dag::get_index()`] to get the node_id for a node.
      */
     fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()>;
 }
@@ -1867,5 +2191,639 @@ where
 
     fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()> {
         self.inject_error(node_id).boxed()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{DagBuilder, Node, SagaDag, SagaName};
+    use petgraph::graph::NodeIndex;
+    use std::fmt::Write;
+
+    // Return a constant node with a null value
+    fn constant(name: &str) -> Node {
+        Node::constant(name, serde_json::Value::Null)
+    }
+
+    // Assert that the names match the NodeNames of the constant nodes at the given
+    // indexes.
+    fn constant_names_match(
+        names: &[&str],
+        indexes: &[NodeIndex],
+        dag: &SagaDag,
+    ) -> bool {
+        assert_eq!(names.len(), indexes.len());
+        for i in 0..names.len() {
+            if !constant_name_matches(names[i], indexes[i], dag) {
+                return false;
+            }
+        }
+        true
+    }
+    fn constant_name_matches(
+        name: &str,
+        idx: NodeIndex,
+        dag: &SagaDag,
+    ) -> bool {
+        let node = dag.get(idx).unwrap();
+        matches!(
+             node,
+             InternalNode::Constant { name: a, .. }
+               if a == &NodeName::new(name)
+        )
+    }
+
+    fn is_start_node(idx: NodeIndex, dag: &SagaDag) -> bool {
+        if let InternalNode::Start { .. } = dag.get(idx).unwrap() {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_end_node(idx: NodeIndex, dag: &SagaDag) -> bool {
+        if let InternalNode::End = dag.get(idx).unwrap() {
+            true
+        } else {
+            false
+        }
+    }
+
+    // Used to see the output structure to help write tests
+    fn print_for_testing(
+        entries: &Vec<PrintOrderEntry>,
+        dag: &SagaDag,
+    ) -> String {
+        let mut out = String::new();
+        for entry in entries {
+            match entry {
+                PrintOrderEntry::Node { idx, indent_level } => {
+                    let node = dag.get(*idx).unwrap();
+                    write!(&mut out, "{}{:?}\n", spaces(*indent_level), node)
+                        .unwrap();
+                }
+                PrintOrderEntry::Parallel { indent_level } => {
+                    write!(
+                        &mut out,
+                        "{}{:?}\n",
+                        spaces(*indent_level),
+                        "Parallel: "
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        out
+    }
+
+    fn spaces(indent_level: usize) -> String {
+        let num_spaces = indent_level * 4;
+        (0..num_spaces).fold(String::new(), |mut acc, _| {
+            acc.push(' ');
+            acc
+        })
+    }
+
+    #[test]
+    fn test_print_order_no_subsagas_no_parallel() {
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(constant("a"));
+        builder.append(constant("b"));
+        let dag = builder.build().unwrap();
+        let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
+        let orderer = PrintOrderer::new(&saga_dag);
+        let entries = orderer.print_order();
+
+        // There are 4 entries (start + end + 2 constant nodes);
+        assert_eq!(4, entries.len());
+
+        let mut indexes = Vec::new();
+
+        // There are no indents
+        for entry in entries {
+            match entry {
+                PrintOrderEntry::Node { idx, indent_level } => {
+                    indexes.push(idx);
+                    assert_eq!(indent_level, 0);
+                }
+                _ => panic!("No parallel nodes should exist"),
+            }
+        }
+
+        // Assert the node order is what is expected
+        assert!(is_start_node(indexes[0], &saga_dag));
+        assert!(constant_name_matches("a", indexes[1], &saga_dag));
+        assert!(constant_name_matches("b", indexes[2], &saga_dag));
+        assert!(is_end_node(indexes[3], &saga_dag));
+    }
+
+    #[test]
+    fn test_print_order_parallel_nodes_no_subsagas() {
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(constant("a"));
+        builder.append_parallel(vec![constant("b"), constant("c")]);
+        builder.append(constant("d"));
+        let dag = builder.build().unwrap();
+        let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
+        let orderer = PrintOrderer::new(&saga_dag);
+        let entries = orderer.print_order();
+
+        // start, end, 4 constant nodes, a parallel entry
+        assert_eq!(7, entries.len());
+
+        let mut actual_indexes = Vec::new();
+        // Ensure the order is what we expect
+        for i in 0..7 {
+            match entries[i] {
+                PrintOrderEntry::Node { idx, indent_level } => match i {
+                    0 => {
+                        assert_eq!(indent_level, 0);
+                        assert!(is_start_node(idx, &saga_dag));
+                    }
+                    1 | 5 => {
+                        // This is a constant node, so push its index
+                        assert_eq!(indent_level, 0);
+                        actual_indexes.push(idx);
+                    }
+                    3..=4 => {
+                        // This is a constant node, so push its index
+                        assert_eq!(indent_level, 1);
+                        actual_indexes.push(idx);
+                    }
+                    6 => {
+                        assert_eq!(indent_level, 0);
+                        assert!(is_end_node(idx, &saga_dag));
+                    }
+                    _ => panic!("invalid entry"),
+                },
+
+                PrintOrderEntry::Parallel { indent_level } => {
+                    // We print a parallel label before indenting
+                    assert_eq!(2, i);
+                    // The parallel entry itself is not indented
+                    assert_eq!(indent_level, 0);
+                }
+            }
+        }
+
+        let expected_names = vec!["a", "b", "c", "d"];
+        assert!(constant_names_match(
+            &expected_names,
+            &actual_indexes,
+            &saga_dag
+        ));
+    }
+
+    #[test]
+    fn test_print_order_nested_parallel_nodes_and_subsagas() {
+        let mut nested_subsaga =
+            DagBuilder::new(SagaName::new("test-nested-subsaga"));
+        nested_subsaga.append(constant("a"));
+        nested_subsaga.append_parallel(vec![constant("b"), constant("c")]);
+        nested_subsaga.append(constant("d"));
+        let nested_subsaga_dag = nested_subsaga.build().unwrap();
+
+        let mut subsaga = DagBuilder::new(SagaName::new("test-subsaga"));
+        subsaga.append(constant("a"));
+        subsaga.append_parallel(vec![constant("b"), constant("c")]);
+        subsaga.append(constant("d"));
+        subsaga.append(Node::subsaga("e", nested_subsaga_dag.clone(), "d"));
+        subsaga.append_parallel(vec![
+            constant("f"),
+            Node::subsaga("g", nested_subsaga_dag, "e"),
+            constant("h"),
+        ]);
+        subsaga.append(constant("i"));
+        let subsaga_dag = subsaga.build().unwrap();
+
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(constant("a"));
+        builder.append_parallel(vec![constant("b"), constant("c")]);
+        builder.append(constant("d"));
+        builder.append(Node::subsaga("e", subsaga_dag, "d"));
+        let dag = builder.build().unwrap();
+        let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
+        let orderer = PrintOrderer::new(&saga_dag);
+        let entries = orderer.print_order();
+
+        // It's super tedious to test by asserting on each entry as in the
+        // prior tests. Instead, we generate a string and compare it to expected output.
+        // The output is generated by the test, so it won't change, and we can use
+        // a different format for actual `SagaExecStatus` output.
+        let actual = print_for_testing(&entries, &saga_dag);
+        let expected = "\
+Start { params: Null }
+Constant { name: \"a\", value: Null }
+\"Parallel: \"
+    Constant { name: \"b\", value: Null }
+    Constant { name: \"c\", value: Null }
+Constant { name: \"d\", value: Null }
+SubsagaStart { saga_name: \"test-subsaga\", params_node_name: \"d\" }
+    Constant { name: \"a\", value: Null }
+    \"Parallel: \"
+        Constant { name: \"b\", value: Null }
+        Constant { name: \"c\", value: Null }
+    Constant { name: \"d\", value: Null }
+    SubsagaStart { saga_name: \"test-nested-subsaga\", params_node_name: \"d\" }
+        Constant { name: \"a\", value: Null }
+        \"Parallel: \"
+            Constant { name: \"b\", value: Null }
+            Constant { name: \"c\", value: Null }
+        Constant { name: \"d\", value: Null }
+    SubsagaEnd { name: \"e\" }
+    \"Parallel: \"
+        Constant { name: \"f\", value: Null }
+        SubsagaStart { saga_name: \"test-nested-subsaga\", params_node_name: \"e\" }
+            Constant { name: \"a\", value: Null }
+            \"Parallel: \"
+                Constant { name: \"b\", value: Null }
+                Constant { name: \"c\", value: Null }
+            Constant { name: \"d\", value: Null }
+        SubsagaEnd { name: \"g\" }
+        Constant { name: \"h\", value: Null }
+    Constant { name: \"i\", value: Null }
+SubsagaEnd { name: \"e\" }
+End
+";
+
+        assert_eq!(actual, expected);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::{Dag, DagBuilder, Node, SagaDag, SagaName};
+    use petgraph::graph::NodeIndex;
+    use proptest::prelude::*;
+
+    // The type we want to generate values of. Its an abstract description of
+    // the nodes of a DAG.
+    //
+    // These "descriptions" map to the operations we are going to perform:
+    //  * [`Dag::append`]
+    //  * [`Dag::append_parallel`]
+    //  * [`Dag::append_subsaga`]
+    //
+    // Specifically, `NodeDesc::Constant` results in a call to `Dag::append`
+    // with a constant node, `NodeDesc::Parallel` results in a call to
+    // `Dag::append_parallel`, and  `NodeDesc::Subsaga` results in a call to
+    // `Dag::append_subsaga`.
+    //
+    // The `Parallel` and  `Subsaga` variants are recursive and as such the
+    // specific inner nodes will be constructed as necessary, with a separate
+    // `DagBuilder` for subsaga nodes as needed.
+    //
+    // There is one complication to this recursive definition, however: There
+    // is really no such thing as a `Parallel` node. It's a pseudo node type
+    // that results in a call to [`Dag::append_parallel`]  on the given saga
+    // or subsaga. But [`Dag::append_parallel`] can only be called on vectors
+    // of real [`Node`]s. Thus we can't have a recursive generation of parallel
+    // nodes inside parallel nodes directly, because it's nonsensical to say
+    // something like `builder.append_parallel(builder.append_parallel)`. We
+    // run into this issue because we want to use the recursive generative
+    // abilities of `proptest` in order to generate arbitrary nestings of
+    // subsagas and constant nodes inside subsagas and the outer saga, with
+    // liberal usage of [`Dag::append_parallel`] as appropriate. We could write
+    // a bunch of different types and do a whole lot of mapping to generate
+    // subsagas, limiting each one with code to some depth and ensuring we
+    // only call [`Dag::append_parallel`] as needed, but in the end subsagas
+    // are still recursive, and we really don't want to worry about generating
+    // actual matching numbers of subsaga start and subsaga end nodes. So we
+    // end up just describing a slightly broken recursive definition for what
+    // our node structure looks like.
+    //
+    // The great thing about utilizing propptest for recursive generation,
+    // is that proptest knows how to generate this structure and shrink it
+    // **efficiently**. Moreover, it's easy to rectify our issue with directly
+    // nested `NodeDesc::Parallel` variants. In `arb_nodedesc()` below, we
+    // ensure through the use of `prop_map`, that whenever we see a `Parallel`
+    // inner node we wrap it in a subsaga, rather than generating a new
+    // parallel node. In other words, we ensure that `NodeDesc::Parallel` only
+    // constains `NodeDesc::Constant` and `NodeDesc::Subsaga` variants.
+    #[derive(Clone, Debug)]
+    enum NodeDesc {
+        Constant,
+        Parallel(Vec<NodeDesc>),
+        Subsaga(Vec<NodeDesc>),
+    }
+
+    impl NodeDesc {
+        fn is_parallel(&self) -> bool {
+            if let NodeDesc::Parallel(_) = *self {
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    // Create an arbitrary `NodeDesc` using proptest generation
+    fn arb_nodedesc() -> impl Strategy<Value = NodeDesc> {
+        // Configuration for recursive generation
+        // See https://altsysrq.github.io/proptest-book/proptest/tutorial/recursive.html
+        let num_levels = 8;
+        let max_size = 256;
+        let items_per_collection = 10;
+        let leaf = prop_oneof![Just(NodeDesc::Constant)];
+
+        leaf.prop_recursive(
+            num_levels,
+            max_size,
+            items_per_collection,
+            |inner| {
+                prop_oneof![
+                    // Parallel nodes must contain at least 2 nodes
+                    prop::collection::vec(inner.clone(), 2..10).prop_map(|v| {
+                        // Ensure that Parallel nodes do not contain parallel nodes
+                        if v.iter().any(|node_desc| node_desc.is_parallel()) {
+                            NodeDesc::Subsaga(v)
+                        } else {
+                            NodeDesc::Parallel(v)
+                        }
+                    }),
+                    // Subsagas must contain at least one node
+                    prop::collection::vec(inner, 1..10)
+                        .prop_map(NodeDesc::Subsaga)
+                ]
+            },
+        )
+    }
+
+    // Create a Dag from the proptest generated `Vec<NodeDesc>`.
+    //
+    // Note that this method recurses in order to create subsagas.
+    fn new_dag(nodes: &Vec<NodeDesc>, depth: usize) -> Dag {
+        // The outermost dag that will become the SagaDag
+        let name = SagaName::new(&format!("test-saga-{}", depth));
+        let mut dag = DagBuilder::new(name);
+
+        // For simplicity, we always just use "0" for the `params_node_name`
+        // of subsagas. Every saga has one of these nodes, so it works fine.
+        // We don't really care about the values because we are only testing
+        // structure, not saga behavior.
+        let params_node_name = "0";
+
+        // Always append a node named "0", so our lookups work for subsaga params
+        dag.append(Node::constant(params_node_name, serde_json::Value::Null));
+
+        // Node names are just numbers that we can increment and convert to strings.
+        // Each DAG uses the same set, since they are namespaced.
+        let mut node_name = 1;
+
+        for node in nodes {
+            match node {
+                NodeDesc::Constant => {
+                    dag.append(Node::constant(
+                        &node_name.to_string(),
+                        serde_json::Value::Null,
+                    ));
+                    node_name += 1;
+                }
+                NodeDesc::Parallel(parallel_nodes) => {
+                    let mut output = Vec::with_capacity(parallel_nodes.len());
+                    for node in parallel_nodes {
+                        match node {
+                            NodeDesc::Constant => {
+                                output.push(Node::constant(
+                                    &node_name.to_string(),
+                                    serde_json::Value::Null,
+                                ));
+                                node_name += 1;
+                            }
+                            NodeDesc::Subsaga(subsaga_nodes) => {
+                                // Recurse
+                                let subsaga_dag =
+                                    new_dag(subsaga_nodes, depth + 1);
+                                output.push(Node::subsaga(
+                                    &node_name.to_string(),
+                                    subsaga_dag,
+                                    params_node_name,
+                                ));
+                                node_name += 1;
+                            }
+                            NodeDesc::Parallel(_) => panic!(
+                                "Strategy Generation Error: Nested `NodeDesc::Parallel` not allowed!"
+                            ),
+                        }
+                    }
+                    dag.append_parallel(output);
+                }
+                NodeDesc::Subsaga(subsaga_nodes) => {
+                    let subsaga_dag = new_dag(subsaga_nodes, depth + 1);
+                    dag.append(Node::subsaga(
+                        &node_name.to_string(),
+                        subsaga_dag,
+                        params_node_name,
+                    ));
+                    node_name += 1;
+                }
+            }
+        }
+
+        // Always append a single constant node, just to ensure there is always
+        // one saga output node.
+        dag.append(Node::constant(
+            &node_name.to_string(),
+            serde_json::Value::Null,
+        ));
+
+        dag.build().unwrap()
+    }
+
+    // Is this stack frame an indent from a parallel node or a subsaga,
+    #[derive(Debug, Clone, PartialEq)]
+    enum IndentStackEntry {
+        Parallel,
+        Subsaga,
+    }
+
+    fn num_ancestors(dag: &SagaDag, idx: NodeIndex) -> usize {
+        dag.graph.edges_directed(idx, Direction::Incoming).count()
+    }
+
+    // Pick a child of a node and see how many ancestors it has.
+    //
+    // If there is only one ancestor, it must be from the current node,
+    // which indicates that the current node was not appended in parallel.
+    fn num_ancestors_of_child(dag: &SagaDag, idx: NodeIndex) -> usize {
+        let child = dag
+            .graph
+            .neighbors_directed(idx, Direction::Outgoing)
+            .next()
+            .unwrap();
+        dag.graph.edges_directed(child, Direction::Incoming).count()
+    }
+
+    fn appended_in_parallel(dag: &SagaDag, idx: NodeIndex) -> bool {
+        num_ancestors_of_child(dag, idx) > 1
+    }
+
+    // Indents must adhere to the following properties:
+    //   * They must only increment or decrement by `1` at a time
+    //   * Increments only come from Parallel print entries or SubsagaStart
+    //     nodes
+    //   * Decrements only come from Parallel print entries ending or SubsagaEnd
+    //     nodes
+    fn property_indents_are_correct(
+        entries: &Vec<PrintOrderEntry>,
+        dag: &SagaDag,
+    ) -> Result<(), TestCaseError> {
+        let mut indent_stack = Vec::new();
+        for entry in entries {
+            match entry {
+                PrintOrderEntry::Node { idx, indent_level } => {
+                    let node = dag.get(*idx).unwrap();
+                    match node {
+                        InternalNode::Start { .. } => {
+                            // Start nodes should always be at indent 0
+                            prop_assert_eq!(0, *indent_level);
+                            prop_assert_eq!(indent_stack.len(), *indent_level);
+                        }
+                        InternalNode::End { .. } => {
+                            // End nodes should always be at indent 0
+                            prop_assert_eq!(0, *indent_level);
+                            prop_assert_eq!(indent_stack.len(), *indent_level);
+                        }
+                        InternalNode::Action { .. } => {
+                            panic!("No actions should exist!")
+                        }
+                        InternalNode::Constant { .. } => {
+                            let parallel = appended_in_parallel(dag, *idx);
+                            if *indent_level == 0 && indent_stack.is_empty() {
+                                // We are at the top level, and not in a
+                                // parallel node.
+                                prop_assert!(!parallel);
+                                continue;
+                            }
+                            if indent_stack.len() == *indent_level {
+                                // This node is part of a subsaga or is a
+                                // parallel node.
+                                if let &IndentStackEntry::Subsaga =
+                                    indent_stack.last().unwrap()
+                                {
+                                    prop_assert!(!parallel);
+                                } else {
+                                    prop_assert!(parallel);
+                                }
+                            } else {
+                                // This is the first node after all the
+                                // parallel nodes. We don't explicitly track
+                                // this in the print order.
+                                //
+                                // It can only be a de-indent
+                                prop_assert_eq!(
+                                    indent_stack.len() - 1,
+                                    *indent_level
+                                );
+                                // The last indent had to be a parallel indent
+                                prop_assert_eq!(
+                                    &IndentStackEntry::Parallel,
+                                    indent_stack.last().unwrap()
+                                );
+                                // This node was not appended in parallel
+                                prop_assert!(!parallel);
+
+                                // This node has multiple ancestors, meaning that its parents were appended in parallel
+                                prop_assert!(num_ancestors(dag, *idx) > 1);
+
+                                // We need to pop the stack to get back in sync with the Dag
+                                indent_stack.pop();
+                            }
+                        }
+                        InternalNode::SubsagaStart { .. } => {
+                            // We must compensate for not having an explicit
+                            // end of parallel entry in the PrintOutput
+                            if indent_stack.len() != *indent_level {
+                                prop_assert_eq!(
+                                    indent_stack.len() - 1,
+                                    *indent_level
+                                );
+
+                                // This node has multiple ancestors, meaning that its parents were appended in parallel
+                                prop_assert!(num_ancestors(dag, *idx) > 1);
+
+                                prop_assert_eq!(
+                                    &IndentStackEntry::Parallel,
+                                    indent_stack.last().unwrap()
+                                );
+                                // The last parallel node has already been seen in the
+                                // print output, because the indent_level has been
+                                // reduced. Pop the stack to compensate.
+                                indent_stack.pop();
+                            }
+                            indent_stack.push(IndentStackEntry::Subsaga);
+                        }
+                        InternalNode::SubsagaEnd { .. } => {
+                            // SubsagaEnd nodes should always be at the
+                            // de-indented and aligned with the outer indent level.
+                            prop_assert!(!indent_stack.is_empty());
+                            prop_assert_eq!(
+                                indent_stack.len() - 1,
+                                *indent_level
+                            );
+                            prop_assert_eq!(
+                                indent_stack.last().unwrap(),
+                                &IndentStackEntry::Subsaga
+                            );
+                            // We need to pop the stack to get back in sync with the Dag
+                            indent_stack.pop();
+                        }
+                    }
+                }
+                PrintOrderEntry::Parallel { indent_level } => {
+                    // Two append parallel calls can arrive in a row. Since
+                    // we don't keep track of when parallel sections end
+                    // explicitly, we have to check the indent_level to see if
+                    // it matches the stack. This is similar to what we do in
+                    // the `else` clause of `InternalNode::Constant`.
+                    if indent_stack.len() == *indent_level {
+                        if !indent_stack.is_empty() {
+                            // If we are not at the top level, the innermost
+                            // indent must be a subsaga
+                            prop_assert_eq!(
+                                &IndentStackEntry::Subsaga,
+                                indent_stack.last().unwrap()
+                            );
+                        }
+                    } else {
+                        prop_assert_eq!(
+                            &IndentStackEntry::Parallel,
+                            indent_stack.last().unwrap()
+                        );
+                        prop_assert_eq!(indent_stack.len() - 1, *indent_level);
+                        // The last parallel node has already been seen in the
+                        // priint output, because the indent_level has been
+                        // reduced. Pop the stack to compensate.
+                        indent_stack.pop();
+                    }
+                    indent_stack.push(IndentStackEntry::Parallel);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn prints_correctly(nodes in prop::collection::vec(arb_nodedesc(), 1..10)) {
+            //println!("{:#?}", nodes);
+            let dag = new_dag(&nodes, 0);
+            //println!("{:#?}", dag);
+
+            let saga_dag = SagaDag::new(dag, serde_json::Value::Null);
+            let orderer = PrintOrderer::new(&saga_dag);
+            let entries = orderer.print_order();
+            //println!("{:#?}", entries);
+
+            // Property 1: The number of actual ordered node entries equals
+            // the number of nodes in the dag
+            let num_nodes = entries.iter().filter(|e| e.is_node()).count();
+            prop_assert_eq!(num_nodes, saga_dag.graph.node_count());
+
+            // Property 2: Indents relate to subsagas or parallel nodes
+            property_indents_are_correct(&entries, &saga_dag)?;
+        }
     }
 }

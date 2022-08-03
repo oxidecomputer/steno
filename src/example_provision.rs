@@ -2,19 +2,20 @@
  * Common code shared by examples
  */
 
-use crate::new_action_noop_undo;
 use crate::ActionContext;
 use crate::ActionError;
 use crate::ActionFuncResult;
-use crate::SagaId;
-use crate::SagaTemplate;
-use crate::SagaTemplateBuilder;
+use crate::ActionRegistry;
+use crate::Dag;
+use crate::DagBuilder;
+use crate::Node;
+use crate::SagaDag;
+use crate::SagaName;
 use crate::SagaType;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
 use thiserror::Error;
-use uuid::Uuid;
 
 /*
  * Demo provision saga:
@@ -41,18 +42,21 @@ use uuid::Uuid;
  *          boot instance
  */
 
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct ExampleSagaType {}
 impl SagaType for ExampleSagaType {
     type ExecContextType = ExampleContext;
-    type SagaParamsType = ExampleParams;
 }
 
+#[doc(hidden)]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ExampleParams {
     pub instance_name: String,
+    pub number_of_instances: u16,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct ExampleContext;
 
@@ -66,6 +70,22 @@ enum ExampleError {
 
 type ExFuncResult<T> = ActionFuncResult<T, ActionError>;
 
+#[derive(Debug)]
+struct ExampleSubsagaType {}
+impl SagaType for ExampleSubsagaType {
+    type ExecContextType = ExampleContext;
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ExampleSubsagaParams {
+    number_of_things: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ServerAllocResult {
+    server_id: u64,
+}
+
 /* TODO-cleanup can we implement this generically? */
 impl From<ExampleError> for ActionError {
     fn from(t: ExampleError) -> ActionError {
@@ -73,65 +93,160 @@ impl From<ExampleError> for ActionError {
     }
 }
 
-/**
- * Returns a demo "VM provision" saga
- *
- * The actions in this saga do essentially nothing.  They print out what node is
- * running, they produce some data, and they consume some data from previous
- * nodes.  The intent is just to exercise the API.  You can interact with this
- * using the `demo-provision` example.
- */
-pub fn make_example_provision_saga() -> Arc<SagaTemplate<ExampleSagaType>> {
-    let mut w = SagaTemplateBuilder::new();
+mod actions {
+    use super::ExampleSagaType;
+    use crate::new_action_noop_undo;
+    use crate::Action;
+    use lazy_static::lazy_static;
+    use std::sync::Arc;
 
-    w.append(
+    lazy_static! {
+        pub static ref INSTANCE_CREATE: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "instance_create",
+                super::demo_prov_instance_create,
+            );
+        pub static ref VPC_ALLOC_IP: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo("vpc_alloc_ip", super::demo_prov_vpc_alloc_ip);
+        pub static ref VOLUME_CREATE: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "volume_create",
+                super::demo_prov_volume_create,
+            );
+        pub static ref INSTANCE_CONFIGURE: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "instance_configure",
+                super::demo_prov_instance_configure,
+            );
+        pub static ref VOLUME_ATTACH: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "volume_attach",
+                super::demo_prov_volume_attach,
+            );
+        pub static ref INSTANCE_BOOT: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "instance_boot",
+                super::demo_prov_instance_boot,
+            );
+        pub static ref PRINT: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo("print", super::demo_prov_print);
+        pub static ref SERVER_PICK: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo("server_pick", super::demo_prov_server_pick);
+        pub static ref SERVER_RESERVE: Arc<dyn Action<ExampleSagaType>> =
+            new_action_noop_undo(
+                "server_reserve",
+                super::demo_prov_server_reserve,
+            );
+    }
+}
+
+/// Load our actions into an ActionRegistry
+#[doc(hidden)]
+pub fn load_example_actions(registry: &mut ActionRegistry<ExampleSagaType>) {
+    registry.register(actions::INSTANCE_CREATE.clone());
+    registry.register(actions::VPC_ALLOC_IP.clone());
+    registry.register(actions::VOLUME_CREATE.clone());
+    registry.register(actions::INSTANCE_CONFIGURE.clone());
+    registry.register(actions::VOLUME_ATTACH.clone());
+    registry.register(actions::INSTANCE_BOOT.clone());
+    registry.register(actions::PRINT.clone());
+    registry.register(actions::SERVER_PICK.clone());
+    registry.register(actions::SERVER_RESERVE.clone());
+}
+
+/// Create a subsaga for server allocation
+fn server_alloc_subsaga() -> Dag {
+    let name = SagaName::new("server-alloc");
+    let mut d = DagBuilder::new(name);
+    d.append(Node::action(
+        "server_id",
+        "ServerPick",
+        actions::SERVER_PICK.as_ref(),
+    ));
+    d.append(Node::action(
+        "server_reserve",
+        "ServerReserve",
+        actions::SERVER_RESERVE.as_ref(),
+    ));
+
+    d.build().unwrap()
+}
+
+/// Create a dag that describes a demo "VM Provision" Saga
+///
+/// The actions in this saga do essentially nothing. They print out what
+/// node is running, they produce some data, and they consume some data
+/// from previous nodes. The intent is just to exercise the API. You can
+/// interact with this  using the `demo-provision` example.
+#[doc(hidden)]
+pub fn make_example_provision_dag(params: ExampleParams) -> Arc<SagaDag> {
+    let name = SagaName::new("DemoVmProvision");
+    let mut d = DagBuilder::new(name);
+
+    d.append(Node::action(
         "instance_id",
         "InstanceCreate",
-        new_action_noop_undo(demo_prov_instance_create),
-    );
-    w.append_parallel(vec![
-        (
+        actions::INSTANCE_CREATE.as_ref(),
+    ));
+    d.append_parallel(vec![
+        Node::action(
             "instance_ip",
             "VpcAllocIp",
-            new_action_noop_undo(demo_prov_vpc_alloc_ip),
+            actions::VPC_ALLOC_IP.as_ref(),
         ),
-        (
+        Node::action(
             "volume_id",
             "VolumeCreate",
-            new_action_noop_undo(demo_prov_volume_create),
-        ),
-        (
-            "server_id",
-            "ServerAlloc (subsaga)",
-            new_action_noop_undo(demo_prov_server_alloc),
+            actions::VOLUME_CREATE.as_ref(),
         ),
     ]);
-    w.append(
+
+    // Take a subsaga spec and add its nodes to the DAG.
+    // XXX-dap TODO-coverage put another node in parallel with the subsaga to
+    // make sure that works.
+    let subsaga_params = ExampleSubsagaParams { number_of_things: 1 };
+    d.append(Node::constant(
+        "server_alloc_params",
+        serde_json::to_value(subsaga_params).unwrap(),
+    ));
+    d.append(Node::subsaga(
+        "server_alloc",
+        server_alloc_subsaga(),
+        "server_alloc_params",
+    ));
+
+    // Append nodes that will run after the subsaga completes
+    d.append(Node::action(
         "instance_configure",
         "InstanceConfigure",
-        new_action_noop_undo(demo_prov_instance_configure),
-    );
-    w.append(
+        actions::INSTANCE_CONFIGURE.as_ref(),
+    ));
+    d.append(Node::action(
         "volume_attach",
         "VolumeAttach",
-        new_action_noop_undo(demo_prov_volume_attach),
-    );
-    w.append(
+        actions::VOLUME_ATTACH.as_ref(),
+    ));
+    d.append(Node::action(
         "instance_boot",
         "InstanceBoot",
-        new_action_noop_undo(demo_prov_instance_boot),
-    );
-    w.append("print", "Print", new_action_noop_undo(demo_prov_print));
-    Arc::new(w.build())
+        actions::INSTANCE_BOOT.as_ref(),
+    ));
+    d.append(Node::action("print", "Print", actions::PRINT.as_ref()));
+
+    Arc::new(SagaDag::new(
+        d.build().unwrap(),
+        serde_json::to_value(params).unwrap(),
+    ))
 }
 
 async fn demo_prov_instance_create(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<u64> {
+    let params = sgctx.saga_params::<ExampleParams>()?;
     eprintln!(
         "running action: {} (instance name: {})",
         sgctx.node_label(),
-        sgctx.saga_params().instance_name
+        params.instance_name
     );
     /* exercise saga parameters */
     /* make up an instance ID */
@@ -151,91 +266,26 @@ async fn demo_prov_vpc_alloc_ip(
     Ok(ip)
 }
 
-/*
- * The next two steps are in a subsaga!
- */
-#[derive(Debug)]
-struct ExampleSubsagaType {}
-impl SagaType for ExampleSubsagaType {
-    type ExecContextType = ExampleContext;
-    type SagaParamsType = ExampleSubsagaParams;
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ExampleSubsagaParams {
-    number_of_things: usize,
-}
-
-type SubsagaExampleContext = ActionContext<ExampleSubsagaType>;
-
-async fn demo_prov_server_alloc(
-    sgctx: SagaExampleContext,
-) -> ExFuncResult<u64> {
+// Another subsaga action
+async fn demo_prov_server_pick(sgctx: SagaExampleContext) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
-
-    let mut w = SagaTemplateBuilder::new();
-    w.append(
-        "server_id",
-        "ServerPick",
-        new_action_noop_undo(demo_prov_server_pick),
-    );
-    w.append(
-        "server_reserve",
-        "ServerReserve",
-        new_action_noop_undo(demo_prov_server_reserve),
-    );
-    let sg = Arc::new(w.build());
-
-    /*
-     * The uuid here is deterministic solely for the smoke tests.  It would
-     * probably be better to have a way to get uuids from the ActionContext, and
-     * have a mode where those come from a seeded random number generator (or
-     * some other controlled source for testing).
-     */
-    let saga_id = SagaId(
-        Uuid::parse_str("bcf32552-2b54-485b-bf13-b316daa7d1d4").unwrap(),
-    );
-    let fut = sgctx
-        .child_saga::<ExampleSubsagaType>(
-            saga_id,
-            sg,
-            "server_alloc".to_string(),
-            ExampleSubsagaParams { number_of_things: 1 },
-        )
-        .await?;
-    let result = fut.await;
-    match result.kind {
-        Ok(success) => {
-            let server_allocated: Arc<ServerAllocResult> =
-                success.lookup_output("server_reserve")?;
-            Ok(server_allocated.server_id)
-        }
-        Err(failure) => Err(failure.error_source),
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ServerAllocResult {
-    server_id: u64,
-}
-
-async fn demo_prov_server_pick(
-    sgctx: SubsagaExampleContext,
-) -> ExFuncResult<u64> {
-    eprintln!("running action: {}", sgctx.node_label());
+    let params = sgctx.saga_params::<ExampleSubsagaParams>()?;
     /* exercise subsaga parameters */
-    assert_eq!(sgctx.saga_params().number_of_things, 1);
+    assert_eq!(params.number_of_things, 1);
     /* make up ("allocate") a new server id */
     let server_id = 1212u64;
     Ok(server_id)
 }
 
+// The last subsaga action
 async fn demo_prov_server_reserve(
-    sgctx: SubsagaExampleContext,
+    sgctx: SagaExampleContext,
 ) -> ExFuncResult<ServerAllocResult> {
     eprintln!("running action: {}", sgctx.node_label());
+    let params = sgctx.saga_params::<ExampleSubsagaParams>()?;
+
     /* exercise subsaga parameters */
-    assert_eq!(sgctx.saga_params().number_of_things, 1);
+    assert_eq!(params.number_of_things, 1);
     /* exercise using data from previous nodes */
     let server_id = sgctx.lookup::<u64>("server_id")?;
     assert_eq!(server_id, 1212);
@@ -253,13 +303,21 @@ async fn demo_prov_volume_create(
     let volume_id = 1213u64;
     Ok(volume_id)
 }
+
 async fn demo_prov_instance_configure(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
+
+    let params = sgctx.saga_params::<ExampleParams>()?;
+    assert_eq!(params.number_of_instances, 1);
+    assert_eq!(
+        sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id,
+        1212
+    );
+
     assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
     Ok(())
 }
@@ -269,8 +327,12 @@ async fn demo_prov_volume_attach(
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
     assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
+
+    assert_eq!(
+        sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id,
+        1212
+    );
     Ok(())
 }
 async fn demo_prov_instance_boot(
@@ -279,21 +341,27 @@ async fn demo_prov_instance_boot(
     eprintln!("running action: {}", sgctx.node_label());
     /* exercise using data from previous nodes */
     assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
-    assert_eq!(sgctx.lookup::<u64>("server_id")?, 1212);
     assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
+
+    // We know there is only one instance of the subsaga that created a server id
+    assert_eq!(
+        sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id,
+        1212
+    );
     Ok(())
 }
 
-async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<()> {
+async fn demo_prov_print(sgctx: SagaExampleContext) -> ExFuncResult<String> {
     eprintln!("running action: {}", sgctx.node_label());
     eprintln!("printing final state:");
-    let instance_id = sgctx.lookup::<u64>("instance_id")?;
-    eprintln!("  instance id: {}", instance_id);
+    let vm_instance_id = sgctx.lookup::<u64>("instance_id")?;
+    eprintln!("  instance id: {}", vm_instance_id);
     let ip = sgctx.lookup::<String>("instance_ip")?;
     eprintln!("  IP address: {}", ip);
     let volume_id = sgctx.lookup::<u64>("volume_id")?;
     eprintln!("  volume id: {}", volume_id);
-    let server_id = sgctx.lookup::<u64>("server_id")?;
+    let server_id =
+        sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id;
     eprintln!("  server id: {}", server_id);
-    Ok(())
+    Ok(String::from("it worked"))
 }

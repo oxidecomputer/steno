@@ -17,6 +17,37 @@
  *   communicate back to the Sec (to communicate progress, record persistent
  *   state, etc.)
  *
+ * The control flow of these components and their messages is shown in the
+ * below diagram:
+ *
+ *  +---------+
+ *  |  Saga   |
+ *  |Consumer |--+
+ *  +---------+  |
+ *               |
+ *           Saga API
+ *               |
+ *               |   +-------------+                  +-------------+
+ *               |   |             |                  |             |
+ *               |   |     SEC     |                  |     SEC     |
+ *               +-->|   Client    |----------------->|   (task)    |
+ *                   |             |   SecClientMsg   |             |
+ *                   |             |                  |             |
+ *                   +-------------+                  +-------------+
+ *                                                           ^
+ *                                                           |
+ *                                                           |
+ *                                                       SecExecMsg
+ *                                                           |
+ *                                                           |
+ *                                                    +-------------+
+ *                                                    |             |
+ *                                                    | SagaExecutor|
+ *                                                    |  (future)   |
+ *                                                    |             |
+ *                                                    |             |
+ *                                                    +-------------+
+ *
  * The Steno consumer is responsible for implementing an `SecStore` to store
  * persistent state.  There's an [`crate::InMemorySecStore`] to play around
  * with.
@@ -24,19 +55,19 @@
 
 #![allow(clippy::large_enum_variant)]
 
+use crate::dag::SagaDag;
+use crate::saga_exec::SagaExecManager;
 use crate::saga_exec::SagaExecutor;
 use crate::store::SagaCachedState;
 use crate::store::SagaCreateParams;
 use crate::store::SecStore;
 use crate::ActionError;
-use crate::SagaExecManager;
+use crate::ActionRegistry;
 use crate::SagaExecStatus;
 use crate::SagaId;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
 use crate::SagaResult;
-use crate::SagaTemplate;
-use crate::SagaTemplateGeneric;
 use crate::SagaType;
 use anyhow::anyhow;
 use anyhow::Context;
@@ -133,29 +164,21 @@ impl SecClient {
         &self,
         saga_id: SagaId,
         uctx: Arc<UserType::ExecContextType>,
-        template: Arc<SagaTemplate<UserType>>,
-        template_name: String,
-        params: UserType::SagaParamsType,
+        dag: Arc<SagaDag>,
+        registry: Arc<ActionRegistry<UserType>>,
     ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
         UserType: SagaType + fmt::Debug,
     {
         let (ack_tx, ack_rx) = oneshot::channel();
-        let serialized_params = serde_json::to_value(&params)
-            .map_err(ActionError::new_serialize)
-            .context("serializing new saga parameters")?;
-        let template_params =
-            Box::new(TemplateParamsForCreate { template, params, uctx })
-                as Box<dyn TemplateParams>;
+        let template_params = Box::new(TemplateParamsForCreate {
+            dag: dag.clone(),
+            registry,
+            uctx,
+        }) as Box<dyn TemplateParams>;
         self.sec_cmd(
             ack_rx,
-            SecClientMsg::SagaCreate {
-                ack_tx,
-                saga_id,
-                template_params,
-                template_name,
-                serialized_params,
-            },
+            SecClientMsg::SagaCreate { ack_tx, saga_id, dag, template_params },
         )
         .await
     }
@@ -165,43 +188,34 @@ impl SecClient {
      *
      * This function asynchronously returns a `Future` that can be used to wait
      * for the saga to finish.  It's also safe to cancel (drop) this Future.
-     *
-     * Unlike `saga_create`, this function is not parametrized by a [`SagaType`]
-     * because the assumption is that the caller doesn't statically know what
-     * that type is.  (The caller would usually have obtained a
-     * [`SagaTemplateGeneric`] by looking it up in a table that contains various
-     * different saga templates with varying SagaTypes.)
      */
-    pub async fn saga_resume<T>(
+    pub async fn saga_resume<UserType>(
         &self,
         saga_id: SagaId,
-        uctx: Arc<T>,
-        template: Arc<dyn SagaTemplateGeneric<T>>,
-        template_name: String,
-        params: serde_json::Value,
+        uctx: Arc<UserType::ExecContextType>,
+        dag: serde_json::Value,
+        registry: Arc<ActionRegistry<UserType>>,
         log_events: Vec<SagaNodeEvent>,
     ) -> Result<BoxFuture<'static, SagaResult>, anyhow::Error>
     where
-        T: Send + Sync + fmt::Debug + 'static,
+        UserType: SagaType + fmt::Debug,
     {
         let (ack_tx, ack_rx) = oneshot::channel();
         let saga_log = SagaLog::new_recover(saga_id, log_events)
             .context("recovering log")?;
+        let dag: Arc<SagaDag> = Arc::new(
+            serde_json::from_value(dag)
+                .map_err(ActionError::new_deserialize)?,
+        );
         let template_params = Box::new(TemplateParamsForRecover {
-            template,
-            params: params.clone(),
+            dag: dag.clone(),
+            registry,
             uctx,
             saga_log,
         }) as Box<dyn TemplateParams>;
         self.sec_cmd(
             ack_rx,
-            SecClientMsg::SagaResume {
-                ack_tx,
-                saga_id,
-                template_params,
-                template_name,
-                serialized_params: params,
-            },
+            SecClientMsg::SagaResume { ack_tx, saga_id, dag, template_params },
         )
         .await
     }
@@ -314,17 +328,17 @@ pub struct SagaView {
     #[serde(skip)]
     pub state: SagaStateView,
 
-    params: serde_json::Value,
+    dag: serde_json::Value,
 }
 
 impl SagaView {
     fn from_saga(saga: &Saga) -> impl Future<Output = Self> {
         let id = saga.id;
-        let params = saga.params.clone();
+        let dag = saga.dag.clone();
         let fut = SagaStateView::from_run_state(&saga.run_state);
         async move {
             let state = fut.await;
-            SagaView { id, state, params }
+            SagaView { id, state, dag }
         }
     }
 
@@ -338,7 +352,7 @@ impl SagaView {
     pub fn serialized(&self) -> SagaSerialized {
         SagaSerialized {
             saga_id: self.id,
-            params: self.params.clone(),
+            dag: self.dag.clone(),
             events: self.state.status().log().events().to_vec(),
         }
     }
@@ -436,12 +450,12 @@ enum SecClientMsg {
         >,
         /** caller-defined id (must be unique) */
         saga_id: SagaId,
+
         /** user-type-specific parameters */
         template_params: Box<dyn TemplateParams>,
-        /** name of the template used to create this saga */
-        template_name: String,
-        /** serialized saga parameters */
-        serialized_params: serde_json::Value,
+
+        /** The user created DAG */
+        dag: Arc<SagaDag>,
     },
 
     /**
@@ -457,12 +471,12 @@ enum SecClientMsg {
         >,
         /** unique id of the saga (from persistent state) */
         saga_id: SagaId,
+
         /** user-type-specific parameters */
         template_params: Box<dyn TemplateParams>,
-        /** name of the template used to resume this saga */
-        template_name: String,
-        /** serialized saga parameters */
-        serialized_params: serde_json::Value,
+
+        /** The user created DAG */
+        dag: Arc<SagaDag>,
     },
 
     /** Start (or resume) running a saga */
@@ -513,26 +527,20 @@ impl fmt::Debug for SecClientMsg {
         f.write_str("SecClientMsg::")?;
         match self {
             SecClientMsg::SagaCreate {
-                saga_id,
-                template_params,
-                template_name,
-                ..
+                saga_id, template_params, dag, ..
             } => f
                 .debug_struct("SagaCreate")
                 .field("saga_id", saga_id)
                 .field("template_params", template_params)
-                .field("template_name", template_name)
+                .field("dag", dag)
                 .finish(),
             SecClientMsg::SagaResume {
-                saga_id,
-                template_params,
-                template_name,
-                ..
+                saga_id, template_params, dag, ..
             } => f
                 .debug_struct("SagaResume")
                 .field("saga_id", saga_id)
-                .field("template_name", template_name)
                 .field("template_params", template_params)
+                .field("dag", dag)
                 .finish(),
             SecClientMsg::SagaList { .. } => f.write_str("SagaList"),
             SecClientMsg::SagaGet { saga_id, .. } => {
@@ -554,6 +562,7 @@ impl fmt::Debug for SecClientMsg {
 /**
  * This trait erases the type parameters on a [`SagaTemplate`], user context,
  * and user parameters so that we can more easily pass it through a channel.
+ * TODO(AJS) - rename since template no longer exists?
  */
 trait TemplateParams: Send + fmt::Debug {
     fn into_exec(
@@ -565,7 +574,7 @@ trait TemplateParams: Send + fmt::Debug {
 }
 
 /**
- * Stores a template, saga parameters, and user context in a way where the
+ * Stores a template and user context in a way where the
  * user-defined types can be erased with [`TemplateParams`]
  *
  * This version is for the "create" case, where we know the specific
@@ -573,8 +582,8 @@ trait TemplateParams: Send + fmt::Debug {
  */
 #[derive(Debug)]
 struct TemplateParamsForCreate<UserType: SagaType + fmt::Debug> {
-    template: Arc<SagaTemplate<UserType>>,
-    params: UserType::SagaParamsType,
+    dag: Arc<SagaDag>,
+    registry: Arc<ActionRegistry<UserType>>,
     uctx: Arc<UserType::ExecContextType>,
 }
 
@@ -591,11 +600,11 @@ where
         Ok(Arc::new(SagaExecutor::new(
             log,
             saga_id,
-            self.template,
+            self.dag,
+            self.registry,
             self.uctx,
-            self.params,
             sec_hdl,
-        )))
+        )?))
     }
 }
 
@@ -608,16 +617,16 @@ where
  * this case.  See [`SecClient::saga_resume()`].
  */
 #[derive(Debug)]
-struct TemplateParamsForRecover<T: Send + Sync + fmt::Debug> {
-    template: Arc<dyn SagaTemplateGeneric<T>>,
-    params: serde_json::Value,
-    uctx: Arc<T>,
+struct TemplateParamsForRecover<UserType: SagaType + fmt::Debug> {
+    dag: Arc<SagaDag>,
+    registry: Arc<ActionRegistry<UserType>>,
+    uctx: Arc<UserType::ExecContextType>,
     saga_log: SagaLog,
 }
 
-impl<T> TemplateParams for TemplateParamsForRecover<T>
+impl<UserType> TemplateParams for TemplateParamsForRecover<UserType>
 where
-    T: Send + Sync + fmt::Debug,
+    UserType: SagaType + fmt::Debug,
 {
     fn into_exec(
         self: Box<Self>,
@@ -625,14 +634,15 @@ where
         saga_id: SagaId,
         sec_hdl: SecExecClient,
     ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error> {
-        self.template.recover(
+        Ok(Arc::new(SagaExecutor::new_recover(
             log,
             saga_id,
+            self.dag,
+            self.registry,
             self.uctx,
-            self.params,
             sec_hdl,
             self.saga_log,
-        )
+        )?))
     }
 }
 
@@ -678,43 +688,6 @@ impl SecExecClient {
         .await
     }
 
-    /**
-     * Create or resume the requested child saga
-     */
-    pub async fn child_saga<ChildType>(
-        &self,
-        child_saga_id: SagaId,
-        uctx: Arc<ChildType::ExecContextType>,
-        template: Arc<SagaTemplate<ChildType>>,
-        template_name: String,
-        params: ChildType::SagaParamsType,
-    ) -> Result<BoxFuture<'static, SagaResult>, ActionError>
-    where
-        ChildType: SagaType + fmt::Debug,
-    {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let serialized_params = serde_json::to_value(&params)
-            .map_err(ActionError::new_serialize)?;
-        let template_params =
-            Box::new(TemplateParamsForCreate { template, params, uctx })
-                as Box<dyn TemplateParams>;
-        self.sec_send(
-            ack_rx,
-            SecExecMsg::CreateChildSaga(SagaCreateChildData {
-                parent_saga_id: self.saga_id,
-                create_params: SagaCreateData {
-                    ack_tx,
-                    saga_id: child_saga_id,
-                    template_params,
-                    template_name,
-                    serialized_params,
-                },
-            }),
-        )
-        .await
-        .map_err(ActionError::new_subsaga)
-    }
-
     pub async fn saga_get(&self, saga_id: SagaId) -> Result<SagaView, ()> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sec_send(
@@ -751,9 +724,6 @@ enum SecExecMsg {
 
     /** Update the cached state of a saga */
     UpdateCachedState(SagaUpdateCacheData),
-
-    /** Create a child saga */
-    CreateChildSaga(SagaCreateChildData),
 }
 
 /** See [`SecExecMsg::SagaGet`] */
@@ -784,39 +754,6 @@ struct SagaUpdateCacheData {
     saga_id: SagaId,
     /** updated state */
     updated_state: SagaCachedState,
-}
-
-/** See [`SecExecMsg::CreateChildSaga`] */
-#[derive(Debug)]
-struct SagaCreateChildData {
-    /** parent saga */
-    parent_saga_id: SagaId,
-    /** child saga creation details */
-    create_params: SagaCreateData,
-}
-
-/* TODO-cleanup commonize with SecClientMessage */
-struct SagaCreateData {
-    /** response channel */
-    ack_tx:
-        oneshot::Sender<Result<BoxFuture<'static, SagaResult>, anyhow::Error>>,
-    /** caller-defined id (must be unique) */
-    saga_id: SagaId,
-    /** user-type-specific parameters */
-    template_params: Box<dyn TemplateParams>,
-    /** name of the template used to create this saga */
-    template_name: String,
-    /** serialized saga parameters */
-    serialized_params: serde_json::Value,
-}
-
-impl fmt::Debug for SagaCreateData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SagaCreateData")
-            .field("saga_id", &self.saga_id)
-            .field("template_name", &self.template_name)
-            .finish()
-    }
 }
 
 /*
@@ -940,7 +877,7 @@ impl Sec {
 
     fn saga_insert(&mut self, rec: SagaInsertData) {
         let saga_id = rec.saga_id;
-        let serialized_params = rec.serialized_params;
+        let serialized_dag = rec.serialized_dag;
         let ack_tx = rec.ack_tx;
         let log = rec.log;
         let exec_tx = self.exec_tx.clone();
@@ -960,7 +897,7 @@ impl Sec {
         let run_state = Saga {
             id: saga_id,
             log: log.new(o!()),
-            params: serialized_params,
+            dag: serialized_dag,
             run_state: SagaRunState::Ready {
                 exec: Arc::clone(&exec),
                 waiter: done_tx,
@@ -1012,7 +949,7 @@ impl Sec {
     fn do_saga_start(&mut self, saga_id: SagaId) -> Result<(), anyhow::Error> {
         let saga = self.saga_remove(saga_id)?;
         let log = saga.log;
-        let params = saga.params;
+        let dag = saga.dag;
         let (exec, waiter) = match saga.run_state {
             SagaRunState::Ready { exec, waiter } => (exec, waiter),
             _ => {
@@ -1028,7 +965,7 @@ impl Sec {
             Saga {
                 id: saga_id,
                 log,
-                params,
+                dag,
                 run_state: SagaRunState::Running {
                     exec: Arc::clone(&exec),
                     waiter,
@@ -1066,7 +1003,7 @@ impl Sec {
                         status: done_data.status,
                         result: done_data.result,
                     },
-                    params: saga.params,
+                    dag: saga.dag,
                 },
             );
         } else {
@@ -1087,31 +1024,17 @@ impl Sec {
                 ack_tx,
                 saga_id,
                 template_params,
-                template_name,
-                serialized_params,
+                dag,
             } => {
-                self.cmd_saga_create(
-                    ack_tx,
-                    saga_id,
-                    template_params,
-                    template_name,
-                    serialized_params,
-                );
+                self.cmd_saga_create(ack_tx, saga_id, template_params, dag);
             }
             SecClientMsg::SagaResume {
                 ack_tx,
                 saga_id,
                 template_params,
-                template_name,
-                serialized_params,
+                dag,
             } => {
-                self.cmd_saga_resume(
-                    ack_tx,
-                    saga_id,
-                    template_params,
-                    template_name,
-                    serialized_params,
-                );
+                self.cmd_saga_resume(ack_tx, saga_id, template_params, dag);
             }
             SecClientMsg::SagaStart { ack_tx, saga_id } => {
                 self.cmd_saga_start(ack_tx, saga_id);
@@ -1136,17 +1059,9 @@ impl Sec {
         >,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
-        template_name: String,
-        serialized_params: serde_json::Value,
+        dag: Arc<SagaDag>,
     ) {
-        self.do_saga_create(
-            ack_tx,
-            saga_id,
-            template_params,
-            template_name,
-            serialized_params,
-            false,
-        );
+        self.do_saga_create(ack_tx, saga_id, template_params, dag, false);
     }
 
     fn do_saga_create(
@@ -1156,17 +1071,21 @@ impl Sec {
         >,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
-        template_name: String,
-        serialized_params: serde_json::Value,
+        dag: Arc<SagaDag>,
         autostart: bool,
     ) {
         let log = self.log.new(o!(
             "saga_id" => saga_id.to_string(),
-            "template_name" => template_name.clone()
+            "saga_name" => dag.saga_name.to_string(),
         ));
         /* TODO-log Figure out the way to log JSON objects to a JSON drain */
-        info!(&log, "saga create";
-            "params" => serde_json::to_string(&serialized_params).unwrap()
+        // TODO(AJS) - Get rid of this unwrap?
+        let serialized_dag = serde_json::to_value(&dag)
+            .map_err(ActionError::new_serialize)
+            .context("serializing new saga dag")
+            .unwrap();
+        debug!(&log, "saga create";
+             "dag" => serde_json::to_string(&serialized_dag).unwrap()
         );
 
         /*
@@ -1174,8 +1093,8 @@ impl Sec {
          */
         let saga_create = SagaCreateParams {
             id: saga_id,
-            template_name,
-            saga_params: serialized_params.clone(),
+            name: dag.saga_name.clone(),
+            dag: serialized_dag.clone(),
             state: SagaCachedState::Running,
         };
         let store = Arc::clone(&self.sec_store);
@@ -1193,7 +1112,7 @@ impl Sec {
                     log,
                     saga_id,
                     template_params,
-                    serialized_params,
+                    serialized_dag,
                     autostart,
                 }))
             }
@@ -1210,23 +1129,27 @@ impl Sec {
         >,
         saga_id: SagaId,
         template_params: Box<dyn TemplateParams>,
-        template_name: String,
-        serialized_params: serde_json::Value,
+        dag: Arc<SagaDag>,
     ) {
         let log = self.log.new(o!(
             "saga_id" => saga_id.to_string(),
-            "template_name" => template_name,
+            "saga_name" => dag.saga_name.to_string(),
         ));
         /* TODO-log Figure out the way to log JSON objects to a JSON drain */
+        // TODO(AJS) - Get rid of this unwrap?
+        let serialized_dag = serde_json::to_value(&dag)
+            .map_err(ActionError::new_serialize)
+            .context("serializing new saga dag")
+            .unwrap();
         info!(&log, "saga resume";
-            "params" => serde_json::to_string(&serialized_params).unwrap()
+             "dag" => serde_json::to_string(&serialized_dag).unwrap()
         );
         self.saga_insert(SagaInsertData {
             ack_tx,
             log,
             saga_id,
             template_params,
-            serialized_params,
+            serialized_dag,
             autostart: false,
         })
     }
@@ -1372,9 +1295,6 @@ impl Sec {
                     Sec::executor_update(log, store, update_data).boxed(),
                 );
             }
-            SecExecMsg::CreateChildSaga(child_data) => {
-                self.executor_child_saga(child_data)
-            }
             SecExecMsg::SagaGet(get_data) => {
                 self.executor_saga_get(get_data);
             }
@@ -1410,35 +1330,6 @@ impl Sec {
         None
     }
 
-    fn executor_child_saga(&mut self, child: SagaCreateChildData) {
-        info!(&self.log, "create child saga";
-            "parent_saga_id" => child.parent_saga_id.to_string(),
-        );
-
-        /*
-         * TODO-robustness TODO-correctness This implementation assumes that the
-         * child saga does not already exist, but it might!  Would it be correct
-         * to look up the saga in our state and return an appropriate Future if
-         * we find it?  At the very least, this relies on the consumer having
-         * completed recovery already, which isn't a given.
-         *
-         * If the saga alredy does exist, presumably this operation will fail
-         * with an error saying so.  But that raises another issue: how will the
-         * consumer have created a SagaId for this saga?  It needs to be
-         * deterministic.
-         */
-        let params = child.create_params;
-        let saga_id = params.saga_id;
-        self.do_saga_create(
-            params.ack_tx,
-            saga_id,
-            params.template_params,
-            params.template_name,
-            params.serialized_params,
-            true,
-        );
-    }
-
     fn executor_saga_get(&self, get_data: SagaGetData) {
         self.cmd_saga_get(get_data.ack_tx, get_data.saga_id);
     }
@@ -1462,7 +1353,7 @@ impl Sec {
 struct Saga {
     id: SagaId,
     log: slog::Logger,
-    params: serde_json::Value,
+    dag: serde_json::Value,
     run_state: SagaRunState,
 }
 
@@ -1521,7 +1412,7 @@ struct SagaInsertData {
     log: slog::Logger,
     saga_id: SagaId,
     template_params: Box<dyn TemplateParams>,
-    serialized_params: serde_json::Value,
+    serialized_dag: serde_json::Value,
     ack_tx:
         oneshot::Sender<Result<BoxFuture<'static, SagaResult>, anyhow::Error>>,
     autostart: bool,
@@ -1534,15 +1425,12 @@ struct SagaDoneData {
     status: SagaExecStatus,
 }
 
-/*
- * Very simple file-based serialization and deserialization, intended only for
- * testing and debugging
- */
-
+/// Simple file-based serialization and deserialization of a whole saga,
+/// intended only for testing and debugging
 #[derive(Deserialize, Serialize)]
 pub struct SagaSerialized {
     pub saga_id: SagaId,
-    pub params: serde_json::Value,
+    pub dag: serde_json::Value,
     pub events: Vec<SagaNodeEvent>,
 }
 
@@ -1557,7 +1445,8 @@ impl TryFrom<SagaSerialized> for SagaLog {
 mod test {
     use super::*;
     use crate::{
-        ActionContext, ActionError, ActionFunc, SagaId, SagaTemplateBuilder,
+        ActionContext, ActionError, ActionFunc, DagBuilder, Node, SagaId,
+        SagaName,
     };
     use serde::{Deserialize, Serialize};
     use slog::Drain;
@@ -1621,13 +1510,11 @@ mod test {
     #[derive(Debug)]
     struct TestSaga;
     impl SagaType for TestSaga {
-        type SagaParamsType = TestParams;
         type ExecContextType = TestContext;
     }
 
-    fn make_test_one_node_saga() -> Arc<SagaTemplate<TestSaga>> {
-        let mut builder = SagaTemplateBuilder::new();
-
+    fn make_test_one_node_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<SagaDag>)
+    {
         async fn do_n1(
             ctx: ActionContext<TestSaga>,
         ) -> Result<i32, ActionError> {
@@ -1641,8 +1528,19 @@ mod test {
             Ok(())
         }
 
-        builder.append("n1_out", "n1", ActionFunc::new_action(do_n1, undo_n1));
-        Arc::new(builder.build())
+        let mut registry = ActionRegistry::new();
+        let action_n1 = ActionFunc::new_action("n1_out", do_n1, undo_n1);
+        registry.register(Arc::clone(&action_n1));
+
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::action("n1_out", "n1", &*action_n1));
+        (
+            Arc::new(registry),
+            Arc::new(SagaDag::new(
+                builder.build().unwrap(),
+                serde_json::to_value(TestParams {}).unwrap(),
+            )),
+        )
     }
 
     // Tests the "normal flow" for a newly created saga: create + start.
@@ -1651,26 +1549,20 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
         let saga_future = sec
-            .saga_create(
-                saga_id,
-                Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                TestParams {},
-            )
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
 
         sec.saga_start(saga_id).await.expect("failed to start saga running");
         let result = saga_future.await;
         let output = result.kind.unwrap();
-        assert_eq!(output.lookup_output::<i32>("n1_out").unwrap(), 1);
+        assert_eq!(output.lookup_node_output::<i32>("n1_out").unwrap(), 1);
         assert_eq!(context.get_count("do_n1"), 1);
         assert_eq!(context.get_count("undo_n1"), 0);
     }
@@ -1681,23 +1573,17 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
         let saga_future = sec
-            .saga_create(
-                saga_id,
-                Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                TestParams {},
-            )
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
 
-        sec.saga_inject_error(saga_id, NodeIndex::new(1))
+        sec.saga_inject_error(saga_id, NodeIndex::new(0))
             .await
             .expect("failed to inject error");
 
@@ -1714,19 +1600,13 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
         let saga_future = sec
-            .saga_create(
-                saga_id,
-                Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                TestParams {},
-            )
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
 
@@ -1748,7 +1628,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
@@ -1757,9 +1637,8 @@ mod test {
             .saga_resume(
                 saga_id,
                 Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                serde_json::to_value(TestParams {}).unwrap(),
+                serde_json::to_value(Arc::try_unwrap(dag).unwrap()).unwrap(),
+                registry,
                 vec![],
             )
             .await
@@ -1768,7 +1647,7 @@ mod test {
         sec.saga_start(saga_id).await.expect("failed to start saga running");
         let result = saga_future.await;
         let output = result.kind.unwrap();
-        assert_eq!(output.lookup_output::<i32>("n1_out").unwrap(), 1);
+        assert_eq!(output.lookup_node_output::<i32>("n1_out").unwrap(), 1);
         assert_eq!(context.get_count("do_n1"), 1);
         assert_eq!(context.get_count("undo_n1"), 0);
     }
@@ -1780,7 +1659,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
@@ -1789,9 +1668,8 @@ mod test {
             .saga_create(
                 saga_id,
                 Arc::clone(&context),
-                template.clone(),
-                "test-saga".to_string(),
-                TestParams {},
+                dag.clone(),
+                registry.clone(),
             )
             .await
             .expect("failed to create saga");
@@ -1800,9 +1678,8 @@ mod test {
             .saga_resume(
                 saga_id,
                 Arc::clone(&context),
-                template,
-                "test-saga".to_string(),
-                serde_json::to_value(TestParams {}).unwrap(),
+                serde_json::to_value((*dag).clone()).unwrap(),
+                registry,
                 vec![],
             )
             .await
@@ -1836,19 +1713,13 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let template = make_test_one_node_saga();
+        let (registry, dag) = make_test_one_node_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
         let _ = sec
-            .saga_create(
-                saga_id,
-                Arc::clone(&context),
-                template.clone(),
-                "test-saga".to_string(),
-                TestParams {},
-            )
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
 

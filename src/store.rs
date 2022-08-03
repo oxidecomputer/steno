@@ -3,6 +3,7 @@
  */
 
 use crate::SagaId;
+use crate::SagaName;
 use crate::SagaNodeEvent;
 use anyhow::Context;
 use async_trait::async_trait;
@@ -12,12 +13,10 @@ use serde::Serialize;
 use std::convert::TryFrom;
 use std::fmt;
 
-/**
- * Interfaces implemented by the Steno consumer to storing saga state and saga
- * log state persistently
- *
- * Correct implementation of these interfaces is critical for crash recovery.
- */
+/// Interfaces implemented by the Steno consumer to storing saga state and saga
+/// log state persistently
+///
+/// Correct implementation of these interfaces is critical for crash recovery.
 #[async_trait]
 pub trait SecStore: fmt::Debug + Send + Sync {
     /**
@@ -53,13 +52,18 @@ pub trait SecStore: fmt::Debug + Send + Sync {
 }
 
 /**
- * Describes what the SecStore needs to store for a persistent saga record.
+ * Describes what an impl of [`SecStore`] needs to store for a persistent saga
+ * record.
  */
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SagaCreateParams {
     pub id: SagaId,
-    pub template_name: String,
-    pub saga_params: serde_json::Value,
+    // The saga name doesn't strictly speaking need to be a separate field here
+    // because it's contained within `dag`.  However, the name is useful to the
+    // consumer.  And they're not supposed to be picking apart `dag`.  So we
+    // pull it out for them.
+    pub name: SagaName,
+    pub dag: serde_json::Value,
     pub state: SagaCachedState,
 }
 

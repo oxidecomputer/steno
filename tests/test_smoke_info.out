@@ -1,38 +1,51 @@
-*** saga template definition ***
-saga template graph: 
+*** saga dag definition ***
+saga graph: 
 digraph {
-    0 [ label = "\"ActionStartNode\"" ]
-    1 [ label = "\"InstanceCreate\"" ]
-    2 [ label = "\"VpcAllocIp\"" ]
-    3 [ label = "\"VolumeCreate\"" ]
-    4 [ label = "\"ServerAlloc (subsaga)\"" ]
-    5 [ label = "\"InstanceConfigure\"" ]
-    6 [ label = "\"VolumeAttach\"" ]
-    7 [ label = "\"InstanceBoot\"" ]
-    8 [ label = "\"Print\"" ]
-    9 [ label = "\"ActionEndNode\"" ]
+    0 [ label = "Action { name: \"instance_id\", label: \"InstanceCreate\", action_name: \"instance_create\" }" ]
+    1 [ label = "Action { name: \"instance_ip\", label: \"VpcAllocIp\", action_name: \"vpc_alloc_ip\" }" ]
+    2 [ label = "Action { name: \"volume_id\", label: \"VolumeCreate\", action_name: \"volume_create\" }" ]
+    3 [ label = "Constant { name: \"server_alloc_params\", value: Object({\"number_of_things\": Number(1)}) }" ]
+    4 [ label = "SubsagaStart { saga_name: \"server-alloc\", params_node_name: \"server_alloc_params\" }" ]
+    5 [ label = "Action { name: \"server_id\", label: \"ServerPick\", action_name: \"server_pick\" }" ]
+    6 [ label = "Action { name: \"server_reserve\", label: \"ServerReserve\", action_name: \"server_reserve\" }" ]
+    7 [ label = "SubsagaEnd { name: \"server_alloc\" }" ]
+    8 [ label = "Action { name: \"instance_configure\", label: \"InstanceConfigure\", action_name: \"instance_configure\" }" ]
+    9 [ label = "Action { name: \"volume_attach\", label: \"VolumeAttach\", action_name: \"volume_attach\" }" ]
+    10 [ label = "Action { name: \"instance_boot\", label: \"InstanceBoot\", action_name: \"instance_boot\" }" ]
+    11 [ label = "Action { name: \"print\", label: \"Print\", action_name: \"print\" }" ]
+    12 [ label = "Start { params: Object({\"instance_name\": String(\"fake-o instance\"), \"number_of_instances\": Number(1)}) }" ]
+    13 [ label = "End" ]
     0 -> 1 [ ]
-    1 -> 2 [ ]
+    0 -> 2 [ ]
     1 -> 3 [ ]
-    1 -> 4 [ ]
-    2 -> 5 [ ]
-    3 -> 5 [ ]
-    4 -> 5 [ ]
+    2 -> 3 [ ]
+    3 -> 4 [ ]
     5 -> 6 [ ]
+    4 -> 5 [ ]
     6 -> 7 [ ]
     7 -> 8 [ ]
     8 -> 9 [ ]
+    9 -> 10 [ ]
+    10 -> 11 [ ]
+    12 -> 0 [ ]
+    11 -> 13 [ ]
 }
 
 *** initial state ***
 + saga execution: 049b2522-308d-442e-bc65-9bfaef863597
-+-- stage  1: blocked: InstanceCreate (produces "instance_id")
-+-- stage  2: + (actions in parallel)
-              +-- blocked: VpcAllocIp (produces "instance_ip")
-              +-- blocked: VolumeCreate (produces "volume_id")
-              +-- blocked: ServerAlloc (subsaga) (produces "server_id")
-+-- stage  3: blocked: InstanceConfigure (produces "instance_configure")
-+-- stage  4: blocked: VolumeAttach (produces "volume_attach")
-+-- stage  5: blocked: InstanceBoot (produces "instance_boot")
-+-- stage  6: blocked: Print (produces "print")
++-- queued-todo: (start node)
++-- blocked: InstanceCreate (produces "instance_id")
++-- (parallel actions):
+        +-- blocked: VpcAllocIp (produces "instance_ip")
+        +-- blocked: VolumeCreate (produces "volume_id")
++-- blocked: (constant = {"number_of_things":1}) (produces "server_alloc_params")
++-- blocked: (subsaga start: "server-alloc")
+        +-- blocked: ServerPick (produces "server_id")
+        +-- blocked: ServerReserve (produces "server_reserve")
++-- blocked: (subsaga end) (produces "server_alloc")
++-- blocked: InstanceConfigure (produces "instance_configure")
++-- blocked: VolumeAttach (produces "volume_attach")
++-- blocked: InstanceBoot (produces "instance_boot")
++-- blocked: Print (produces "print")
++-- blocked: (end node)
 

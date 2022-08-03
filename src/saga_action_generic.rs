@@ -6,6 +6,7 @@
 
 use crate::saga_action_error::ActionError;
 use crate::saga_exec::ActionContext;
+use crate::ActionName;
 use futures::future::BoxFuture;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -21,18 +22,6 @@ use std::sync::Arc;
  * bounds.
  */
 pub trait SagaType: Debug + 'static {
-    /**
-     * Type for a saga's input parameters
-     *
-     * When consumers begin execution of a saga with
-     * [`crate::SecClient::saga_create()`], they can specify parameters for the
-     * saga.  The collection of parameters has this type.  These parameters are
-     * recorded to the saga's persistent representation.  They're subsequently
-     * made available to the saga's actions via
-     * [`crate::ActionContext::saga_params()`].
-     */
-    type SagaParamsType: ActionData;
-
     /**
      * Type for the consumer's context object
      *
@@ -125,6 +114,8 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
      * Subsequent stages can access this data with [`ActionContext::lookup`].
      * This is the _only_ supported means of sharing state across actions within
      * a saga.
+     *
+     * The output of the last node in the DAG becomes the output of the saga.
      */
     fn do_it(
         &self,
@@ -138,49 +129,45 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
         &self,
         sgctx: ActionContext<UserType>,
     ) -> BoxFuture<'_, UndoResult>;
+
+    /**
+     * Return the name of the action used as the key in the ActionRegistry
+     */
+    fn name(&self) -> ActionName;
 }
 
 /*
- * Action implementations
+ * Special action implementations
  */
 
-/** Represents the start node in a graph */
+/// [`Action`] impl that emits a value known when the DAG is created
+///
+/// This is used to implement [`UserNode::Constant`].
 #[derive(Debug)]
-pub struct ActionStartNode {}
+pub struct ActionConstant {
+    value: Arc<serde_json::Value>,
+}
 
-impl<UserType> Action<UserType> for ActionStartNode
+impl ActionConstant {
+    pub fn new(value: Arc<serde_json::Value>) -> ActionConstant {
+        ActionConstant { value }
+    }
+}
+
+impl<UserType> Action<UserType> for ActionConstant
 where
     UserType: SagaType,
 {
     fn do_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, ActionResult> {
-        // TODO-log
-        Box::pin(futures::future::ok(Arc::new(serde_json::Value::Null)))
+        Box::pin(futures::future::ok(self.value.clone()))
     }
 
     fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
-        // TODO-log
         Box::pin(futures::future::ok(()))
     }
-}
 
-/** Represents the end node in a graph */
-#[derive(Debug)]
-pub struct ActionEndNode {}
-
-impl<UserType: SagaType> Action<UserType> for ActionEndNode {
-    fn do_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, ActionResult> {
-        // TODO-log
-        Box::pin(futures::future::ok(Arc::new(serde_json::Value::Null)))
-    }
-
-    fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
-        /*
-         * We should not run compensation actions for nodes that have not
-         * started.  We should never start this node unless all other actions
-         * have completed.  We should never unwind a saga unless some action
-         * failed.  Thus, we should never undo the "end" node in a saga.
-         */
-        panic!("attempted to undo end node in saga");
+    fn name(&self) -> ActionName {
+        ActionName::new("ActionConstant")
     }
 }
 
@@ -197,5 +184,9 @@ impl<UserType: SagaType> Action<UserType> for ActionInjectError {
     fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
         /* We should never undo an action that failed. */
         unimplemented!();
+    }
+
+    fn name(&self) -> ActionName {
+        ActionName::new("InjectError")
     }
 }
