@@ -134,30 +134,31 @@ mod actions {
     use steno::ActionFunc;
 
     lazy_static! {
-        pub static ref PAYMENT: Arc<dyn Action<TripSaga>> =
+        pub(super) static ref PAYMENT: Arc<dyn Action<TripSaga>> =
             ActionFunc::new_action(
                 "payment",
                 super::saga_charge_card,
                 super::saga_refund_card
             );
-        pub static ref HOTEL: Arc<dyn Action<TripSaga>> =
+        pub(super) static ref HOTEL: Arc<dyn Action<TripSaga>> =
             ActionFunc::new_action(
                 "hotel",
                 super::saga_book_hotel,
                 super::saga_cancel_hotel
             );
-        pub static ref FLIGHT: Arc<dyn Action<TripSaga>> =
+        pub(super) static ref FLIGHT: Arc<dyn Action<TripSaga>> =
             ActionFunc::new_action(
                 "flight",
                 super::saga_book_flight,
                 super::saga_cancel_flight
             );
-        pub static ref CAR: Arc<dyn Action<TripSaga>> = ActionFunc::new_action(
-            "car",
-            super::saga_book_car,
-            super::saga_cancel_car
-        );
-        pub static ref PRINT: Arc<dyn Action<TripSaga>> =
+        pub(super) static ref CAR: Arc<dyn Action<TripSaga>> =
+            ActionFunc::new_action(
+                "car",
+                super::saga_book_car,
+                super::saga_cancel_car
+            );
+        pub(super) static ref PRINT: Arc<dyn Action<TripSaga>> =
             new_action_noop_undo("print", super::saga_print);
     }
 }
@@ -231,12 +232,12 @@ struct TripParams {
 // easy for us to access application-specific state, like a logger, HTTP
 // clients, etc.
 #[derive(Debug)]
-pub struct TripContext;
+struct TripContext;
 
 // Steno uses several type parameters that you specify by impl'ing the SagaType
 // trait.
 #[derive(Debug)]
-pub struct TripSaga;
+struct TripSaga;
 impl SagaType for TripSaga {
     // Type for the application-specific context (see above)
     type ExecContextType = Arc<TripContext>;
