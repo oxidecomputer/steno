@@ -20,6 +20,7 @@ use crate::SagaNodeEvent;
 use crate::SagaNodeId;
 use crate::SagaType;
 use anyhow::anyhow;
+use anyhow::ensure;
 use anyhow::Context;
 use futures::channel::mpsc;
 use futures::future::BoxFuture;
@@ -382,13 +383,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         registry: Arc<ActionRegistry<UserType>>,
         user_context: Arc<UserType::ExecContextType>,
         sec_hdl: SecExecClient,
-    ) -> SagaExecutor<UserType> {
+    ) -> Result<SagaExecutor<UserType>, anyhow::Error> {
         let sglog = SagaLog::new_empty(saga_id);
-
-        /*
-         * The only errors that can be returned from new_recover() are never
-         * expected in this context.
-         */
         SagaExecutor::new_recover(
             log,
             saga_id,
@@ -398,7 +394,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             sec_hdl,
             sglog,
         )
-        .unwrap()
     }
 
     /**
@@ -414,6 +409,11 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         sec_hdl: SecExecClient,
         sglog: SagaLog,
     ) -> Result<SagaExecutor<UserType>, anyhow::Error> {
+        /* Before anything else, do some basic checks on the DAG. */
+        Self::validate_saga(&dag, &registry).with_context(|| {
+            format!("validating saga {:?}", dag.saga_name())
+        })?;
+
         /*
          * During recovery, there's a fine line between operational errors and
          * programmer errors.  If we discover semantically invalid saga state,
@@ -705,6 +705,82 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             action_registry: Arc::clone(&registry),
             node_saga_start,
         })
+    }
+
+    /**
+     * Validates some basic properties of the saga
+     */
+    // Many of these properties may be validated when we construct the saga DAG.
+    // Checking them again here makes sure that we gracefully handle a case
+    // where we got an invalid DAG in some other way (e.g., bad database state).
+    // See DagBuilderError for more informatino about these conditions.
+    fn validate_saga(
+        saga: &SagaDag,
+        registry: &ActionRegistry<UserType>,
+    ) -> Result<(), anyhow::Error> {
+        let mut nsubsaga_start = 0;
+        let mut nsubsaga_end = 0;
+
+        for node_index in saga.graph.node_indices() {
+            let node = &saga.graph[node_index];
+            match node {
+                InternalNode::Start { .. } => {
+                    ensure!(
+                        node_index == saga.start_node,
+                        "found start node at unexpected index {:?}",
+                        node_index
+                    );
+                }
+                InternalNode::End => {
+                    ensure!(
+                        node_index == saga.end_node,
+                        "found end node at unexpected index {:?}",
+                        node_index
+                    );
+                }
+                InternalNode::Action { name, action_name, .. } => {
+                    let action = registry.get(&action_name);
+                    ensure!(
+                        action.is_ok(),
+                        "action for node {:?} not registered: {:?}",
+                        name,
+                        action_name
+                    );
+                }
+                InternalNode::Constant { .. } => (),
+                InternalNode::SubsagaStart { .. } => {
+                    nsubsaga_start += 1;
+                }
+                InternalNode::SubsagaEnd { .. } => {
+                    nsubsaga_end += 1;
+                }
+            }
+        }
+
+        ensure!(
+            saga.start_node.index() < saga.graph.node_count(),
+            "bad saga graph (missing start node)",
+        );
+        ensure!(
+            saga.end_node.index() < saga.graph.node_count(),
+            "bad saga graph (missing end node)",
+        );
+        ensure!(
+            nsubsaga_start == nsubsaga_end,
+            "bad saga graph (found {} subsaga start nodes \
+            but {} subsaga end nodes)",
+            nsubsaga_start,
+            nsubsaga_end
+        );
+
+        let nend_ancestors =
+            saga.graph.neighbors_directed(saga.end_node, Incoming).count();
+        ensure!(
+            nend_ancestors == 1,
+            "expected saga to end with exactly one node"
+        );
+
+        Ok(())
     }
 
     /**
@@ -1035,6 +1111,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let dag = &self.dag;
         match dag.get(node_index).unwrap() {
             InternalNode::Action { action_name: action, .. } => {
+                // This condition was checked in SagaExec::validate_saga().  It
+                // shouldn't be possible to blow this assertion.
                 registry.get(action).expect("missing action for node")
             }
 
@@ -1283,6 +1361,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .collect();
 
         // The output node is the (sole) ancestor of the "end" node.
+        // There must be exactly one.  This was checked in
+        // SagaExec::validate_dag().
         let output_node_index = self
             .dag
             .graph
@@ -2339,13 +2419,13 @@ Constant { name: \"a\", value: Null }
     Constant { name: \"b\", value: Null }
     Constant { name: \"c\", value: Null }
 Constant { name: \"d\", value: Null }
-SubsagaStart { saga_name: SagaName(\"test-subsaga\"), params_node_name: \"d\" }
+SubsagaStart { saga_name: \"test-subsaga\", params_node_name: \"d\" }
     Constant { name: \"a\", value: Null }
     \"Parallel: \"
         Constant { name: \"b\", value: Null }
         Constant { name: \"c\", value: Null }
     Constant { name: \"d\", value: Null }
-    SubsagaStart { saga_name: SagaName(\"test-nested-subsaga\"), params_node_name: \"d\" }
+    SubsagaStart { saga_name: \"test-nested-subsaga\", params_node_name: \"d\" }
         Constant { name: \"a\", value: Null }
         \"Parallel: \"
             Constant { name: \"b\", value: Null }
@@ -2354,7 +2434,7 @@ SubsagaStart { saga_name: SagaName(\"test-subsaga\"), params_node_name: \"d\" }
     SubsagaEnd { name: \"e\" }
     \"Parallel: \"
         Constant { name: \"f\", value: Null }
-        SubsagaStart { saga_name: SagaName(\"test-nested-subsaga\"), params_node_name: \"e\" }
+        SubsagaStart { saga_name: \"test-nested-subsaga\", params_node_name: \"e\" }
             Constant { name: \"a\", value: Null }
             \"Parallel: \"
                 Constant { name: \"b\", value: Null }

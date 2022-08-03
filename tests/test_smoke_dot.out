@@ -3,7 +3,7 @@ digraph {
     1 [ label = "Action { name: \"instance_ip\", label: \"VpcAllocIp\", action_name: \"vpc_alloc_ip\" }" ]
     2 [ label = "Action { name: \"volume_id\", label: \"VolumeCreate\", action_name: \"volume_create\" }" ]
     3 [ label = "Constant { name: \"server_alloc_params\", value: Object({\"number_of_things\": Number(1)}) }" ]
-    4 [ label = "SubsagaStart { saga_name: SagaName(\"server-alloc\"), params_node_name: \"server_alloc_params\" }" ]
+    4 [ label = "SubsagaStart { saga_name: \"server-alloc\", params_node_name: \"server_alloc_params\" }" ]
     5 [ label = "Action { name: \"server_id\", label: \"ServerPick\", action_name: \"server_pick\" }" ]
     6 [ label = "Action { name: \"server_reserve\", label: \"ServerReserve\", action_name: \"server_reserve\" }" ]
     7 [ label = "SubsagaEnd { name: \"server_alloc\" }" ]

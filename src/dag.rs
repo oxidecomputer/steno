@@ -129,15 +129,7 @@ impl fmt::Debug for NodeName {
 /// Steno makes no assumptions about the semantics of this name.  Consumers may
 /// wish to use this as a unique identifier.
 #[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    JsonSchema,
+    Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
 #[serde(transparent)]
 pub struct SagaName(String);
@@ -147,6 +139,12 @@ NewtypeDisplay! { () pub struct SagaName(String); }
 impl SagaName {
     pub fn new(name: &str) -> SagaName {
         SagaName(name.to_string())
+    }
+}
+
+impl fmt::Debug for SagaName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!("{:?}", self.0))
     }
 }
 

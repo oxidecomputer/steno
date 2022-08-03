@@ -21,6 +21,7 @@ fn new_log() -> slog::Logger {
     slog::Logger::root(drain, slog::o!())
 }
 
+// Tests what happens when running a saga with an unregistered action
 #[tokio::test]
 async fn unregistered_action() {
     #[derive(Debug)]
@@ -46,17 +47,21 @@ async fn unregistered_action() {
     let sec = steno::sec(log.clone(), Arc::new(steno::InMemorySecStore::new()));
     let saga_id = SagaId(Uuid::new_v4());
     let context = Arc::new(());
-    let saga_future = sec
+    let result = sec
         .saga_create(
             saga_id,
             Arc::clone(&context),
             Arc::new(saga),
             Arc::new(registry),
         )
-        .await
-        .expect("failed to create saga");
-
-    sec.saga_start(saga_id).await.expect("failed to start saga running");
-    let result = saga_future.await;
-    let _ = result.kind.unwrap();
+        .await;
+    if let Err(error) = result {
+        assert_eq!(
+            format!("{:#}", error),
+            "validating saga \"my-saga\": \
+            action for node \"my_node\" not registered: \"my_action\""
+        );
+    } else {
+        panic!("expected failure to create saga with unregistered action");
+    }
 }

@@ -9,7 +9,7 @@
         +-- done: VpcAllocIp (produces "instance_ip")
         +-- done: VolumeCreate (produces "volume_id")
 +-- done: (constant = {"number_of_things":1}) (produces "server_alloc_params")
-+-- done: (subsaga start: SagaName("server-alloc"))
++-- done: (subsaga start: "server-alloc")
         +-- done: ServerPick (produces "server_id")
         +-- done: ServerReserve (produces "server_reserve")
 +-- done: (subsaga end) (produces "server_alloc")

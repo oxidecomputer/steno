@@ -604,7 +604,7 @@ where
             self.registry,
             self.uctx,
             sec_hdl,
-        )))
+        )?))
     }
 }
 
