@@ -1,0 +1,6 @@
+# We use a specific toolchain revision to ensure consistent behavior among
+# developers and test environments.  The intent is to keep this updated as new
+# stable versions are released.
+[toolchain]
+channel = "1.62.1"
+profile = "default"
