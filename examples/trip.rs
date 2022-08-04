@@ -290,7 +290,7 @@ async fn saga_refund_card(
 async fn saga_book_hotel(
     action_context: ActionContext<TripSaga>,
 ) -> Result<HotelReservation, ActionError> {
-    /* ... */
+    // ...
     let trip_context = action_context.user_data();
     let params = action_context.saga_params::<TripParams>()?;
     let hotel_name = &params.hotel_name;
@@ -301,7 +301,7 @@ async fn saga_book_hotel(
 async fn saga_cancel_hotel(
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
-    /* ... */
+    // ...
     let trip_context = action_context.user_data();
     let confirmation: HotelReservation = action_context.lookup("hotel")?;
     // ... (make request to another service -- must not fail)
@@ -311,7 +311,7 @@ async fn saga_cancel_hotel(
 async fn saga_book_flight(
     action_context: ActionContext<TripSaga>,
 ) -> Result<FlightReservation, ActionError> {
-    /* ... */
+    // ...
     let trip_context = action_context.user_data();
     let params = action_context.saga_params::<TripParams>()?;
     let flight_info = &params.flight_info;
@@ -322,7 +322,7 @@ async fn saga_book_flight(
 async fn saga_cancel_flight(
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
-    /* ... */
+    // ...
     let trip_context = action_context.user_data();
     let confirmation: FlightReservation = action_context.lookup("flight")?;
     // ... (make request to another service -- must not fail)
@@ -332,7 +332,7 @@ async fn saga_cancel_flight(
 async fn saga_book_car(
     action_context: ActionContext<TripSaga>,
 ) -> Result<CarReservation, ActionError> {
-    /* ... */
+    // ...
     let trip_context = action_context.user_data();
     let params = action_context.saga_params::<TripParams>()?;
     let car_info = &params.car_info;
@@ -343,7 +343,7 @@ async fn saga_book_car(
 async fn saga_cancel_car(
     action_context: ActionContext<TripSaga>,
 ) -> Result<(), anyhow::Error> {
-    /* ... */
+    // ...
     let trip_context = action_context.user_data();
     let confirmation: CarReservation = action_context.lookup("car")?;
     // ... (make request to another service -- must not fail)

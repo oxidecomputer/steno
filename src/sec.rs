@@ -1,57 +1,55 @@
-/*!
- * Saga Execution Coordinator
- *
- * The Saga Execution Coordinator ("SEC") manages the execution of a group of
- * sagas, providing interfaces for running new sagas, recovering sagas that were
- * running in a previous lifetime, listing sagas, querying the state of a saga,
- * and providing some control over sagas (e.g., to inject errors).
- *
- * The implementation is grouped into
- *
- * * [`sec()`], a function to start up an SEC
- * * an `SecClient`, which Steno consumers use to interact with the SEC
- * * an `Sec`: a background task that owns the list of sagas and their overall
- *   runtime state.  (The detailed runtime state is owned by a separate
- *   `SagaExecutor` type internally.)
- * * a number of `SecExecClient` objects, which individual saga executors use to
- *   communicate back to the Sec (to communicate progress, record persistent
- *   state, etc.)
- *
- * The control flow of these components and their messages is shown in the
- * below diagram:
- *
- *  +---------+
- *  |  Saga   |
- *  |Consumer |--+
- *  +---------+  |
- *               |
- *           Saga API
- *               |
- *               |   +-------------+                  +-------------+
- *               |   |             |                  |             |
- *               |   |     SEC     |                  |     SEC     |
- *               +-->|   Client    |----------------->|   (task)    |
- *                   |             |   SecClientMsg   |             |
- *                   |             |                  |             |
- *                   +-------------+                  +-------------+
- *                                                           ^
- *                                                           |
- *                                                           |
- *                                                       SecExecMsg
- *                                                           |
- *                                                           |
- *                                                    +-------------+
- *                                                    |             |
- *                                                    | SagaExecutor|
- *                                                    |  (future)   |
- *                                                    |             |
- *                                                    |             |
- *                                                    +-------------+
- *
- * The Steno consumer is responsible for implementing an `SecStore` to store
- * persistent state.  There's an [`crate::InMemorySecStore`] to play around
- * with.
- */
+//! Saga Execution Coordinator
+//!
+//! The Saga Execution Coordinator ("SEC") manages the execution of a group of
+//! sagas, providing interfaces for running new sagas, recovering sagas that
+//! were running in a previous lifetime, listing sagas, querying the state of a
+//! saga, and providing some control over sagas (e.g., to inject errors).
+//!
+//! The implementation is grouped into
+//!
+//! * [`sec()`], a function to start up an SEC
+//! * an `SecClient`, which Steno consumers use to interact with the SEC
+//! * an `Sec`: a background task that owns the list of sagas and their overall
+//!   runtime state.  (The detailed runtime state is owned by a separate
+//!   `SagaExecutor` type internally.)
+//! * a number of `SecExecClient` objects, which individual saga executors use
+//!   to communicate back to the Sec (to communicate progress, record persistent
+//!   state, etc.)
+//!
+//! The control flow of these components and their messages is shown in the
+//! below diagram:
+//!
+//!  +---------+
+//!  |  Saga   |
+//!  |Consumer |--+
+//!  +---------+  |
+//!               |
+//!           Saga API
+//!               |
+//!               |   +-------------+                  +-------------+
+//!               |   |             |                  |             |
+//!               |   |     SEC     |                  |     SEC     |
+//!               +-->|   Client    |----------------->|   (task)    |
+//!                   |             |   SecClientMsg   |             |
+//!                   |             |                  |             |
+//!                   +-------------+                  +-------------+
+//!                                                           ^
+//!                                                           |
+//!                                                           |
+//!                                                       SecExecMsg
+//!                                                           |
+//!                                                           |
+//!                                                    +-------------+
+//!                                                    |             |
+//!                                                    | SagaExecutor|
+//!                                                    |  (future)   |
+//!                                                    |             |
+//!                                                    |             |
+//!                                                    +-------------+
+//!
+//! The Steno consumer is responsible for implementing an `SecStore` to store
+//! persistent state.  There's an [`crate::InMemorySecStore`] to play around
+//! with.
 
 #![allow(clippy::large_enum_variant)]
 
@@ -88,41 +86,32 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-/*
- * SEC client side (handle used by Steno consumers)
- */
+// SEC client side (handle used by Steno consumers)
 
-/**
- * Maximum number of messages for the SEC that can be queued from the client
- *
- * This is very small.  These messages are commands, and the client always waits
- * for a response.  So it makes little difference to latency or throughput
- * whether the client waits up front for available buffer space or waits instead
- * on the response channel (with the request buffered in the queue).
- */
+/// Maximum number of messages for the SEC that can be queued from the client
+///
+/// This is very small.  These messages are commands, and the client always
+/// waits for a response.  So it makes little difference to latency or
+/// throughput whether the client waits up front for available buffer space or
+/// waits instead on the response channel (with the request buffered in the
+/// queue).
 const SEC_CLIENT_MAXQ_MESSAGES: usize = 2;
 
-/**
- * Maximum number of messages for the SEC that can be queued from SagaExecutors
- *
- * As with clients, we keep the queue small.  This may mean that SagaExecutors
- * get stuck behind the SEC, but that's preferable to bloat or more implicit
- * queueing delays.
- */
+/// Maximum number of messages for the SEC that can be queued from SagaExecutors
+///
+/// As with clients, we keep the queue small.  This may mean that SagaExecutors
+/// get stuck behind the SEC, but that's preferable to bloat or more implicit
+/// queueing delays.
 const SEC_EXEC_MAXQ_MESSAGES: usize = 2;
 
-/**
- * Creates a new Saga Execution Coordinator
- */
+/// Creates a new Saga Execution Coordinator
 pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
     let (cmd_tx, cmd_rx) = mpsc::channel(SEC_CLIENT_MAXQ_MESSAGES);
     let (exec_tx, exec_rx) = mpsc::channel(SEC_EXEC_MAXQ_MESSAGES);
 
-    /*
-     * We spawn a new task rather than return a `Future` for the caller to
-     * poll because we want to make sure the Sec can't be dropped unless
-     * shutdown() has been invoked on the client.
-     */
+    // We spawn a new task rather than return a `Future` for the caller to
+    // poll because we want to make sure the Sec can't be dropped unless
+    // shutdown() has been invoked on the client.
     let task = tokio::spawn(async move {
         let sec = Sec {
             log,
@@ -140,12 +129,11 @@ pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
     SecClient { cmd_tx, task: Some(task), shutdown: false }
 }
 
-/**
- * Client handle for a Saga Execution Coordinator (SEC)
- *
- * This is the interface through which Steno consumers create new sagas, recover
- * sagas that were created in previous lifetimes, list sagas, and so on.
- */
+/// Client handle for a Saga Execution Coordinator (SEC)
+///
+/// This is the interface through which Steno consumers create new sagas,
+/// recover sagas that were created in previous lifetimes, list sagas, and so
+/// on.
 #[derive(Debug)]
 pub struct SecClient {
     cmd_tx: mpsc::Sender<SecClientMsg>,
@@ -154,12 +142,10 @@ pub struct SecClient {
 }
 
 impl SecClient {
-    /**
-     * Creates a new saga, which may later started with [`Self::saga_start`].
-     *
-     * This function asynchronously returns a `Future` that can be used to wait
-     * for the saga to finish.  It's also safe to cancel (drop) this Future.
-     */
+    /// Creates a new saga, which may later started with [`Self::saga_start`].
+    ///
+    /// This function asynchronously returns a `Future` that can be used to wait
+    /// for the saga to finish.  It's also safe to cancel (drop) this Future.
     pub async fn saga_create<UserType>(
         &self,
         saga_id: SagaId,
@@ -183,12 +169,10 @@ impl SecClient {
         .await
     }
 
-    /**
-     * Resume a saga that was previously running
-     *
-     * This function asynchronously returns a `Future` that can be used to wait
-     * for the saga to finish.  It's also safe to cancel (drop) this Future.
-     */
+    /// Resume a saga that was previously running
+    ///
+    /// This function asynchronously returns a `Future` that can be used to wait
+    /// for the saga to finish.  It's also safe to cancel (drop) this Future.
     pub async fn saga_resume<UserType>(
         &self,
         saga_id: SagaId,
@@ -220,10 +204,8 @@ impl SecClient {
         .await
     }
 
-    /**
-     * Start running (or resume running) a saga that was created with
-     * [`SecClient::saga_create()`] or [`SecClient::saga_resume()`].
-     */
+    /// Start running (or resume running) a saga that was created with
+    /// [`SecClient::saga_create()`] or [`SecClient::saga_resume()`].
     pub async fn saga_start(
         &self,
         saga_id: SagaId,
@@ -232,9 +214,7 @@ impl SecClient {
         self.sec_cmd(ack_rx, SecClientMsg::SagaStart { ack_tx, saga_id }).await
     }
 
-    /**
-     * List known sagas
-     */
+    /// List known sagas
     pub async fn saga_list(
         &self,
         marker: Option<SagaId>,
@@ -245,17 +225,13 @@ impl SecClient {
             .await
     }
 
-    /**
-     * Fetch information about one saga
-     */
+    /// Fetch information about one saga
     pub async fn saga_get(&self, saga_id: SagaId) -> Result<SagaView, ()> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sec_cmd(ack_rx, SecClientMsg::SagaGet { ack_tx, saga_id }).await
     }
 
-    /**
-     * Inject an error into one saga
-     */
+    /// Inject an error into one saga
     pub async fn saga_inject_error(
         &self,
         saga_id: SagaId,
@@ -269,9 +245,7 @@ impl SecClient {
         .await
     }
 
-    /**
-     * Shut down the SEC and wait for it to come to rest.
-     */
+    /// Shut down the SEC and wait for it to come to rest.
     pub async fn shutdown(mut self) {
         self.shutdown = true;
         self.cmd_tx.send(SecClientMsg::Shutdown).await.unwrap_or_else(
@@ -284,14 +258,12 @@ impl SecClient {
             .expect("failed to join on SEC task");
     }
 
-    /**
-     * Sends `msg` to the SEC and waits for a response on `ack_rx`
-     *
-     * The SEC is not expected to shut down until we issue the shutdown command,
-     * which only happens when the consumer has given up ownership of this
-     * object.  So we can assume that the SEC is still running and that these
-     * channel operations will not fail.
-     */
+    /// Sends `msg` to the SEC and waits for a response on `ack_rx`
+    ///
+    /// The SEC is not expected to shut down until we issue the shutdown
+    /// command, which only happens when the consumer has given up ownership
+    /// of this object.  So we can assume that the SEC is still running and
+    /// that these channel operations will not fail.
     async fn sec_cmd<R>(
         &self,
         ack_rx: oneshot::Receiver<R>,
@@ -307,24 +279,22 @@ impl SecClient {
 impl Drop for SecClient {
     fn drop(&mut self) {
         if !self.shutdown {
-            /*
-             * If we get here, there should be no outstanding requests on this
-             * channel, in which case there must be buffer space and try_send()
-             * ought not to fail for running out of space.  It may fail if the
-             * other side is closed, but that should only happen if the SEC task
-             * panicked.
-             */
+            // If we get here, there should be no outstanding requests on this
+            // channel, in which case there must be buffer space and try_send()
+            // ought not to fail for running out of space.  It may fail if the
+            // other side is closed, but that should only happen if the SEC task
+            // panicked.
             let _ = self.cmd_tx.try_send(SecClientMsg::Shutdown);
         }
     }
 }
 
-/** External consumer's view of a saga */
+/// External consumer's view of a saga
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 pub struct SagaView {
     pub id: SagaId,
 
-    /* TODO-debugging impl an appropriate Serialize here */
+    // TODO-debugging impl an appropriate Serialize here
     #[serde(skip)]
     pub state: SagaStateView,
 
@@ -342,13 +312,11 @@ impl SagaView {
         }
     }
 
-    /**
-     * Returns an object that impl's serde's `Deserialize` and `Serialize`
-     * traits
-     *
-     * This is mainly intended for tooling and demoing.  Production state
-     * serialization happens via the [`SecStore`].
-     */
+    /// Returns an object that impl's serde's `Deserialize` and `Serialize`
+    /// traits
+    ///
+    /// This is mainly intended for tooling and demoing.  Production state
+    /// serialization happens via the [`SecStore`].
     pub fn serialized(&self) -> SagaSerialized {
         SagaSerialized {
             saga_id: self.id,
@@ -358,24 +326,24 @@ impl SagaView {
     }
 }
 
-/** State-specific parts of a consumer's view of a saga */
+/// State-specific parts of a consumer's view of a saga
 #[derive(Debug, Clone)]
 pub enum SagaStateView {
-    /** The saga is ready to start running */
+    /// The saga is ready to start running
     Ready {
-        /** initial execution status */
+        /// initial execution status
         status: SagaExecStatus,
     },
-    /** The saga is still running */
+    /// The saga is still running
     Running {
-        /** current execution status */
+        /// current execution status
         status: SagaExecStatus,
     },
-    /** The saga has finished running */
+    /// The saga has finished running
     Done {
-        /** final execution status */
+        /// final execution status
         status: SagaExecStatus,
-        /** final result */
+        /// final result
         result: SagaResult,
     },
 }
@@ -415,7 +383,7 @@ impl SagaStateView {
         }
     }
 
-    /** Returns the status summary for this saga */
+    /// Returns the status summary for this saga
     pub fn status(&self) -> &SagaExecStatus {
         match self {
             SagaStateView::Ready { status } => status,
@@ -425,100 +393,88 @@ impl SagaStateView {
     }
 }
 
-/*
- * SEC Client/Server interface
- */
+// SEC Client/Server interface
 
-/**
- * Message passed from the [`SecClient`] to the [`Sec`]
- */
-/*
- * TODO-cleanup This might be cleaner using separate named structs for the
- * enums, similar to what we do for SecStep.
- */
+/// Message passed from the [`SecClient`] to the [`Sec`]
+// TODO-cleanup This might be cleaner using separate named structs for the
+// enums, similar to what we do for SecStep.
 enum SecClientMsg {
-    /**
-     * Creates a new saga
-     *
-     * The response includes a Future that can be used to wait for the saga to
-     * finish.  The caller can ignore this.
-     */
+    /// Creates a new saga
+    ///
+    /// The response includes a Future that can be used to wait for the saga to
+    /// finish.  The caller can ignore this.
     SagaCreate {
-        /** response channel */
+        /// response channel
         ack_tx: oneshot::Sender<
             Result<BoxFuture<'static, SagaResult>, anyhow::Error>,
         >,
-        /** caller-defined id (must be unique) */
+        /// caller-defined id (must be unique)
         saga_id: SagaId,
 
-        /** user-type-specific parameters */
+        /// user-type-specific parameters
         template_params: Box<dyn TemplateParams>,
 
-        /** The user created DAG */
+        /// The user created DAG
         dag: Arc<SagaDag>,
     },
 
-    /**
-     * Resumes a saga from a previous lifetime (i.e., after a restart)
-     *
-     * The response includes a Future that can be used to wait for the saga to
-     * finish.  The caller can ignore this.
-     */
+    /// Resumes a saga from a previous lifetime (i.e., after a restart)
+    ///
+    /// The response includes a Future that can be used to wait for the saga to
+    /// finish.  The caller can ignore this.
     SagaResume {
-        /** response channel */
+        /// response channel
         ack_tx: oneshot::Sender<
             Result<BoxFuture<'static, SagaResult>, anyhow::Error>,
         >,
-        /** unique id of the saga (from persistent state) */
+        /// unique id of the saga (from persistent state)
         saga_id: SagaId,
 
-        /** user-type-specific parameters */
+        /// user-type-specific parameters
         template_params: Box<dyn TemplateParams>,
 
-        /** The user created DAG */
+        /// The user created DAG
         dag: Arc<SagaDag>,
     },
 
-    /** Start (or resume) running a saga */
+    /// Start (or resume) running a saga
     SagaStart {
-        /** response channel */
+        /// response channel
         ack_tx: oneshot::Sender<Result<(), anyhow::Error>>,
-        /** id of the saga to start running */
+        /// id of the saga to start running
         saga_id: SagaId,
     },
 
-    /** List sagas */
+    /// List sagas
     SagaList {
-        /** response channel */
+        /// response channel
         ack_tx: oneshot::Sender<Vec<SagaView>>,
-        /** marker (where in the ID space to start listing from) */
+        /// marker (where in the ID space to start listing from)
         marker: Option<SagaId>,
-        /** maximum number of sagas to return */
+        /// maximum number of sagas to return
         limit: NonZeroU32,
     },
 
-    /** Fetch information about one saga */
+    /// Fetch information about one saga
     SagaGet {
-        /** response channel */
+        /// response channel
         ack_tx: oneshot::Sender<Result<SagaView, ()>>,
-        /** id of saga to fetch information about */
+        /// id of saga to fetch information about
         saga_id: SagaId,
     },
 
-    /** Inject an error at a specific action in the saga */
+    /// Inject an error at a specific action in the saga
     SagaInjectError {
-        /** response channel */
+        /// response channel
         ack_tx: oneshot::Sender<Result<(), anyhow::Error>>,
-        /** id of saga to fetch information about */
+        /// id of saga to fetch information about
         saga_id: SagaId,
-        /**
-         * id of the node to inject the error (see
-         * [`SagaTemplateMetadata::node_for_name`])
-         */
+        /// id of the node to inject the error (see
+        /// [`SagaTemplateMetadata::node_for_name`])
         node_id: NodeIndex,
     },
 
-    /** Shut down the SEC */
+    /// Shut down the SEC
     Shutdown,
 }
 
@@ -559,11 +515,9 @@ impl fmt::Debug for SecClientMsg {
     }
 }
 
-/**
- * This trait erases the type parameters on a [`SagaTemplate`], user context,
- * and user parameters so that we can more easily pass it through a channel.
- * TODO(AJS) - rename since template no longer exists?
- */
+/// This trait erases the type parameters on a [`SagaTemplate`], user context,
+/// and user parameters so that we can more easily pass it through a channel.
+/// TODO(AJS) - rename since template no longer exists?
 trait TemplateParams: Send + fmt::Debug {
     fn into_exec(
         self: Box<Self>,
@@ -573,13 +527,11 @@ trait TemplateParams: Send + fmt::Debug {
     ) -> Result<Arc<dyn SagaExecManager>, anyhow::Error>;
 }
 
-/**
- * Stores a template and user context in a way where the
- * user-defined types can be erased with [`TemplateParams`]
- *
- * This version is for the "create" case, where we know the specific
- * [`SagaType`] for these values.  See [`SecClient::saga_create`].
- */
+/// Stores a template and user context in a way where the
+/// user-defined types can be erased with [`TemplateParams`]
+///
+/// This version is for the "create" case, where we know the specific
+/// [`SagaType`] for these values.  See [`SecClient::saga_create`].
 #[derive(Debug)]
 struct TemplateParamsForCreate<UserType: SagaType + fmt::Debug> {
     dag: Arc<SagaDag>,
@@ -608,14 +560,12 @@ where
     }
 }
 
-/**
- * Stores a template, saga parameters, and user context in a way where the
- * user-defined types can be erased with [`TemplateParams]
- *
- * This version is for the "resume" case, where we know the specific context
- * type, but not the parameters or template type.  We also have a saga log in
- * this case.  See [`SecClient::saga_resume()`].
- */
+/// Stores a template, saga parameters, and user context in a way where the
+/// user-defined types can be erased with [`TemplateParams]
+///
+/// This version is for the "resume" case, where we know the specific context
+/// type, but not the parameters or template type.  We also have a saga log in
+/// this case.  See [`SecClient::saga_resume()`].
 #[derive(Debug)]
 struct TemplateParamsForRecover<UserType: SagaType + fmt::Debug> {
     dag: Arc<SagaDag>,
@@ -646,14 +596,10 @@ where
     }
 }
 
-/*
- * SEC internal client side (handle used by SagaExecutor)
- */
+// SEC internal client side (handle used by SagaExecutor)
 
-/**
- * Handle used by `SagaExecutor` for sending messages back to the SEC
- */
-/* TODO-cleanup This should be pub(crate).  See lib.rs. */
+/// Handle used by `SagaExecutor` for sending messages back to the SEC
+// TODO-cleanup This should be pub(crate).  See lib.rs.
 #[derive(Debug)]
 pub struct SecExecClient {
     saga_id: SagaId,
@@ -661,7 +607,7 @@ pub struct SecExecClient {
 }
 
 impl SecExecClient {
-    /** Write `event` to the saga log */
+    /// Write `event` to the saga log
     pub async fn record(&self, event: SagaNodeEvent) {
         assert_eq!(event.saga_id, self.saga_id);
         let (ack_tx, ack_rx) = oneshot::channel();
@@ -672,9 +618,7 @@ impl SecExecClient {
         .await
     }
 
-    /**
-     * Update the cached state for the saga
-     */
+    /// Update the cached state for the saga
     pub async fn saga_update(&self, update: SagaCachedState) {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sec_send(
@@ -702,70 +646,62 @@ impl SecExecClient {
         ack_rx: oneshot::Receiver<T>,
         msg: SecExecMsg,
     ) -> T {
-        /*
-         * TODO-robustness How does shutdown interact (if this channel gets
-         * closed)?
-         */
+        // TODO-robustness How does shutdown interact (if this channel gets
+        // closed)?
         self.exec_tx.send(msg).await.unwrap();
         ack_rx.await.unwrap()
     }
 }
 
-/**
- * Message passed from the [`SecExecClient`] to the [`Sec`]
- */
+/// Message passed from the [`SecExecClient`] to the [`Sec`]
 #[derive(Debug)]
 enum SecExecMsg {
-    /** Fetch the status of a saga */
+    /// Fetch the status of a saga
     SagaGet(SagaGetData),
 
-    /** Record an event to the saga log */
+    /// Record an event to the saga log
     LogEvent(SagaLogEventData),
 
-    /** Update the cached state of a saga */
+    /// Update the cached state of a saga
     UpdateCachedState(SagaUpdateCacheData),
 }
 
-/** See [`SecExecMsg::SagaGet`] */
-/* TODO-cleanup commonize with the client's SagaGet */
+/// See [`SecExecMsg::SagaGet`]
+// TODO-cleanup commonize with the client's SagaGet
 #[derive(Debug)]
 struct SagaGetData {
-    /** response channel */
+    /// response channel
     ack_tx: oneshot::Sender<Result<SagaView, ()>>,
-    /** saga being updated */
+    /// saga being updated
     saga_id: SagaId,
 }
 
-/** See [`SecExecMsg::LogEvent`] */
+/// See [`SecExecMsg::LogEvent`]
 #[derive(Debug)]
 struct SagaLogEventData {
-    /** response channel */
+    /// response channel
     ack_tx: oneshot::Sender<()>,
-    /** event to be recorded to the saga log */
+    /// event to be recorded to the saga log
     event: SagaNodeEvent,
 }
 
-/** See [`SecExecMsg::UpdateCachedState`] */
+/// See [`SecExecMsg::UpdateCachedState`]
 #[derive(Debug)]
 struct SagaUpdateCacheData {
-    /** response channel */
+    /// response channel
     ack_tx: oneshot::Sender<()>,
-    /** saga being updated */
+    /// saga being updated
     saga_id: SagaId,
-    /** updated state */
+    /// updated state
     updated_state: SagaCachedState,
 }
 
-/*
- * SEC server side (background task)
- */
+// SEC server side (background task)
 
-/**
- * The `Sec` (Saga Execution Coordinator) is responsible for tracking and
- * running sagas
- *
- * Steno consumers create this via [`sec()`].
- */
+/// The `Sec` (Saga Execution Coordinator) is responsible for tracking and
+/// running sagas
+///
+/// Steno consumers create this via [`sec()`].
 struct Sec {
     log: slog::Logger,
     sagas: BTreeMap<SagaId, Saga>,
@@ -778,30 +714,28 @@ struct Sec {
 }
 
 impl Sec {
-    /** Body of the SEC's task */
+    /// Body of the SEC's task
     async fn run(mut self) {
-        /*
-         * Until we're asked to shutdown, wait for any sagas to finish or for
-         * messages to be received on the command channel.
-         *
-         * It's important to avoid waiting for any Futures to complete in the
-         * body of this loop aside from those that we're explicitly selecting
-         * on.  Bad things can happen if such a Future were to block on some
-         * operation that requires the loop in order to proceed.  For example,
-         * the Futures generated by cmd_saga_get() and cmd_saga_list() both
-         * block on the SagaExecutor, which can in turn block on the Sec in
-         * order to write log entries to the SecStore.  It's critical that we're
-         * able to respond to requests from the SagaExecutor to write log
-         * entries to the SecStore even when we're blocked on that SagaExecutor
-         * to fetch its status.  As much as possible, any time the Sec needs to
-         * do async work, that should be wrapped in a Future that's inserted
-         * into `self.futures`.  That way we can poll on it with all the other
-         * work we have to do.
-         *
-         * Another failure mode to consider is if writes to the SecStore hang.
-         * We still want status requests from the SecClient to complete.  This
-         * is another reason to avoid any sort of blocking in the main loop.
-         */
+        // Until we're asked to shutdown, wait for any sagas to finish or for
+        // messages to be received on the command channel.
+        //
+        // It's important to avoid waiting for any Futures to complete in the
+        // body of this loop aside from those that we're explicitly selecting
+        // on.  Bad things can happen if such a Future were to block on some
+        // operation that requires the loop in order to proceed.  For example,
+        // the Futures generated by cmd_saga_get() and cmd_saga_list() both
+        // block on the SagaExecutor, which can in turn block on the Sec in
+        // order to write log entries to the SecStore.  It's critical that we're
+        // able to respond to requests from the SagaExecutor to write log
+        // entries to the SecStore even when we're blocked on that SagaExecutor
+        // to fetch its status.  As much as possible, any time the Sec needs to
+        // do async work, that should be wrapped in a Future that's inserted
+        // into `self.futures`.  That way we can poll on it with all the other
+        // work we have to do.
+        //
+        // Another failure mode to consider is if writes to the SecStore hang.
+        // We still want status requests from the SecClient to complete.  This
+        // is another reason to avoid any sort of blocking in the main loop.
         info!(&self.log, "SEC running");
         while !self.shutdown || !self.futures.is_empty() {
             tokio::select! {
@@ -864,9 +798,7 @@ impl Sec {
         }
     }
 
-    /*
-     * Dispatch functions for miscellaneous async work
-     */
+    // Dispatch functions for miscellaneous async work
 
     fn dispatch_work(&mut self, step: SecStep) {
         match step {
@@ -883,10 +815,10 @@ impl Sec {
         let exec_tx = self.exec_tx.clone();
         let sec_hdl = SecExecClient { saga_id, exec_tx };
 
-        /* Prepare a channel used to wait for the saga to finish. */
+        // Prepare a channel used to wait for the saga to finish.
         let (done_tx, done_rx) = oneshot::channel();
 
-        /* Create the executor to run this saga. */
+        // Create the executor to run this saga.
         let maybe_exec =
             rec.template_params.into_exec(log.new(o!()), saga_id, sec_hdl);
         if let Err(e) = maybe_exec {
@@ -919,16 +851,14 @@ impl Sec {
             self.do_saga_start(saga_id).unwrap();
         }
 
-        /* Return a Future that the consumer can use to wait for the saga. */
+        // Return a Future that the consumer can use to wait for the saga.
         Sec::client_respond(
             &log,
             ack_tx,
             Ok(async move {
-                /*
-                 * It should not be possible for the receive to fail because the
-                 * other side will not be closed while the saga is still
-                 * running.
-                 */
+                // It should not be possible for the receive to fail because the
+                // other side will not be closed while the saga is still
+                // running.
                 done_rx.await.unwrap_or_else(|_| {
                     panic!("failed to wait for saga to finish")
                 })
@@ -1014,9 +944,7 @@ impl Sec {
         }
     }
 
-    /*
-     * Dispatch functions for consumer client messages
-     */
+    // Dispatch functions for consumer client messages
 
     fn dispatch_client_message(&mut self, message: SecClientMsg) {
         match message {
@@ -1078,7 +1006,7 @@ impl Sec {
             "saga_id" => saga_id.to_string(),
             "saga_name" => dag.saga_name.to_string(),
         ));
-        /* TODO-log Figure out the way to log JSON objects to a JSON drain */
+        // TODO-log Figure out the way to log JSON objects to a JSON drain
         // TODO(AJS) - Get rid of this unwrap?
         let serialized_dag = serde_json::to_value(&dag)
             .map_err(ActionError::new_serialize)
@@ -1088,9 +1016,7 @@ impl Sec {
              "dag" => serde_json::to_string(&serialized_dag).unwrap()
         );
 
-        /*
-         * Before doing anything else, create a persistent record for this saga.
-         */
+        // Before doing anything else, create a persistent record for this saga.
         let saga_create = SagaCreateParams {
             id: saga_id,
             name: dag.saga_name.clone(),
@@ -1135,7 +1061,7 @@ impl Sec {
             "saga_id" => saga_id.to_string(),
             "saga_name" => dag.saga_name.to_string(),
         ));
-        /* TODO-log Figure out the way to log JSON objects to a JSON drain */
+        // TODO-log Figure out the way to log JSON objects to a JSON drain
         // TODO(AJS) - Get rid of this unwrap?
         let serialized_dag = serde_json::to_value(&dag)
             .map_err(ActionError::new_serialize)
@@ -1161,14 +1087,12 @@ impl Sec {
         limit: NonZeroU32,
     ) {
         trace!(&self.log, "saga_list");
-        /* TODO-cleanup */
+        // TODO-cleanup
         let log = self.log.new(o!());
 
-        /*
-         * We always expect to be able to go from NonZeroU32 to usize.  This
-         * would only not be true on systems with usize < 32 bits, which seems
-         * an unlikely target for us.
-         */
+        // We always expect to be able to go from NonZeroU32 to usize.  This
+        // would only not be true on systems with usize < 32 bits, which seems
+        // an unlikely target for us.
         let limit = usize::try_from(limit.get()).unwrap();
         let futures = match marker {
             None => self
@@ -1200,12 +1124,10 @@ impl Sec {
         );
     }
 
-    /*
-     * TODO-cleanup We should define a useful error type for the SEC.  This
-     * function can only produce a NotFound, and we use `()` just to
-     * communicate that there's only one kind of error here (so that the caller
-     * can produce an appropriate NotFound instead of a generic error).
-     */
+    // TODO-cleanup We should define a useful error type for the SEC.  This
+    // function can only produce a NotFound, and we use `()` just to
+    // communicate that there's only one kind of error here (so that the caller
+    // can produce an appropriate NotFound instead of a generic error).
     fn cmd_saga_get(
         &self,
         ack_tx: oneshot::Sender<Result<SagaView, ()>>,
@@ -1270,17 +1192,13 @@ impl Sec {
     }
 
     fn cmd_shutdown(&mut self) {
-        /*
-         * TODO We probably want to stop executing any sagas that are running at
-         * this point.
-         */
+        // TODO We probably want to stop executing any sagas that are running at
+        // this point.
         info!(&self.log, "initiating shutdown");
         self.shutdown = true;
     }
 
-    /*
-     * Dispatch functions for SagaExecutor messages
-     */
+    // Dispatch functions for SagaExecutor messages
 
     fn dispatch_exec_message(&mut self, exec_message: SecExecMsg) {
         let log = self.log.new(o!());
@@ -1347,9 +1265,7 @@ impl Sec {
     }
 }
 
-/**
- * Represents the internal state of a saga in the [`Sec`]
- */
+/// Represents the internal state of a saga in the [`Sec`]
 struct Saga {
     id: SagaId,
     log: slog::Logger,
@@ -1359,55 +1275,52 @@ struct Saga {
 
 #[derive(Debug)]
 pub enum SagaRunState {
-    /** Saga is ready to be run */
+    /// Saga is ready to be run
     Ready {
-        /** Handle to executor (for status, etc.) */
+        /// Handle to executor (for status, etc.)
         exec: Arc<dyn SagaExecManager>,
-        /** Notify when the saga is done */
+        /// Notify when the saga is done
         waiter: oneshot::Sender<SagaResult>,
     },
-    /** Saga is currently running */
+    /// Saga is currently running
     Running {
-        /** Handle to executor (for status, etc.) */
+        /// Handle to executor (for status, etc.)
         exec: Arc<dyn SagaExecManager>,
-        /** Notify when the saga is done */
+        /// Notify when the saga is done
         waiter: oneshot::Sender<SagaResult>,
     },
-    /** Saga has finished */
+    /// Saga has finished
     Done {
-        /** Final execution status */
+        /// Final execution status
         status: SagaExecStatus,
-        /** Overall saga result */
+        /// Overall saga result
         result: SagaResult,
     },
 }
 
-/**
- * Describes the next step that an SEC needs to take in order to process a
- * command, execute a saga, or any other asynchronous work
- *
- * This provides a uniform interface that can be processed in the body of the
- * SEC loop.
- *
- * In some cases, it would seem clearer to write straight-line async code to
- * handle a complete client request.  However, that code would wind up borrowing
- * the Sec (sometimes mutably) for the duration of async work.  It's important
- * to avoid that here in order to avoid deadlock or blocking all operations in
- * pathological conditions (e.g., when writes to the database hang).
- */
+/// Describes the next step that an SEC needs to take in order to process a
+/// command, execute a saga, or any other asynchronous work
+///
+/// This provides a uniform interface that can be processed in the body of the
+/// SEC loop.
+///
+/// In some cases, it would seem clearer to write straight-line async code to
+/// handle a complete client request.  However, that code would wind up
+/// borrowing the Sec (sometimes mutably) for the duration of async work.  It's
+/// important to avoid that here in order to avoid deadlock or blocking all
+/// operations in pathological conditions (e.g., when writes to the database
+/// hang).
 enum SecStep {
-    /** Start tracking a new saga, either as part of "create" or "resume"  */
+    /// Start tracking a new saga, either as part of "create" or "resume"
     SagaInsert(SagaInsertData),
 
-    /** A saga has just finished. */
+    /// A saga has just finished.
     SagaDone(SagaDoneData),
 }
 
-/** Data associated with [`SecStep::SagaInsert`] */
-/*
- * TODO-cleanup This could probably be commonized with a struct that makes up
- * the body of the CreateSaga message.
- */
+/// Data associated with [`SecStep::SagaInsert`]
+// TODO-cleanup This could probably be commonized with a struct that makes up
+// the body of the CreateSaga message.
 struct SagaInsertData {
     log: slog::Logger,
     saga_id: SagaId,
@@ -1418,7 +1331,7 @@ struct SagaInsertData {
     autostart: bool,
 }
 
-/** Data associated with [`SecStep::SagaDone`] */
+/// Data associated with [`SecStep::SagaDone`]
 struct SagaDoneData {
     saga_id: SagaId,
     result: SagaResult,

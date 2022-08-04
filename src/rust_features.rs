@@ -1,10 +1,6 @@
-/*!
- * Backports of useful unstable Rust features.
- */
+//! Backports of useful unstable Rust features.
 
-/*
- * feature(option_expect_none)
- */
+// feature(option_expect_none)
 pub trait ExpectNone {
     fn expect_none(self, message: &'static str);
 }

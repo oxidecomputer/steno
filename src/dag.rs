@@ -38,7 +38,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
-/** Unique identifier for a Saga (an execution of a saga template) */
+/// Unique identifier for a Saga (an execution of a saga template)
 #[derive(
     Clone,
     Copy,
@@ -54,13 +54,11 @@ use uuid::Uuid;
 pub struct SagaId(pub Uuid);
 // TODO-cleanup figure out how to use custom_derive here?
 NewtypeDebug! { () pub struct SagaId(Uuid); }
-/*
- * TODO-design In the Oxide consumer, we probably want to have the serialized
- * form of ids have a prefix describing the type.  This seems consumer-specific,
- * though.  Is there a good way to do support that?  Maybe the best way to do
- * this is to have the consumer have their own enum or trait that impls Display
- * using the various ids provided by consumers.
- */
+// TODO-design In the Oxide consumer, we probably want to have the serialized
+// form of ids have a prefix describing the type.  This seems consumer-specific,
+// though.  Is there a good way to do support that?  Maybe the best way to do
+// this is to have the consumer have their own enum or trait that impls Display
+// using the various ids provided by consumers.
 NewtypeDisplay! { () pub struct SagaId(Uuid); }
 NewtypeFrom! { () pub struct SagaId(Uuid); }
 
@@ -343,9 +341,9 @@ pub struct SagaDag {
     /// the actual DAG representation
     ///
     /// Unlike [`Dag`], [`SagaDag`]'s graph can contain any type of [`Node`].
-    /// There is always exactly one [`InternalNode::Start`] node and exactly one
-    /// [`InternalNode::End`] node.  The graph can contain subsagas, which are
-    /// always bracketed by [`InternalNode::SubsagaStart`] and
+    /// There is always exactly one [`InternalNode::Start`] node and exactly
+    /// one [`InternalNode::End`] node.  The graph can contain subsagas,
+    /// which are always bracketed by [`InternalNode::SubsagaStart`] and
     /// [`InternalNode::SubsagaEnd`] nodes.
     pub(crate) graph: Graph<InternalNode, ()>,
     /// the index of the [`InternalNode::Start`] node for this Saga
@@ -445,12 +443,12 @@ pub struct Dag {
     ///
     /// This graph does *not* contain a [`InternalNode::Start`] or
     /// [`InternalNode::End`] node.  Those only make sense for `Dag`s that will
-    /// become top-level sagas (as opposed to subsagas).  Instead, we keep track
-    /// of the first group of DAG (root nodes) and the last group of DAG nodes
-    /// (leaf nodes).  Later, we'll wrap this `Dag` in either [`SagaDag`] (for
-    /// use as a top-level saga), in which case we'll add the start and end
-    /// nodes, or we'll use it as a subsaga, in which case we'll add
-    /// SubsagaStart and SubsagaEnd nodes.
+    /// become top-level sagas (as opposed to subsagas).  Instead, we keep
+    /// track of the first group of DAG (root nodes) and the last group of
+    /// DAG nodes (leaf nodes).  Later, we'll wrap this `Dag` in either
+    /// [`SagaDag`] (for use as a top-level saga), in which case we'll add
+    /// the start and end nodes, or we'll use it as a subsaga, in which
+    /// case we'll add SubsagaStart and SubsagaEnd nodes.
     graph: Graph<InternalNode, ()>,
 
     /// the initial nodes (root nodes) of the DAG
@@ -522,7 +520,7 @@ enum DagBuilderErrorKind {
 
     #[error(
         "subsaga node {0:?} has parameters that come from node {1:?}, but it \
-        does not depend on any such node"
+         does not depend on any such node"
     )]
     /// A subsaga was appended whose parameters were supposed to come from a
     /// node that does not exist or that the subsaga does not depend on.
@@ -839,8 +837,8 @@ mod test {
                 ));
                 assert_eq!(
                     error.to_string(),
-                    "building saga \"test-saga\": \
-                    saga must end with exactly one node"
+                    "building saga \"test-saga\": saga must end with exactly \
+                     one node"
                 );
             }
         };
@@ -870,8 +868,8 @@ mod test {
         assert!(matches!(error.kind, DagBuilderErrorKind::EmptyStage));
         assert_eq!(
             error.to_string(),
-            "building saga \"test-saga\": \
-            attempted to append 0 nodes in parallel"
+            "building saga \"test-saga\": attempted to append 0 nodes in \
+             parallel"
         );
     }
 
@@ -889,8 +887,8 @@ mod test {
         );
         assert_eq!(
             error.to_string(),
-            "building saga \"test-saga\": \
-            name was used multiple times in the same Dag: \"a\""
+            "building saga \"test-saga\": name was used multiple times in the \
+             same Dag: \"a\""
         );
 
         // error case: a DAG that duplicates names (indirect ancestor)
@@ -954,9 +952,9 @@ mod test {
         );
         assert_eq!(
             error.to_string(),
-            "building saga \"test-saga\": \
-            subsaga node \"b\" has parameters that come from node \"barf\", \
-            but it does not depend on any such node"
+            "building saga \"test-saga\": subsaga node \"b\" has parameters \
+             that come from node \"barf\", but it does not depend on any such \
+             node"
         );
 
         // error case: subsaga depends on params node that doesn't exist

@@ -1,6 +1,4 @@
-/*!
- * Common code shared by examples
- */
+//! Common code shared by examples
 
 use crate::ActionContext;
 use crate::ActionError;
@@ -17,30 +15,28 @@ use serde::Serialize;
 use std::sync::Arc;
 use thiserror::Error;
 
-/*
- * Demo provision saga:
- *
- *          create instance (database)
- *              |  |  |
- *       +------+  +  +-------------+
- *       |         |                |
- *       v         v                v
- *    alloc IP   create volume    pick server
- *       |         |                |
- *       +------+--+                v
- *              |             allocate server resources
- *              |                   |
- *              +-------------------+
- *              |
- *              v
- *          configure instance (server)
- *              |
- *              v
- *          attach volume
- *              |
- *              v
- *          boot instance
- */
+// Demo provision saga:
+//
+//          create instance (database)
+//              |  |  |
+//       +------+  +  +-------------+
+//       |         |                |
+//       v         v                v
+//    alloc IP   create volume    pick server
+//       |         |                |
+//       +------+--+                v
+//              |             allocate server resources
+//              |                   |
+//              +-------------------+
+//              |
+//              v
+//          configure instance (server)
+//              |
+//              v
+//          attach volume
+//              |
+//              v
+//          boot instance
 
 #[doc(hidden)]
 #[derive(Debug)]
@@ -86,7 +82,7 @@ struct ServerAllocResult {
     server_id: u64,
 }
 
-/* TODO-cleanup can we implement this generically? */
+// TODO-cleanup can we implement this generically?
 impl From<ExampleError> for ActionError {
     fn from(t: ExampleError) -> ActionError {
         ActionError::action_failed(t)
@@ -248,8 +244,8 @@ async fn demo_prov_instance_create(
         sgctx.node_label(),
         params.instance_name
     );
-    /* exercise saga parameters */
-    /* make up an instance ID */
+    // exercise saga parameters
+    // make up an instance ID
     let instance_id = 1211u64;
     Ok(instance_id)
 }
@@ -258,10 +254,10 @@ async fn demo_prov_vpc_alloc_ip(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<String> {
     eprintln!("running action: {}", sgctx.node_label());
-    /* exercise using some data from a previous node */
+    // exercise using some data from a previous node
     let instance_id = sgctx.lookup::<u64>("instance_id")?;
     assert_eq!(instance_id, 1211);
-    /* make up an IP (simulate allocation) */
+    // make up an IP (simulate allocation)
     let ip = String::from("10.120.121.122");
     Ok(ip)
 }
@@ -270,9 +266,9 @@ async fn demo_prov_vpc_alloc_ip(
 async fn demo_prov_server_pick(sgctx: SagaExampleContext) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
     let params = sgctx.saga_params::<ExampleSubsagaParams>()?;
-    /* exercise subsaga parameters */
+    // exercise subsaga parameters
     assert_eq!(params.number_of_things, 1);
-    /* make up ("allocate") a new server id */
+    // make up ("allocate") a new server id
     let server_id = 1212u64;
     Ok(server_id)
 }
@@ -284,12 +280,12 @@ async fn demo_prov_server_reserve(
     eprintln!("running action: {}", sgctx.node_label());
     let params = sgctx.saga_params::<ExampleSubsagaParams>()?;
 
-    /* exercise subsaga parameters */
+    // exercise subsaga parameters
     assert_eq!(params.number_of_things, 1);
-    /* exercise using data from previous nodes */
+    // exercise using data from previous nodes
     let server_id = sgctx.lookup::<u64>("server_id")?;
     assert_eq!(server_id, 1212);
-    /* package this up for downstream consumers */
+    // package this up for downstream consumers
     Ok(ServerAllocResult { server_id })
 }
 
@@ -297,9 +293,9 @@ async fn demo_prov_volume_create(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<u64> {
     eprintln!("running action: {}", sgctx.node_label());
-    /* exercise using data from previous nodes */
+    // exercise using data from previous nodes
     assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
-    /* make up ("allocate") a volume id */
+    // make up ("allocate") a volume id
     let volume_id = 1213u64;
     Ok(volume_id)
 }
@@ -308,7 +304,7 @@ async fn demo_prov_instance_configure(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
-    /* exercise using data from previous nodes */
+    // exercise using data from previous nodes
     assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
 
     let params = sgctx.saga_params::<ExampleParams>()?;
@@ -325,7 +321,7 @@ async fn demo_prov_volume_attach(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
-    /* exercise using data from previous nodes */
+    // exercise using data from previous nodes
     assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
 
@@ -339,11 +335,12 @@ async fn demo_prov_instance_boot(
     sgctx: SagaExampleContext,
 ) -> ExFuncResult<()> {
     eprintln!("running action: {}", sgctx.node_label());
-    /* exercise using data from previous nodes */
+    // exercise using data from previous nodes
     assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
 
-    // We know there is only one instance of the subsaga that created a server id
+    // We know there is only one instance of the subsaga that created a server
+    // id
     assert_eq!(
         sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id,
         1212

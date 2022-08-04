@@ -58,8 +58,8 @@ async fn unregistered_action() {
     if let Err(error) = result {
         assert_eq!(
             format!("{:#}", error),
-            "validating saga \"my-saga\": \
-            action for node \"my_node\" not registered: \"my_action\""
+            "validating saga \"my-saga\": action for node \"my_node\" not \
+             registered: \"my_action\""
         );
     } else {
         panic!("expected failure to create saga with unregistered action");

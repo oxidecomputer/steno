@@ -1,6 +1,4 @@
-/*!
- * Command-line tool for demo'ing saga interfaces
- */
+//! Command-line tool for demo'ing saga interfaces
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -59,10 +57,8 @@ enum Demo {
     },
 }
 
-/*
- * We use a hardcoded SagaId for ease of automated testing. See the note in
- * demo_prov_server_alloc().
- */
+// We use a hardcoded SagaId for ease of automated testing. See the note in
+// demo_prov_server_alloc().
 fn make_saga_id() -> SagaId {
     SagaId(Uuid::parse_str("049b2522-308d-442e-bc65-9bfaef863597").unwrap())
 }
@@ -103,9 +99,7 @@ fn make_example_action_registry() -> Arc<ActionRegistry<ExampleSagaType>> {
     Arc::new(registry)
 }
 
-/*
- * "dot" subcommand
- */
+// "dot" subcommand
 
 async fn cmd_dot() -> Result<(), anyhow::Error> {
     let params = ExampleParams {
@@ -117,9 +111,7 @@ async fn cmd_dot() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/*
- * "info" subcommand
- */
+// "info" subcommand
 
 async fn cmd_info() -> Result<(), anyhow::Error> {
     let log = make_log();
@@ -147,9 +139,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/*
- * "print-log" subcommand
- */
+// "print-log" subcommand
 
 #[derive(Debug, StructOpt)]
 struct PrintLogArgs {
@@ -166,9 +156,7 @@ async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/*
- * "run" subcommand
- */
+// "run" subcommand
 
 #[derive(Debug, StructOpt)]
 struct RunArgs {
