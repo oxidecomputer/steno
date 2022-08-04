@@ -1,7 +1,5 @@
-/*!
- * Smoke tests for steno.  These aren't close to exhaustive, but tests that it's
- * not completely broken.
- */
+//! Smoke tests for steno.  These aren't close to exhaustive, but tests that it's
+//! not completely broken.
 
 use expectorate::assert_contents;
 use std::env::current_exe;
@@ -11,10 +9,8 @@ use subprocess::Exec;
 use subprocess::Redirection;
 
 fn example_bin() -> PathBuf {
-    /*
-     * This is unfortunate, but it's the best way I know to run one of the
-     * examples out of our project.
-     */
+    // This is unfortunate, but it's the best way I know to run one of the
+    // examples out of our project.
     let mut my_path = current_exe().expect("failed to find test program");
     my_path.pop();
     assert_eq!(my_path.file_name().unwrap(), "deps");
@@ -77,18 +73,18 @@ fn cmd_run_error() {
 
 #[test]
 fn cmd_run_recover() {
-    /* Do a normal run and save the log so we can try recovering from it. */
+    // Do a normal run and save the log so we can try recovering from it.
     let log = run_example("recover1", |exec| {
         exec.arg("run").arg("--dump-to=-").arg("--quiet")
     });
 
-    /* First, try recovery without having changed anything. */
+    // First, try recovery without having changed anything.
     let recovery_done = run_example("recover2", |exec| {
         exec.arg("run").arg("--recover-from=-").stdin(log.as_str())
     });
     assert_contents("tests/test_smoke_run_recover_done.out", &recovery_done);
 
-    /* Now try lopping off the last handful of records so there's work to do. */
+    // Now try lopping off the last handful of records so there's work to do.
     let mut log_parsed: SagaSerialized =
         serde_json::from_str(&log).expect("failed to parse generated log");
     log_parsed.events.truncate(
@@ -107,7 +103,7 @@ fn cmd_run_recover() {
 
 #[test]
 fn cmd_run_recover_unwind() {
-    /* Do a failed run and save the log so we can try recovering from it. */
+    // Do a failed run and save the log so we can try recovering from it.
     let log = run_example("recover_fail1", |exec| {
         exec.arg("run")
             .arg("--dump-to=-")
@@ -115,7 +111,7 @@ fn cmd_run_recover_unwind() {
             .arg("--inject-error=instance_boot")
     });
 
-    /* First, try recovery without having changed anything. */
+    // First, try recovery without having changed anything.
     let recovery_done = run_example("recover_fail2", |exec| {
         exec.arg("run").arg("--recover-from=-").stdin(log.as_str())
     });
@@ -124,7 +120,7 @@ fn cmd_run_recover_unwind() {
         &recovery_done,
     );
 
-    /* Now try lopping off the last handful of records so there's work to do. */
+    // Now try lopping off the last handful of records so there's work to do.
     let mut log_parsed: SagaSerialized =
         serde_json::from_str(&log).expect("failed to parse generated log");
     log_parsed.events.truncate(

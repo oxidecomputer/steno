@@ -38,7 +38,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
-/** Unique identifier for a Saga (an execution of a saga template) */
+/// Unique identifier for a Saga (an execution of a saga template)
 #[derive(
     Clone,
     Copy,
@@ -54,13 +54,11 @@ use uuid::Uuid;
 pub struct SagaId(pub Uuid);
 // TODO-cleanup figure out how to use custom_derive here?
 NewtypeDebug! { () pub struct SagaId(Uuid); }
-/*
- * TODO-design In the Oxide consumer, we probably want to have the serialized
- * form of ids have a prefix describing the type.  This seems consumer-specific,
- * though.  Is there a good way to do support that?  Maybe the best way to do
- * this is to have the consumer have their own enum or trait that impls Display
- * using the various ids provided by consumers.
- */
+// TODO-design In the Oxide consumer, we probably want to have the serialized
+// form of ids have a prefix describing the type.  This seems consumer-specific,
+// though.  Is there a good way to do support that?  Maybe the best way to do
+// this is to have the consumer have their own enum or trait that impls Display
+// using the various ids provided by consumers.
 NewtypeDisplay! { () pub struct SagaId(Uuid); }
 NewtypeFrom! { () pub struct SagaId(Uuid); }
 

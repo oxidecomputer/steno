@@ -19,15 +19,12 @@
 //!
 //! This crate is necessarily somewhat complex to use.  **For a detailed,
 //! documented example, see examples/trip.rs.**
-//!
 
 #![deny(elided_lifetimes_in_paths)]
-/*
- * We disable the warning for unstable name collisions because we deliberately
- * have some conflicts in rust_features.rs (corresponding to backports of
- * unstable features).  If and when these features are stabilized, we should see
- * warnings that our backported versions are unused and we can remove them.
- */
+// We disable the warning for unstable name collisions because we deliberately
+// have some conflicts in rust_features.rs (corresponding to backports of
+// unstable features).  If and when these features are stabilized, we should see
+// warnings that our backported versions are unused and we can remove them.
 #![allow(unstable_name_collisions)]
 
 mod dag;
@@ -41,12 +38,10 @@ mod saga_log;
 mod sec;
 mod store;
 
-/*
- * TODO-cleanup The example_provision stuff should probably be in a separate
- * crate that depends on "steno".  That would ensure it only uses public
- * interfaces.  However, the "steno" crate wants to have an example that uses
- * this crate, hence our problem.
- */
+// TODO-cleanup The example_provision stuff should probably be in a separate
+// crate that depends on "steno".  That would ensure it only uses public
+// interfaces.  However, the "steno" crate wants to have an example that uses
+// this crate, hence our problem.
 pub use example_provision::load_example_actions;
 pub use example_provision::make_example_provision_dag;
 pub use example_provision::ExampleContext;
@@ -92,12 +87,10 @@ pub use store::SagaCachedState;
 pub use store::SagaCreateParams;
 pub use store::SecStore;
 
-/*
- * TODO-cleanup This ought not to be exposed.  It's here because we expose
- * SagaTemplateGeneric, which is important, and it has a function that uses this
- * type.  This ought to be a sealed trait where this function is private or
- * something.
- */
+// TODO-cleanup This ought not to be exposed.  It's here because we expose
+// SagaTemplateGeneric, which is important, and it has a function that uses this
+// type.  This ought to be a sealed trait where this function is private or
+// something.
 pub use sec::SecExecClient;
 
 #[macro_use]
