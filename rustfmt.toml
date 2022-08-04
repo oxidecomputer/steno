@@ -4,9 +4,3 @@
 max_width = 80
 use_small_heuristics = "max"
 edition = "2018"
-
-unstable_features = true
-normalize_comments = true
-format_strings = true
-wrap_comments = true
-comment_width = 80
