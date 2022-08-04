@@ -18,3 +18,4 @@ tag-message = "release {{crate_name}} {{version}}"
 tag-prefix=""
 dev-version = true
 dev-version-ext = "dev"
+allow-branch = [ "main" ]
