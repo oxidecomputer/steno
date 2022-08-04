@@ -23,14 +23,15 @@ pub trait SagaType: Debug + 'static {
     /// Type for the consumer's context object
     ///
     /// When beginning execution of a saga with
-    /// [`crate::SecClient::saga_create()`] or resuming a previous execution with
-    /// [`crate::SecClient::saga_resume()`], consumers provide a context object
-    /// with this type.  This object is not persistent.  Rather, it provides
-    /// programming interfaces the consumer wants available from within actions.
-    /// For example, this could include HTTP clients that will be used by the
-    /// action to make requests to dependent services.  This object is made
-    /// available to actions via [`crate::ActionContext::user_data()`].  There's
-    /// one context for the life of each saga's execution.
+    /// [`crate::SecClient::saga_create()`] or resuming a previous execution
+    /// with [`crate::SecClient::saga_resume()`], consumers provide a
+    /// context object with this type.  This object is not persistent.
+    /// Rather, it provides programming interfaces the consumer wants
+    /// available from within actions. For example, this could include HTTP
+    /// clients that will be used by the action to make requests to
+    /// dependent services.  This object is made available to actions via
+    /// [`crate::ActionContext::user_data()`].  There's one context for the
+    /// life of each saga's execution.
     type ExecContextType: Debug + Send + Sync + 'static;
 }
 
@@ -70,8 +71,8 @@ pub type UndoResult = Result<(), anyhow::Error>;
 ///
 /// Each node in a saga graph is represented with some kind of `Action`,
 /// which provides entry points to asynchronously execute an action and its
-/// corresponding undo action.  A saga is essentially a directed acyclic graph of
-/// these actions with dependencies between them.  Each action consumes an
+/// corresponding undo action.  A saga is essentially a directed acyclic graph
+/// of these actions with dependencies between them.  Each action consumes an
 /// [`ActionContext`] and asynchronously produces an [`ActionResult`].  The
 /// primary implementor for most consumers is [`crate::ActionFunc`].
 ///
@@ -90,19 +91,19 @@ pub trait Action<UserType: SagaType>: Debug + Send + Sync {
     /// As an example, generating a UUID to represent an object is a common saga
     /// action: if called repeatedly, it may generate different results, but it
     /// has no side effects on the rest of the system. Similarly, using a
-    /// generated UUID in a subsequent action to create an object may help ensure
-    /// that the side effects appear the same, regardless of how many times the
-    /// action has been invoked.
+    /// generated UUID in a subsequent action to create an object may help
+    /// ensure that the side effects appear the same, regardless of how many
+    /// times the action has been invoked.
     ///
     /// Actions should be very careful in using interfaces outside of
     /// [`ActionContext`] -- we want them to be as self-contained as possible to
     /// ensure idempotence and to minimize versioning issues.
     ///
-    /// On success, this function produces a serialized output.  This output will
-    /// be stored persistently, keyed by the _name_ of the current saga node.
-    /// Subsequent stages can access this data with [`ActionContext::lookup`].
-    /// This is the _only_ supported means of sharing state across actions within
-    /// a saga.
+    /// On success, this function produces a serialized output.  This output
+    /// will be stored persistently, keyed by the _name_ of the current saga
+    /// node. Subsequent stages can access this data with
+    /// [`ActionContext::lookup`]. This is the _only_ supported means of
+    /// sharing state across actions within a saga.
     ///
     /// The output of the last node in the DAG becomes the output of the saga.
     fn do_it(

@@ -33,13 +33,13 @@ pub trait SecStore: fmt::Debug + Send + Sync {
     /// Update the cached runtime state of the saga
     ///
     /// Steno invokes this function when the saga has reached one of the states
-    /// described by [`SagaCachedState`] (like "Done").  This allows consumers to
-    /// persistently record this information for easy access.  This step is not
-    /// strictly required for correctness, since the saga log contains all the
-    /// information needed to determine this state.  But by recording when a saga
-    /// has finished, for example, the consumer can avoid having to read the
-    /// saga's log altogether when it next starts up since there's no need to
-    /// recover the saga.
+    /// described by [`SagaCachedState`] (like "Done").  This allows consumers
+    /// to persistently record this information for easy access.  This step
+    /// is not strictly required for correctness, since the saga log
+    /// contains all the information needed to determine this state.  But by
+    /// recording when a saga has finished, for example, the consumer can
+    /// avoid having to read the saga's log altogether when it next starts
+    /// up since there's no need to recover the saga.
     async fn saga_update(&self, id: SagaId, update: SagaCachedState);
 }
 

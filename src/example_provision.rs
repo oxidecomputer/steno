@@ -339,7 +339,8 @@ async fn demo_prov_instance_boot(
     assert_eq!(sgctx.lookup::<u64>("instance_id")?, 1211);
     assert_eq!(sgctx.lookup::<u64>("volume_id")?, 1213);
 
-    // We know there is only one instance of the subsaga that created a server id
+    // We know there is only one instance of the subsaga that created a server
+    // id
     assert_eq!(
         sgctx.lookup::<ServerAllocResult>("server_alloc")?.server_id,
         1212

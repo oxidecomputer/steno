@@ -1,5 +1,5 @@
-//! Smoke tests for steno.  These aren't close to exhaustive, but tests that it's
-//! not completely broken.
+//! Smoke tests for steno.  These aren't close to exhaustive, but tests that
+//! it's not completely broken.
 
 use expectorate::assert_contents;
 use std::env::current_exe;

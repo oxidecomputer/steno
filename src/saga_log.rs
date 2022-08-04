@@ -112,8 +112,8 @@ impl SagaNodeEventType {
 /// saga executor uses this status to determine what to do next.  We also
 /// maintain this for each SagaLog to identify illegal transitions at runtime.
 ///
-/// A node's status is very nearly identified by the type of the last event seen.
-/// It's cleaner to have a first-class summary here.
+/// A node's status is very nearly identified by the type of the last event
+/// seen. It's cleaner to have a first-class summary here.
 #[derive(Clone, Debug)]
 pub enum SagaNodeLoadStatus {
     /// The action never started running
@@ -203,10 +203,11 @@ impl SagaLog {
             // TODO-cleanup Is there a better way to do this?  We want to sort
             // by the event type, where event types are compared by the order
             // they're defined in SagaEventType.  We could almost use derived
-            // PartialOrd and PartialEq implementations for SagaEventType, except
-            // that one variant has a payload that does _not_ necessarily
-            // implement PartialEq or PartialOrd.  It seems like that means we
-            // have to implement this by hand.
+            // PartialOrd and PartialEq implementations for SagaEventType,
+            // except that one variant has a payload that does _not_
+            // necessarily implement PartialEq or PartialOrd.  It
+            // seems like that means we have to implement this by
+            // hand.
             SagaNodeEventType::Started => 1,
             SagaNodeEventType::Succeeded(_) => 2,
             SagaNodeEventType::Failed(_) => 3,

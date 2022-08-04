@@ -16,13 +16,14 @@ use thiserror::Error;
 ///
 /// You can use your own error type with [`ActionError`].  As long as it meets
 /// the requirements of [`ActionData`], you can wrap your error in an
-/// [`ActionError::ActionFailed`] variant using [`ActionError::action_failed()`].
-/// Given an [`ActionError::ActionFailed`] variant, you can get your specific
-/// type back out again using [`ActionError::convert()`].
+/// [`ActionError::ActionFailed`] variant using
+/// [`ActionError::action_failed()`]. Given an [`ActionError::ActionFailed`]
+/// variant, you can get your specific type back out again using
+/// [`ActionError::convert()`].
 ///
 /// Note that the conversion back to your specific error type can fail!  This
-/// looks like a downcast, but it's not.  `ActionError`s are typically recorded in
-/// the saga log and interpreted later, possibly after a crash and recovery.
+/// looks like a downcast, but it's not.  `ActionError`s are typically recorded
+/// in the saga log and interpreted later, possibly after a crash and recovery.
 /// Whether there was an intervening crash or not, the conversion here
 /// deserializes the error from the log into your custom error type.  This won't
 /// work if your error type is incompatible with the one that was used to

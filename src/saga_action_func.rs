@@ -32,10 +32,10 @@ use std::sync::Arc;
 pub type ActionFuncResult<T, E> = Result<T, E>;
 
 /// Trait that expresses the requirements for async functions to be used with
-/// `ActionFunc`. This exists just to express the relationships between the types
-/// involved in the function, so that they don't have to be repeated everywhere.
-/// You don't need to implement it yourself -- a blanket implementation is
-/// provided.
+/// `ActionFunc`. This exists just to express the relationships between the
+/// types involved in the function, so that they don't have to be repeated
+/// everywhere. You don't need to implement it yourself -- a blanket
+/// implementation is provided.
 pub trait ActionFn<'c, S: SagaType>: Send + Sync + 'static {
     /// Type returned when the future finally resolves.
     type Output;
@@ -68,8 +68,8 @@ pub struct ActionFunc<ActionFuncType, UndoFuncType> {
 }
 
 impl<ActionFuncType, UndoFuncType> ActionFunc<ActionFuncType, UndoFuncType> {
-    /// Construct an [`Action`] from a pair of functions, using `action_func` for
-    /// the action and `undo_func` for the undo action
+    /// Construct an [`Action`] from a pair of functions, using `action_func`
+    /// for the action and `undo_func` for the undo action
     ///
     /// The result is returned as `Arc<dyn Action>` so that it can be used
     /// directly where `Action`s are expected.  (The struct `ActionFunc` has no

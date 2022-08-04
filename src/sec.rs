@@ -1,9 +1,9 @@
 //! Saga Execution Coordinator
 //!
 //! The Saga Execution Coordinator ("SEC") manages the execution of a group of
-//! sagas, providing interfaces for running new sagas, recovering sagas that were
-//! running in a previous lifetime, listing sagas, querying the state of a saga,
-//! and providing some control over sagas (e.g., to inject errors).
+//! sagas, providing interfaces for running new sagas, recovering sagas that
+//! were running in a previous lifetime, listing sagas, querying the state of a
+//! saga, and providing some control over sagas (e.g., to inject errors).
 //!
 //! The implementation is grouped into
 //!
@@ -12,8 +12,8 @@
 //! * an `Sec`: a background task that owns the list of sagas and their overall
 //!   runtime state.  (The detailed runtime state is owned by a separate
 //!   `SagaExecutor` type internally.)
-//! * a number of `SecExecClient` objects, which individual saga executors use to
-//!   communicate back to the Sec (to communicate progress, record persistent
+//! * a number of `SecExecClient` objects, which individual saga executors use
+//!   to communicate back to the Sec (to communicate progress, record persistent
 //!   state, etc.)
 //!
 //! The control flow of these components and their messages is shown in the
@@ -90,10 +90,11 @@ use tokio::sync::oneshot;
 
 /// Maximum number of messages for the SEC that can be queued from the client
 ///
-/// This is very small.  These messages are commands, and the client always waits
-/// for a response.  So it makes little difference to latency or throughput
-/// whether the client waits up front for available buffer space or waits instead
-/// on the response channel (with the request buffered in the queue).
+/// This is very small.  These messages are commands, and the client always
+/// waits for a response.  So it makes little difference to latency or
+/// throughput whether the client waits up front for available buffer space or
+/// waits instead on the response channel (with the request buffered in the
+/// queue).
 const SEC_CLIENT_MAXQ_MESSAGES: usize = 2;
 
 /// Maximum number of messages for the SEC that can be queued from SagaExecutors
@@ -130,8 +131,9 @@ pub fn sec(log: slog::Logger, sec_store: Arc<dyn SecStore>) -> SecClient {
 
 /// Client handle for a Saga Execution Coordinator (SEC)
 ///
-/// This is the interface through which Steno consumers create new sagas, recover
-/// sagas that were created in previous lifetimes, list sagas, and so on.
+/// This is the interface through which Steno consumers create new sagas,
+/// recover sagas that were created in previous lifetimes, list sagas, and so
+/// on.
 #[derive(Debug)]
 pub struct SecClient {
     cmd_tx: mpsc::Sender<SecClientMsg>,
@@ -258,10 +260,10 @@ impl SecClient {
 
     /// Sends `msg` to the SEC and waits for a response on `ack_rx`
     ///
-    /// The SEC is not expected to shut down until we issue the shutdown command,
-    /// which only happens when the consumer has given up ownership of this
-    /// object.  So we can assume that the SEC is still running and that these
-    /// channel operations will not fail.
+    /// The SEC is not expected to shut down until we issue the shutdown
+    /// command, which only happens when the consumer has given up ownership
+    /// of this object.  So we can assume that the SEC is still running and
+    /// that these channel operations will not fail.
     async fn sec_cmd<R>(
         &self,
         ack_rx: oneshot::Receiver<R>,
@@ -1303,10 +1305,11 @@ pub enum SagaRunState {
 /// SEC loop.
 ///
 /// In some cases, it would seem clearer to write straight-line async code to
-/// handle a complete client request.  However, that code would wind up borrowing
-/// the Sec (sometimes mutably) for the duration of async work.  It's important
-/// to avoid that here in order to avoid deadlock or blocking all operations in
-/// pathological conditions (e.g., when writes to the database hang).
+/// handle a complete client request.  However, that code would wind up
+/// borrowing the Sec (sometimes mutably) for the duration of async work.  It's
+/// important to avoid that here in order to avoid deadlock or blocking all
+/// operations in pathological conditions (e.g., when writes to the database
+/// hang).
 enum SecStep {
     /// Start tracking a new saga, either as part of "create" or "resume"
     SagaInsert(SagaInsertData),

@@ -341,9 +341,9 @@ pub struct SagaDag {
     /// the actual DAG representation
     ///
     /// Unlike [`Dag`], [`SagaDag`]'s graph can contain any type of [`Node`].
-    /// There is always exactly one [`InternalNode::Start`] node and exactly one
-    /// [`InternalNode::End`] node.  The graph can contain subsagas, which are
-    /// always bracketed by [`InternalNode::SubsagaStart`] and
+    /// There is always exactly one [`InternalNode::Start`] node and exactly
+    /// one [`InternalNode::End`] node.  The graph can contain subsagas,
+    /// which are always bracketed by [`InternalNode::SubsagaStart`] and
     /// [`InternalNode::SubsagaEnd`] nodes.
     pub(crate) graph: Graph<InternalNode, ()>,
     /// the index of the [`InternalNode::Start`] node for this Saga
@@ -443,12 +443,12 @@ pub struct Dag {
     ///
     /// This graph does *not* contain a [`InternalNode::Start`] or
     /// [`InternalNode::End`] node.  Those only make sense for `Dag`s that will
-    /// become top-level sagas (as opposed to subsagas).  Instead, we keep track
-    /// of the first group of DAG (root nodes) and the last group of DAG nodes
-    /// (leaf nodes).  Later, we'll wrap this `Dag` in either [`SagaDag`] (for
-    /// use as a top-level saga), in which case we'll add the start and end
-    /// nodes, or we'll use it as a subsaga, in which case we'll add
-    /// SubsagaStart and SubsagaEnd nodes.
+    /// become top-level sagas (as opposed to subsagas).  Instead, we keep
+    /// track of the first group of DAG (root nodes) and the last group of
+    /// DAG nodes (leaf nodes).  Later, we'll wrap this `Dag` in either
+    /// [`SagaDag`] (for use as a top-level saga), in which case we'll add
+    /// the start and end nodes, or we'll use it as a subsaga, in which
+    /// case we'll add SubsagaStart and SubsagaEnd nodes.
     graph: Graph<InternalNode, ()>,
 
     /// the initial nodes (root nodes) of the DAG
