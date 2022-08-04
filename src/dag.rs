@@ -520,7 +520,7 @@ enum DagBuilderErrorKind {
 
     #[error(
         "subsaga node {0:?} has parameters that come from node {1:?}, but it \
-        does not depend on any such node"
+         does not depend on any such node"
     )]
     /// A subsaga was appended whose parameters were supposed to come from a
     /// node that does not exist or that the subsaga does not depend on.
@@ -837,8 +837,8 @@ mod test {
                 ));
                 assert_eq!(
                     error.to_string(),
-                    "building saga \"test-saga\": \
-                    saga must end with exactly one node"
+                    "building saga \"test-saga\": saga must end with exactly \
+                     one node"
                 );
             }
         };
@@ -868,8 +868,8 @@ mod test {
         assert!(matches!(error.kind, DagBuilderErrorKind::EmptyStage));
         assert_eq!(
             error.to_string(),
-            "building saga \"test-saga\": \
-            attempted to append 0 nodes in parallel"
+            "building saga \"test-saga\": attempted to append 0 nodes in \
+             parallel"
         );
     }
 
@@ -887,8 +887,8 @@ mod test {
         );
         assert_eq!(
             error.to_string(),
-            "building saga \"test-saga\": \
-            name was used multiple times in the same Dag: \"a\""
+            "building saga \"test-saga\": name was used multiple times in the \
+             same Dag: \"a\""
         );
 
         // error case: a DAG that duplicates names (indirect ancestor)
@@ -952,9 +952,9 @@ mod test {
         );
         assert_eq!(
             error.to_string(),
-            "building saga \"test-saga\": \
-            subsaga node \"b\" has parameters that come from node \"barf\", \
-            but it does not depend on any such node"
+            "building saga \"test-saga\": subsaga node \"b\" has parameters \
+             that come from node \"barf\", but it does not depend on any such \
+             node"
         );
 
         // error case: subsaga depends on params node that doesn't exist

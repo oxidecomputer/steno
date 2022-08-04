@@ -40,8 +40,8 @@ NewtypeFrom! { () pub struct SagaNodeId(u32); }
 #[derive(Debug, Clone, Error)]
 pub enum SagaLogError {
     #[error(
-        "event type {event_type} is illegal with current \
-        load status {current_status:?}"
+        "event type {event_type} is illegal with current load status \
+         {current_status:?}"
     )]
     IllegalEventForState {
         current_status: SagaNodeLoadStatus,
@@ -218,8 +218,8 @@ impl SagaLog {
         for event in events {
             if event.saga_id != saga_id {
                 return Err(anyhow!(
-                    "found an event in the log for a \
-                    different saga ({}) than requested ({})",
+                    "found an event in the log for a different saga ({}) than \
+                     requested ({})",
                     event.saga_id,
                     saga_id,
                 ));

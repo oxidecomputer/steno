@@ -246,8 +246,8 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
                     | NodeExecState::UndoInProgress
                     | NodeExecState::Undone(_) => {
                         panic!(
-                            "already undoing or undone node \
-                            whose child was just now undone"
+                            "already undoing or undone node whose child was \
+                             just now undone"
                         );
                     }
                 }
@@ -455,8 +455,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                         };
 
                         *node_saga_start.get(&ancestor).expect(
-                            "expected to compute ancestor's \
-                                subsaga start node first",
+                            "expected to compute ancestor's subsaga start \
+                             node first",
                         )
                     }
                 };
@@ -487,9 +487,9 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     live_state.sglog.load_status_for_node(parent.into());
                 if !recovery_validate_parent(parent_status, node_status) {
                     return Err(anyhow!(
-                        "recovery for saga {}: node {:?}: \
-                        load status is \"{:?}\", which is illegal for \
-                        parent load status \"{:?}\"",
+                        "recovery for saga {}: node {:?}: load status is \
+                         \"{:?}\", which is illegal for parent load status \
+                         \"{:?}\"",
                         saga_id,
                         node_id,
                         node_status,
@@ -699,8 +699,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         );
         ensure!(
             nsubsaga_start == nsubsaga_end,
-            "bad saga graph (found {} subsaga start nodes \
-            but {} subsaga end nodes)",
+            "bad saga graph (found {} subsaga start nodes but {} subsaga end \
+             nodes)",
             nsubsaga_start,
             nsubsaga_end
         );
@@ -2251,7 +2251,8 @@ SubsagaStart { saga_name: \"test-subsaga\", params_node_name: \"d\" }
         Constant { name: \"b\", value: Null }
         Constant { name: \"c\", value: Null }
     Constant { name: \"d\", value: Null }
-    SubsagaStart { saga_name: \"test-nested-subsaga\", params_node_name: \"d\" }
+    SubsagaStart { saga_name: \"test-nested-subsaga\", params_node_name: \"d\" \
+                        }
         Constant { name: \"a\", value: Null }
         \"Parallel: \"
             Constant { name: \"b\", value: Null }
@@ -2260,7 +2261,8 @@ SubsagaStart { saga_name: \"test-subsaga\", params_node_name: \"d\" }
     SubsagaEnd { name: \"e\" }
     \"Parallel: \"
         Constant { name: \"f\", value: Null }
-        SubsagaStart { saga_name: \"test-nested-subsaga\", params_node_name: \"e\" }
+        SubsagaStart { saga_name: \"test-nested-subsaga\", params_node_name: \
+                        \"e\" }
             Constant { name: \"a\", value: Null }
             \"Parallel: \"
                 Constant { name: \"b\", value: Null }
@@ -2430,7 +2432,8 @@ mod proptests {
                                 node_name += 1;
                             }
                             NodeDesc::Parallel(_) => panic!(
-                                "Strategy Generation Error: Nested `NodeDesc::Parallel` not allowed!"
+                                "Strategy Generation Error: Nested \
+                                 `NodeDesc::Parallel` not allowed!"
                             ),
                         }
                     }
