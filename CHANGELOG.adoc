@@ -19,6 +19,6 @@ https://github.com/oxidecomputer/steno/compare/v0.2.0\...HEAD[Full list of commi
 
 None.
 
-== 0.2.0 (released 2022-08-04)
+== 0.2.0 (released 2022-08-05)
 
 Changes not documented.

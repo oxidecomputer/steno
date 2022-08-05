@@ -4,7 +4,7 @@ version = "0.2.0-dev"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/oxidecomputer/steno"
-description = "prototype distributed saga implementation"
+description = "distributed saga implementation"
 
 [profile.dev]
 #panic = "abort"
