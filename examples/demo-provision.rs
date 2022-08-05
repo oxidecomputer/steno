@@ -37,6 +37,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 /// Demo saga implementation
 #[derive(Debug, StructOpt)]
+#[structopt(no_version)]
 enum Demo {
     /// Dump a dot (graphviz) representation of the saga graph
     Dot,

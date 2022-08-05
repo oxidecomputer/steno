@@ -1,0 +1,24 @@
+:showtitle:
+:toc: left
+:icons: font
+:toclevels: 1
+
+= Steno Changelog
+
+// WARNING: This file is modified programmatically by `cargo release` as
+// configured in release.toml.  DO NOT change the format of the headers or the
+// list of raw commits.
+
+// cargo-release: next header goes here (do not change this line)
+
+== Unreleased changes (release date TBD)
+
+https://github.com/oxidecomputer/steno/compare/v0.2.0\...HEAD[Full list of commits]
+
+=== Breaking Changes
+
+None.
+
+== 0.2.0 (released 2022-08-05)
+
+Changes not documented.
