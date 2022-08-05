@@ -1,6 +1,6 @@
 [package]
 name = "steno"
-version = "0.2.0-dev"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/oxidecomputer/steno"
