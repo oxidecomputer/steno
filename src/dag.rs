@@ -537,6 +537,13 @@ enum DagBuilderErrorKind {
     EmptyStage,
 }
 
+impl Dag {
+    /// Creates a new [`DagBuilder`] instance.
+    pub fn builder(saga_name: SagaName) -> DagBuilder {
+        DagBuilder::new(saga_name)
+    }
+}
+
 impl DagBuilder {
     /// Begin building a DAG for a saga or subsaga
     pub fn new(saga_name: SagaName) -> DagBuilder {
