@@ -184,6 +184,13 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<SagaDag> {
         "InstanceCreate",
         actions::INSTANCE_CREATE.as_ref(),
     ));
+
+    let subsaga_params = ExampleSubsagaParams { number_of_things: 1 };
+    d.append(Node::constant(
+        "server_alloc_params",
+        serde_json::to_value(subsaga_params).unwrap(),
+    ));
+
     d.append_parallel(vec![
         Node::action(
             "instance_ip",
@@ -195,21 +202,12 @@ pub fn make_example_provision_dag(params: ExampleParams) -> Arc<SagaDag> {
             "VolumeCreate",
             actions::VOLUME_CREATE.as_ref(),
         ),
+        Node::subsaga(
+            "server_alloc",
+            server_alloc_subsaga(),
+            "server_alloc_params",
+        ),
     ]);
-
-    // Take a subsaga spec and add its nodes to the DAG.
-    // XXX-dap TODO-coverage put another node in parallel with the subsaga to
-    // make sure that works.
-    let subsaga_params = ExampleSubsagaParams { number_of_things: 1 };
-    d.append(Node::constant(
-        "server_alloc_params",
-        serde_json::to_value(subsaga_params).unwrap(),
-    ));
-    d.append(Node::subsaga(
-        "server_alloc",
-        server_alloc_subsaga(),
-        "server_alloc_params",
-    ));
 
     // Append nodes that will run after the subsaga completes
     d.append(Node::action(

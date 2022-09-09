@@ -2,9 +2,9 @@
 saga graph: 
 digraph {
     0 [ label = "Action { name: \"instance_id\", label: \"InstanceCreate\", action_name: \"instance_create\" }" ]
-    1 [ label = "Action { name: \"instance_ip\", label: \"VpcAllocIp\", action_name: \"vpc_alloc_ip\" }" ]
-    2 [ label = "Action { name: \"volume_id\", label: \"VolumeCreate\", action_name: \"volume_create\" }" ]
-    3 [ label = "Constant { name: \"server_alloc_params\", value: Object {\"number_of_things\": Number(1)} }" ]
+    1 [ label = "Constant { name: \"server_alloc_params\", value: Object {\"number_of_things\": Number(1)} }" ]
+    2 [ label = "Action { name: \"instance_ip\", label: \"VpcAllocIp\", action_name: \"vpc_alloc_ip\" }" ]
+    3 [ label = "Action { name: \"volume_id\", label: \"VolumeCreate\", action_name: \"volume_create\" }" ]
     4 [ label = "SubsagaStart { saga_name: \"server-alloc\", params_node_name: \"server_alloc_params\" }" ]
     5 [ label = "Action { name: \"server_id\", label: \"ServerPick\", action_name: \"server_pick\" }" ]
     6 [ label = "Action { name: \"server_reserve\", label: \"ServerReserve\", action_name: \"server_reserve\" }" ]
@@ -16,13 +16,14 @@ digraph {
     12 [ label = "Start { params: Object {\"instance_name\": String(\"fake-o instance\"), \"number_of_instances\": Number(1)} }" ]
     13 [ label = "End" ]
     0 -> 1 [ ]
-    0 -> 2 [ ]
+    1 -> 2 [ ]
     1 -> 3 [ ]
-    2 -> 3 [ ]
-    3 -> 4 [ ]
+    1 -> 4 [ ]
     5 -> 6 [ ]
     4 -> 5 [ ]
     6 -> 7 [ ]
+    2 -> 8 [ ]
+    3 -> 8 [ ]
     7 -> 8 [ ]
     8 -> 9 [ ]
     9 -> 10 [ ]
@@ -35,14 +36,14 @@ digraph {
 + saga execution: 049b2522-308d-442e-bc65-9bfaef863597
 +-- queued-todo: (start node)
 +-- blocked: InstanceCreate (produces "instance_id")
++-- blocked: (constant = {"number_of_things":1}) (produces "server_alloc_params")
 +-- (parallel actions):
         +-- blocked: VpcAllocIp (produces "instance_ip")
         +-- blocked: VolumeCreate (produces "volume_id")
-+-- blocked: (constant = {"number_of_things":1}) (produces "server_alloc_params")
-+-- blocked: (subsaga start: "server-alloc")
-        +-- blocked: ServerPick (produces "server_id")
-        +-- blocked: ServerReserve (produces "server_reserve")
-+-- blocked: (subsaga end) (produces "server_alloc")
+        +-- blocked: (subsaga start: "server-alloc")
+                +-- blocked: ServerPick (produces "server_id")
+                +-- blocked: ServerReserve (produces "server_reserve")
+        +-- blocked: (subsaga end) (produces "server_alloc")
 +-- blocked: InstanceConfigure (produces "instance_configure")
 +-- blocked: VolumeAttach (produces "volume_attach")
 +-- blocked: InstanceBoot (produces "instance_boot")
