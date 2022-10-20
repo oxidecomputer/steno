@@ -862,6 +862,21 @@ mod test {
     use super::SagaName;
 
     #[test]
+    fn test_saga_names_and_label() {
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        let dag =
+            crate::SagaDag::new(
+                builder.build().expect("Should have built DAG"),
+                serde_json::Value::Null,
+            );
+
+        assert_eq!(1, dag.get_node_count());
+        assert_eq!("a", dag.get_node_name(0).expect("Expected node").expect("Expected name"));
+        assert_eq!("(constant = null)", dag.get_node_label(0).unwrap());
+    }
+
+    #[test]
     fn test_builder_bad_output_nodes() {
         // error case: totally empty DAG
         let builder = DagBuilder::new(SagaName::new("test-saga"));

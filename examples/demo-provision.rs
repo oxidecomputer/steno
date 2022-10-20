@@ -229,7 +229,6 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         let node_id = dag.get_index(node_name).with_context(|| {
             format!("bad argument for --inject-error: {:?}", node_name)
         })?;
-        assert_eq!(dag.get_node_name(node_id.index()).unwrap().unwrap(), node_name);
         sec.saga_inject_error(saga_id, node_id)
             .await
             .context("injecting error")?;
