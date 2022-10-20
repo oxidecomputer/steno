@@ -352,6 +352,12 @@ pub struct SagaDag {
     pub(crate) end_node: NodeIndex,
 }
 
+// The number of nodes for the "start" and "end" nodes in the saga.
+//
+// This constant helps callers iterate over the saga DAG while safely
+// ignoring these indices.
+const START_AND_END_NODES: usize = 2;
+
 impl SagaDag {
     /// Make a [`SagaDag`] from the given DAG and input parameters
     pub fn new(dagfrag: Dag, params: serde_json::Value) -> SagaDag {
@@ -400,6 +406,33 @@ impl SagaDag {
                     .unwrap_or(false)
             })
             .ok_or_else(|| anyhow!("saga has no node named \"{}\"", name))
+    }
+
+    /// Returns the number of nodes in the DAG.
+    ///
+    /// This function intentionally ignores the start and end nodes.
+    pub fn get_node_count(&self) -> usize {
+        self.graph.node_count() - START_AND_END_NODES
+    }
+
+    /// Returns the name of a node within the DAG.
+    ///
+    /// If `index` >= `self.get_node_count()`, then an error is returned.
+    pub fn get_node_name(&self, index: usize) -> Result<Option<&str>, anyhow::Error> {
+        if index >= self.get_node_count() {
+            return Err(anyhow!("index out of bounds"));
+        }
+        Ok(self.graph[NodeIndex::new(index)].node_name().map(|n| n.as_ref()))
+    }
+
+    /// Returns the label of a node within the DAG.
+    ///
+    /// If `index` >= `self.get_node_count()`, then an error is returned.
+    pub fn get_node_label(&self, index: usize) -> Result<String, anyhow::Error> {
+        if index >= self.get_node_count() {
+            return Err(anyhow!("index out of bounds"));
+        }
+        Ok(self.graph[NodeIndex::new(index)].label())
     }
 
     /// Returns an object that can be used to print a graphviz-format
