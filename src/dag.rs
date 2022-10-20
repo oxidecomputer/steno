@@ -418,7 +418,10 @@ impl SagaDag {
     /// Returns the name of a node within the DAG.
     ///
     /// If `index` >= `self.get_node_count()`, then an error is returned.
-    pub fn get_node_name(&self, index: usize) -> Result<Option<&str>, anyhow::Error> {
+    pub fn get_node_name(
+        &self,
+        index: usize,
+    ) -> Result<Option<&str>, anyhow::Error> {
         if index >= self.get_node_count() {
             return Err(anyhow!("index out of bounds"));
         }
@@ -428,7 +431,10 @@ impl SagaDag {
     /// Returns the label of a node within the DAG.
     ///
     /// If `index` >= `self.get_node_count()`, then an error is returned.
-    pub fn get_node_label(&self, index: usize) -> Result<String, anyhow::Error> {
+    pub fn get_node_label(
+        &self,
+        index: usize,
+    ) -> Result<String, anyhow::Error> {
         if index >= self.get_node_count() {
             return Err(anyhow!("index out of bounds"));
         }
@@ -865,14 +871,18 @@ mod test {
     fn test_saga_names_and_label() {
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
         builder.append(Node::constant("a", serde_json::Value::Null));
-        let dag =
-            crate::SagaDag::new(
-                builder.build().expect("Should have built DAG"),
-                serde_json::Value::Null,
-            );
+        let dag = crate::SagaDag::new(
+            builder.build().expect("Should have built DAG"),
+            serde_json::Value::Null,
+        );
 
         assert_eq!(1, dag.get_node_count());
-        assert_eq!("a", dag.get_node_name(0).expect("Expected node").expect("Expected name"));
+        assert_eq!(
+            "a",
+            dag.get_node_name(0)
+                .expect("Expected node")
+                .expect("Expected name")
+        );
         assert_eq!("(constant = null)", dag.get_node_label(0).unwrap());
     }
 
