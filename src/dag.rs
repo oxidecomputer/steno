@@ -426,7 +426,7 @@ impl SagaDag {
     }
 
     /// Returns an iterator over all named nodes in the saga DAG.
-    pub fn get_nodes<'a>(&'a self) -> SagaDagIterator<'a> {
+    pub fn get_nodes(&self) -> SagaDagIterator<'_> {
         SagaDagIterator { dag: self, index: NodeIndex::new(0) }
     }
 
