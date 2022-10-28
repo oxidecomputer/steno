@@ -289,7 +289,7 @@ impl Node {
 /// the execution state of the saga here. That continues to reside in saga log
 /// consisting of `SagaNodeEvent`s.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub enum InternalNode {
+pub(crate) enum InternalNode {
     Start { params: Arc<serde_json::Value> },
     End,
     Action { name: NodeName, label: String, action_name: ActionName },
@@ -330,6 +330,19 @@ impl InternalNode {
     }
 }
 
+/// A named, user-visible node in a saga graph.
+pub struct NodeEntry<'a>(&'a InternalNode);
+
+impl<'a> NodeEntry<'a> {
+    pub fn name(&self) -> &NodeName {
+        self.0.node_name().unwrap()
+    }
+
+    pub fn label(&self) -> String {
+        self.0.label()
+    }
+}
+
 /// A [`Dag`] plus saga input parameters that together can be used to execute a
 /// saga
 ///
@@ -359,15 +372,17 @@ pub struct SagaDagIterator<'a> {
 }
 
 impl<'a> Iterator for SagaDagIterator<'a> {
-    type Item = &'a InternalNode;
+    type Item = NodeEntry<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(node) = self.dag.get(self.index) {
             self.index = NodeIndex::new(self.index.index() + 1);
             match node {
-                InternalNode::Action { .. } => return Some(node),
-                InternalNode::Constant { .. } => return Some(node),
-                InternalNode::SubsagaEnd { .. } => return Some(node),
+                InternalNode::Action { .. } => return Some(NodeEntry(node)),
+                InternalNode::Constant { .. } => return Some(NodeEntry(node)),
+                InternalNode::SubsagaEnd { .. } => {
+                    return Some(NodeEntry(node))
+                }
                 _ => (),
             }
         }
@@ -868,7 +883,7 @@ mod test {
         let mut nodes = dag.get_nodes();
 
         let node = nodes.next().unwrap();
-        assert_eq!("a", node.node_name().unwrap().as_ref());
+        assert_eq!("a", node.name().as_ref());
         assert_eq!("(constant = null)", node.label());
 
         assert!(nodes.next().is_none());
