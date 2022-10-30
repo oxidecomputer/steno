@@ -289,7 +289,7 @@ impl Node {
 /// the execution state of the saga here. That continues to reside in saga log
 /// consisting of `SagaNodeEvent`s.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub enum InternalNode {
+pub(crate) enum InternalNode {
     Start { params: Arc<serde_json::Value> },
     End,
     Action { name: NodeName, label: String, action_name: ActionName },
@@ -330,6 +330,19 @@ impl InternalNode {
     }
 }
 
+/// A named, user-visible node in a saga graph.
+pub struct NodeEntry<'a>(&'a InternalNode);
+
+impl<'a> NodeEntry<'a> {
+    pub fn name(&self) -> &NodeName {
+        self.0.node_name().unwrap()
+    }
+
+    pub fn label(&self) -> String {
+        self.0.label()
+    }
+}
+
 /// A [`Dag`] plus saga input parameters that together can be used to execute a
 /// saga
 ///
@@ -350,6 +363,31 @@ pub struct SagaDag {
     pub(crate) start_node: NodeIndex,
     /// the index of the [`InternalNode::End`] node for this Saga
     pub(crate) end_node: NodeIndex,
+}
+
+/// An [`Iterator`] over all named nodes in the DAG.
+pub struct SagaDagIterator<'a> {
+    dag: &'a SagaDag,
+    index: NodeIndex,
+}
+
+impl<'a> Iterator for SagaDagIterator<'a> {
+    type Item = NodeEntry<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(node) = self.dag.get(self.index) {
+            self.index = NodeIndex::new(self.index.index() + 1);
+            match node {
+                InternalNode::Action { .. } => return Some(NodeEntry(node)),
+                InternalNode::Constant { .. } => return Some(NodeEntry(node)),
+                InternalNode::SubsagaEnd { .. } => {
+                    return Some(NodeEntry(node))
+                }
+                _ => (),
+            }
+        }
+        None
+    }
 }
 
 impl SagaDag {
@@ -400,6 +438,11 @@ impl SagaDag {
                     .unwrap_or(false)
             })
             .ok_or_else(|| anyhow!("saga has no node named \"{}\"", name))
+    }
+
+    /// Returns an iterator over all named nodes in the saga DAG.
+    pub fn get_nodes(&self) -> SagaDagIterator<'_> {
+        SagaDagIterator { dag: self, index: NodeIndex::new(0) }
     }
 
     /// Returns an object that can be used to print a graphviz-format
@@ -827,6 +870,24 @@ mod test {
     use super::Node;
     use super::NodeName;
     use super::SagaName;
+
+    #[test]
+    fn test_saga_names_and_label() {
+        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
+        builder.append(Node::constant("a", serde_json::Value::Null));
+        let dag = crate::SagaDag::new(
+            builder.build().expect("Should have built DAG"),
+            serde_json::Value::Null,
+        );
+
+        let mut nodes = dag.get_nodes();
+
+        let node = nodes.next().unwrap();
+        assert_eq!("a", node.name().as_ref());
+        assert_eq!("(constant = null)", node.label());
+
+        assert!(nodes.next().is_none());
+    }
 
     #[test]
     fn test_builder_bad_output_nodes() {
