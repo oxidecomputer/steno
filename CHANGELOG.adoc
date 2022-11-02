@@ -15,6 +15,9 @@
 
 https://github.com/oxidecomputer/steno/compare/v0.2.0\...HEAD[Full list of commits]
 
+* https://github.com/oxidecomputer/steno/pull/40[#40] Add `Dag::builder` method
+* https://github.com/oxidecomputer/steno/pull/67[#67] Add methods for inspecting Saga DAG / https://github.com/oxidecomputer/steno/pull/73[#73] A minor extention to #67, expose indices
+
 === Breaking Changes
 
 None.
