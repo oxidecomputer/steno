@@ -331,15 +331,22 @@ impl InternalNode {
 }
 
 /// A named, user-visible node in a saga graph.
-pub struct NodeEntry<'a>(&'a InternalNode);
+pub struct NodeEntry<'a> {
+    internal: &'a InternalNode,
+    index: NodeIndex,
+}
 
 impl<'a> NodeEntry<'a> {
     pub fn name(&self) -> &NodeName {
-        self.0.node_name().unwrap()
+        self.internal.node_name().unwrap()
     }
 
     pub fn label(&self) -> String {
-        self.0.label()
+        self.internal.label()
+    }
+
+    pub fn index(&self) -> NodeIndex {
+        self.index
     }
 }
 
@@ -376,12 +383,13 @@ impl<'a> Iterator for SagaDagIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(node) = self.dag.get(self.index) {
+            let index = self.index;
             self.index = NodeIndex::new(self.index.index() + 1);
             match node {
-                InternalNode::Action { .. } => return Some(NodeEntry(node)),
-                InternalNode::Constant { .. } => return Some(NodeEntry(node)),
-                InternalNode::SubsagaEnd { .. } => {
-                    return Some(NodeEntry(node))
+                InternalNode::Action { .. }
+                | InternalNode::Constant { .. }
+                | InternalNode::SubsagaEnd { .. } => {
+                    return Some(NodeEntry { internal: node, index })
                 }
                 _ => (),
             }
