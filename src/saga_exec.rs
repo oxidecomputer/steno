@@ -10,6 +10,7 @@ use crate::saga_action_generic::ActionData;
 use crate::saga_action_generic::ActionInjectError;
 use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
+use crate::sec::RepeatInjected;
 use crate::sec::SecExecClient;
 use crate::ActionRegistry;
 use crate::SagaCachedState;
@@ -290,7 +291,7 @@ struct TaskParams<UserType: SagaType> {
     /// If true, indicates that the action should be executed multiple
     /// times, and the latter result should be used. This is useful
     /// when testing idempotency of a user-specified action.
-    injected_repeat: bool,
+    injected_repeat: Option<RepeatInjected>,
 }
 
 /// Executes a saga
@@ -403,7 +404,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             node_errors: BTreeMap::new(),
             sglog,
             injected_errors: BTreeSet::new(),
-            injected_repeats: BTreeSet::new(),
+            injected_repeats: BTreeMap::new(),
             sec_hdl,
             saga_id,
         };
@@ -850,9 +851,13 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     /// are invoked twice by the saga executor.
     ///
     /// If this node produces output, only the second value is stored.
-    pub async fn inject_repeat(&self, node_id: NodeIndex) {
+    pub async fn inject_repeat(
+        &self,
+        node_id: NodeIndex,
+        repeat: RepeatInjected,
+    ) {
         let mut live_state = self.live_state.lock().await;
-        live_state.injected_repeats.insert(node_id);
+        live_state.injected_repeats.insert(node_id, repeat);
     }
 
     /// Runs the saga
@@ -980,7 +985,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 saga_params,
                 action: sgaction,
                 user_context: Arc::clone(&self.user_context),
-                injected_repeat: live_state.injected_repeats.contains(&node_id),
+                injected_repeat: live_state
+                    .injected_repeats
+                    .get(&node_id)
+                    .map(|r| *r),
             };
 
             let task = tokio::spawn(SagaExecutor::exec_node(task_params));
@@ -1018,7 +1026,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 saga_params,
                 action: sgaction,
                 user_context: Arc::clone(&self.user_context),
-                injected_repeat: live_state.injected_repeats.contains(&node_id),
+                injected_repeat: live_state
+                    .injected_repeats
+                    .get(&node_id)
+                    .map(|r| *r),
             };
 
             let task = tokio::spawn(SagaExecutor::undo_node(task_params));
@@ -1114,8 +1125,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         };
 
         let mut result = task_params.action.do_it(make_action_context()).await;
-        if task_params.injected_repeat {
-            result = task_params.action.do_it(make_action_context()).await;
+
+        match task_params.injected_repeat {
+            Some(RepeatInjected::Action) | Some(RepeatInjected::Both) => {
+                result = task_params.action.do_it(make_action_context()).await;
+            }
+            Some(RepeatInjected::Undo) | None => (),
         }
 
         let node: Box<dyn SagaNodeRest<UserType>> = match result {
@@ -1171,8 +1186,15 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         // TODO-robustness We have to figure out what it means to fail here and
         // what we want to do about it.
         task_params.action.undo_it(make_action_context()).await.unwrap();
-        if task_params.injected_repeat {
-            task_params.action.undo_it(make_action_context()).await.unwrap();
+        match task_params.injected_repeat {
+            Some(RepeatInjected::Undo) | Some(RepeatInjected::Both) => {
+                task_params
+                    .action
+                    .undo_it(make_action_context())
+                    .await
+                    .unwrap();
+            }
+            Some(RepeatInjected::Action) | None => (),
         }
         let node = Box::new(SagaNode {
             node_id,
@@ -1362,7 +1384,7 @@ struct SagaExecLiveState {
     injected_errors: BTreeSet<NodeIndex>,
 
     /// Injected actions which should be called repeatedly
-    injected_repeats: BTreeSet<NodeIndex>,
+    injected_repeats: BTreeMap<NodeIndex, RepeatInjected>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2033,7 +2055,11 @@ pub trait SagaExecManager: fmt::Debug + Send + Sync {
     /// action (and undo action, if called) twice.
     ///
     /// See [`Dag::get_index()`] to get the node_id for a node.
-    fn inject_repeat(&self, node_id: NodeIndex) -> BoxFuture<'_, ()>;
+    fn inject_repeat(
+        &self,
+        node_id: NodeIndex,
+        repeat: RepeatInjected,
+    ) -> BoxFuture<'_, ()>;
 }
 
 impl<T> SagaExecManager for SagaExecutor<T>
@@ -2056,8 +2082,12 @@ where
         self.inject_error(node_id).boxed()
     }
 
-    fn inject_repeat(&self, node_id: NodeIndex) -> BoxFuture<'_, ()> {
-        self.inject_repeat(node_id).boxed()
+    fn inject_repeat(
+        &self,
+        node_id: NodeIndex,
+        repeat: RepeatInjected,
+    ) -> BoxFuture<'_, ()> {
+        self.inject_repeat(node_id, repeat).boxed()
     }
 }
 

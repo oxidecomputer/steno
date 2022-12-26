@@ -256,6 +256,7 @@ impl SecClient {
         &self,
         saga_id: SagaId,
         node_id: NodeIndex,
+        repeat: RepeatInjected,
     ) -> Result<(), anyhow::Error> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sec_cmd(
@@ -264,7 +265,7 @@ impl SecClient {
                 ack_tx,
                 saga_id,
                 node_id,
-                error_type: ErrorInjected::Repeat,
+                error_type: ErrorInjected::Repeat(repeat),
             },
         )
         .await
@@ -420,10 +421,17 @@ impl SagaStateView {
 
 // SEC Client/Server interface
 
+#[derive(Debug, Copy, Clone)]
+pub enum RepeatInjected {
+    Action,
+    Undo,
+    Both,
+}
+
 #[derive(Debug)]
 enum ErrorInjected {
     Fail,
-    Repeat,
+    Repeat(RepeatInjected),
 }
 
 /// Message passed from the [`SecClient`] to the [`Sec`]
@@ -1233,8 +1241,8 @@ impl Sec {
                 ErrorInjected::Fail => {
                     exec.inject_error(node_id).await;
                 }
-                ErrorInjected::Repeat => {
-                    exec.inject_repeat(node_id).await;
+                ErrorInjected::Repeat(repeat) => {
+                    exec.inject_repeat(node_id, repeat).await;
                 }
             }
             Sec::client_respond(&log, ack_tx, Ok(()));
@@ -1564,9 +1572,13 @@ mod test {
             .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
-        sec.saga_inject_repeat(saga_id, NodeIndex::new(0))
-            .await
-            .expect("failed to inject repeat");
+        sec.saga_inject_repeat(
+            saga_id,
+            NodeIndex::new(0),
+            RepeatInjected::Action,
+        )
+        .await
+        .expect("failed to inject repeat");
 
         sec.saga_start(saga_id).await.expect("failed to start saga running");
         let result = saga_future.await;
@@ -1592,9 +1604,13 @@ mod test {
             .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
-        sec.saga_inject_repeat(saga_id, NodeIndex::new(0))
-            .await
-            .expect("failed to inject repeat");
+        sec.saga_inject_repeat(
+            saga_id,
+            NodeIndex::new(0),
+            RepeatInjected::Action,
+        )
+        .await
+        .expect("failed to inject repeat");
         sec.saga_inject_error(saga_id, NodeIndex::new(1))
             .await
             .expect("failed to inject error");
@@ -1603,6 +1619,74 @@ mod test {
         let result = saga_future.await;
         result.kind.expect_err("should have failed; we injected an error!");
         assert_eq!(context.get_count("do_n1"), 2);
+        assert_eq!(context.get_count("undo_n1"), 1);
+        assert_eq!(context.get_count("do_n2"), 0);
+        assert_eq!(context.get_count("undo_n2"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_saga_inject_repeat_fail_and_repeat_undo() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let (registry, dag) = make_test_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
+            .await
+            .expect("failed to create saga");
+        sec.saga_inject_repeat(
+            saga_id,
+            NodeIndex::new(0),
+            RepeatInjected::Both,
+        )
+        .await
+        .expect("failed to inject repeat");
+        sec.saga_inject_error(saga_id, NodeIndex::new(1))
+            .await
+            .expect("failed to inject error");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga running");
+        let result = saga_future.await;
+        result.kind.expect_err("should have failed; we injected an error!");
+        assert_eq!(context.get_count("do_n1"), 2);
+        assert_eq!(context.get_count("undo_n1"), 2);
+        assert_eq!(context.get_count("do_n2"), 0);
+        assert_eq!(context.get_count("undo_n2"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_saga_inject_and_fail_repeat_undo_only() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let (registry, dag) = make_test_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
+            .await
+            .expect("failed to create saga");
+        sec.saga_inject_repeat(
+            saga_id,
+            NodeIndex::new(0),
+            RepeatInjected::Undo,
+        )
+        .await
+        .expect("failed to inject repeat");
+        sec.saga_inject_error(saga_id, NodeIndex::new(1))
+            .await
+            .expect("failed to inject error");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga running");
+        let result = saga_future.await;
+        result.kind.expect_err("should have failed; we injected an error!");
+        assert_eq!(context.get_count("do_n1"), 1);
         assert_eq!(context.get_count("undo_n1"), 2);
         assert_eq!(context.get_count("do_n2"), 0);
         assert_eq!(context.get_count("undo_n2"), 0);
