@@ -240,7 +240,32 @@ impl SecClient {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sec_cmd(
             ack_rx,
-            SecClientMsg::SagaInjectError { ack_tx, saga_id, node_id },
+            SecClientMsg::SagaInjectError {
+                ack_tx,
+                saga_id,
+                node_id,
+                error_type: ErrorInjected::Fail,
+            },
+        )
+        .await
+    }
+
+    /// Inject a node "repetition" into the saga, forcing the do + undo actions
+    /// to be called multiple times.
+    pub async fn saga_inject_repeat(
+        &self,
+        saga_id: SagaId,
+        node_id: NodeIndex,
+    ) -> Result<(), anyhow::Error> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sec_cmd(
+            ack_rx,
+            SecClientMsg::SagaInjectError {
+                ack_tx,
+                saga_id,
+                node_id,
+                error_type: ErrorInjected::Repeat,
+            },
         )
         .await
     }
@@ -395,6 +420,12 @@ impl SagaStateView {
 
 // SEC Client/Server interface
 
+#[derive(Debug)]
+enum ErrorInjected {
+    Fail,
+    Repeat,
+}
+
 /// Message passed from the [`SecClient`] to the [`Sec`]
 // TODO-cleanup This might be cleaner using separate named structs for the
 // enums, similar to what we do for SecStep.
@@ -472,6 +503,7 @@ enum SecClientMsg {
         /// id of the node to inject the error (see
         /// [`SagaTemplateMetadata::node_for_name`])
         node_id: NodeIndex,
+        error_type: ErrorInjected,
     },
 
     /// Shut down the SEC
@@ -502,10 +534,16 @@ impl fmt::Debug for SecClientMsg {
             SecClientMsg::SagaGet { saga_id, .. } => {
                 f.debug_struct("SagaGet").field("saga_id", saga_id).finish()
             }
-            SecClientMsg::SagaInjectError { saga_id, node_id, .. } => f
+            SecClientMsg::SagaInjectError {
+                saga_id,
+                node_id,
+                error_type,
+                ..
+            } => f
                 .debug_struct("SagaInjectError")
                 .field("saga_id", saga_id)
                 .field("node_Id", node_id)
+                .field("error_type", error_type)
                 .finish(),
             SecClientMsg::Shutdown { .. } => f.write_str("Shutdown"),
             SecClientMsg::SagaStart { saga_id, .. } => {
@@ -973,8 +1011,15 @@ impl Sec {
             SecClientMsg::SagaGet { ack_tx, saga_id } => {
                 self.cmd_saga_get(ack_tx, saga_id);
             }
-            SecClientMsg::SagaInjectError { ack_tx, saga_id, node_id } => {
-                self.cmd_saga_inject_error(ack_tx, saga_id, node_id);
+            SecClientMsg::SagaInjectError {
+                ack_tx,
+                saga_id,
+                node_id,
+                error_type,
+            } => {
+                self.cmd_saga_inject_error(
+                    ack_tx, saga_id, node_id, error_type,
+                );
             }
             SecClientMsg::Shutdown => self.cmd_shutdown(),
         }
@@ -1155,6 +1200,7 @@ impl Sec {
         ack_tx: oneshot::Sender<Result<(), anyhow::Error>>,
         saga_id: SagaId,
         node_id: NodeIndex,
+        error_type: ErrorInjected,
     ) {
         trace!(
             &self.log,
@@ -1183,7 +1229,14 @@ impl Sec {
         };
         let log = self.log.new(o!());
         let fut = async move {
-            exec.inject_error(node_id).await;
+            match error_type {
+                ErrorInjected::Fail => {
+                    exec.inject_error(node_id).await;
+                }
+                ErrorInjected::Repeat => {
+                    exec.inject_repeat(node_id).await;
+                }
+            }
             Sec::client_respond(&log, ack_tx, Ok(()));
             None
         }
@@ -1426,8 +1479,7 @@ mod test {
         type ExecContextType = TestContext;
     }
 
-    fn make_test_one_node_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<SagaDag>)
-    {
+    fn make_test_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<SagaDag>) {
         async fn do_n1(
             ctx: ActionContext<TestSaga>,
         ) -> Result<i32, ActionError> {
@@ -1441,12 +1493,28 @@ mod test {
             Ok(())
         }
 
+        async fn do_n2(
+            ctx: ActionContext<TestSaga>,
+        ) -> Result<i32, ActionError> {
+            ctx.user_data().call("do_n2");
+            Ok(2)
+        }
+        async fn undo_n2(
+            ctx: ActionContext<TestSaga>,
+        ) -> Result<(), anyhow::Error> {
+            ctx.user_data().call("undo_n2");
+            Ok(())
+        }
+
         let mut registry = ActionRegistry::new();
         let action_n1 = ActionFunc::new_action("n1_out", do_n1, undo_n1);
         registry.register(Arc::clone(&action_n1));
+        let action_n2 = ActionFunc::new_action("n2_out", do_n2, undo_n2);
+        registry.register(Arc::clone(&action_n2));
 
         let mut builder = DagBuilder::new(SagaName::new("test-saga"));
         builder.append(Node::action("n1_out", "n1", &*action_n1));
+        builder.append(Node::action("n2_out", "n2", &*action_n2));
         (
             Arc::new(registry),
             Arc::new(SagaDag::new(
@@ -1462,7 +1530,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let (registry, dag) = make_test_one_node_saga();
+        let (registry, dag) = make_test_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
@@ -1478,6 +1546,66 @@ mod test {
         assert_eq!(output.lookup_node_output::<i32>("n1_out").unwrap(), 1);
         assert_eq!(context.get_count("do_n1"), 1);
         assert_eq!(context.get_count("undo_n1"), 0);
+        assert_eq!(context.get_count("do_n2"), 1);
+        assert_eq!(context.get_count("undo_n2"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_saga_inject_repeat_and_then_succeed() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let (registry, dag) = make_test_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
+            .await
+            .expect("failed to create saga");
+        sec.saga_inject_repeat(saga_id, NodeIndex::new(0))
+            .await
+            .expect("failed to inject repeat");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga running");
+        let result = saga_future.await;
+        let output = result.kind.unwrap();
+        assert_eq!(output.lookup_node_output::<i32>("n1_out").unwrap(), 1);
+        assert_eq!(context.get_count("do_n1"), 2);
+        assert_eq!(context.get_count("undo_n1"), 0);
+        assert_eq!(context.get_count("do_n2"), 1);
+        assert_eq!(context.get_count("undo_n2"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_saga_inject_repeat_and_then_fail() {
+        // Test setup
+        let log = new_log();
+        let sec = new_sec(&log);
+        let (registry, dag) = make_test_saga();
+
+        // Saga Creation
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(saga_id, Arc::clone(&context), dag, registry)
+            .await
+            .expect("failed to create saga");
+        sec.saga_inject_repeat(saga_id, NodeIndex::new(0))
+            .await
+            .expect("failed to inject repeat");
+        sec.saga_inject_error(saga_id, NodeIndex::new(1))
+            .await
+            .expect("failed to inject error");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga running");
+        let result = saga_future.await;
+        result.kind.expect_err("should have failed; we injected an error!");
+        assert_eq!(context.get_count("do_n1"), 2);
+        assert_eq!(context.get_count("undo_n1"), 2);
+        assert_eq!(context.get_count("do_n2"), 0);
+        assert_eq!(context.get_count("undo_n2"), 0);
     }
 
     // Tests error injection skips execution of the actions, and fails the saga.
@@ -1486,7 +1614,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let (registry, dag) = make_test_one_node_saga();
+        let (registry, dag) = make_test_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
@@ -1505,6 +1633,8 @@ mod test {
         result.kind.expect_err("should have failed; we injected an error!");
         assert_eq!(context.get_count("do_n1"), 0);
         assert_eq!(context.get_count("undo_n1"), 0);
+        assert_eq!(context.get_count("do_n2"), 0);
+        assert_eq!(context.get_count("undo_n2"), 0);
     }
 
     // Tests that omitting "start" after creation doesn't execute the saga.
@@ -1513,7 +1643,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let (registry, dag) = make_test_one_node_saga();
+        let (registry, dag) = make_test_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
@@ -1531,6 +1661,8 @@ mod test {
         }
         assert_eq!(context.get_count("do_n1"), 0);
         assert_eq!(context.get_count("undo_n1"), 0);
+        assert_eq!(context.get_count("do_n2"), 0);
+        assert_eq!(context.get_count("undo_n2"), 0);
     }
 
     // Tests that resume + start executes the saga. This is the normal flow
@@ -1541,7 +1673,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let (registry, dag) = make_test_one_node_saga();
+        let (registry, dag) = make_test_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
@@ -1563,6 +1695,8 @@ mod test {
         assert_eq!(output.lookup_node_output::<i32>("n1_out").unwrap(), 1);
         assert_eq!(context.get_count("do_n1"), 1);
         assert_eq!(context.get_count("undo_n1"), 0);
+        assert_eq!(context.get_count("do_n2"), 1);
+        assert_eq!(context.get_count("undo_n2"), 0);
     }
 
     // Tests that at *most* one of create + resume should be used for a saga,
@@ -1572,7 +1706,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let (registry, dag) = make_test_one_node_saga();
+        let (registry, dag) = make_test_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
@@ -1626,7 +1760,7 @@ mod test {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
-        let (registry, dag) = make_test_one_node_saga();
+        let (registry, dag) = make_test_saga();
 
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
