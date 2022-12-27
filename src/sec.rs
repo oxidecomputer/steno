@@ -1532,6 +1532,11 @@ mod test {
         )
     }
 
+    struct Counts {
+        action: u32,
+        undo: u32,
+    }
+
     // We have a lot of tests which attempt to:
     // - Inject some repeats
     // - Inject some failures
@@ -1541,7 +1546,7 @@ mod test {
     async fn saga_runner_helper(
         repeat: Option<(NodeIndex, RepeatInjected)>,
         fail_node: Option<NodeIndex>,
-        counts: &[(u32, u32); 2],
+        counts: &[Counts; 2],
     ) {
         // Test setup
         let log = new_log();
@@ -1579,10 +1584,10 @@ mod test {
             assert_eq!(output.lookup_node_output::<i32>("n1_out").unwrap(), 1);
             assert_eq!(output.lookup_node_output::<i32>("n2_out").unwrap(), 2);
         }
-        assert_eq!(context.get_count("do_n1"), counts[0].0);
-        assert_eq!(context.get_count("undo_n1"), counts[0].1);
-        assert_eq!(context.get_count("do_n2"), counts[1].0);
-        assert_eq!(context.get_count("undo_n2"), counts[1].1);
+        assert_eq!(context.get_count("do_n1"), counts[0].action);
+        assert_eq!(context.get_count("undo_n1"), counts[0].undo);
+        assert_eq!(context.get_count("do_n2"), counts[1].action);
+        assert_eq!(context.get_count("undo_n2"), counts[1].undo);
     }
 
     // Tests the "normal flow" for a newly created saga: create + start.
@@ -1591,7 +1596,7 @@ mod test {
         saga_runner_helper(
             /* repeat= */ None,
             /* fail= */ None,
-            &[(1, 0), (1, 0)],
+            &[Counts { action: 1, undo: 0 }, Counts { action: 1, undo: 0 }],
         )
         .await;
     }
@@ -1602,7 +1607,7 @@ mod test {
             /* repeat= */
             Some((NodeIndex::new(0), RepeatInjected::Action)),
             /* fail= */ None,
-            &[(2, 0), (1, 0)],
+            &[Counts { action: 2, undo: 0 }, Counts { action: 1, undo: 0 }],
         )
         .await;
     }
@@ -1613,7 +1618,7 @@ mod test {
             /* repeat= */
             Some((NodeIndex::new(0), RepeatInjected::Action)),
             /* fail= */ Some(NodeIndex::new(1)),
-            &[(2, 1), (0, 0)],
+            &[Counts { action: 2, undo: 1 }, Counts { action: 0, undo: 0 }],
         )
         .await;
     }
@@ -1624,7 +1629,7 @@ mod test {
             /* repeat= */
             Some((NodeIndex::new(0), RepeatInjected::Both)),
             /* fail= */ Some(NodeIndex::new(1)),
-            &[(2, 2), (0, 0)],
+            &[Counts { action: 2, undo: 2 }, Counts { action: 0, undo: 0 }],
         )
         .await;
     }
@@ -1635,7 +1640,7 @@ mod test {
             /* repeat= */
             Some((NodeIndex::new(0), RepeatInjected::Undo)),
             /* fail= */ Some(NodeIndex::new(1)),
-            &[(1, 2), (0, 0)],
+            &[Counts { action: 1, undo: 2 }, Counts { action: 0, undo: 0 }],
         )
         .await;
     }
@@ -1646,7 +1651,7 @@ mod test {
         saga_runner_helper(
             /* repeat= */ None,
             /* fail= */ Some(NodeIndex::new(0)),
-            &[(0, 0), (0, 0)],
+            &[Counts { action: 0, undo: 0 }, Counts { action: 0, undo: 0 }],
         )
         .await;
     }
