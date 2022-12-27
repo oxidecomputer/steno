@@ -1532,6 +1532,12 @@ mod test {
         )
     }
 
+    struct TestArguments<'a> {
+        repeat: Option<(NodeIndex, RepeatInjected)>,
+        fail_node: Option<NodeIndex>,
+        counts: &'a [Counts],
+    }
+
     struct Counts {
         action: u32,
         undo: u32,
@@ -1543,11 +1549,7 @@ mod test {
     // - Observe the count of "which nodes were called"
     //
     // This helper intends to reduce some of that boilerplate.
-    async fn saga_runner_helper(
-        repeat: Option<(NodeIndex, RepeatInjected)>,
-        fail_node: Option<NodeIndex>,
-        counts: &[Counts; 2],
-    ) {
+    async fn saga_runner_helper(arguments: TestArguments<'_>) {
         // Test setup
         let log = new_log();
         let sec = new_sec(&log);
@@ -1562,14 +1564,14 @@ mod test {
             .expect("failed to create saga");
 
         // Only injects an error if one was requested
-        if let Some((repeat_node, repeat_operation)) = repeat {
+        if let Some((repeat_node, repeat_operation)) = arguments.repeat {
             sec.saga_inject_repeat(saga_id, repeat_node, repeat_operation)
                 .await
                 .expect("failed to inject repeat");
         }
 
         // Only injects a failure if one was requested
-        if let Some(fail_node) = fail_node {
+        if let Some(fail_node) = arguments.fail_node {
             sec.saga_inject_error(saga_id, fail_node)
                 .await
                 .expect("failed to inject error");
@@ -1577,13 +1579,14 @@ mod test {
 
         sec.saga_start(saga_id).await.expect("failed to start saga running");
         let result = saga_future.await;
-        if fail_node.is_some() {
+        if arguments.fail_node.is_some() {
             result.kind.expect_err("should have failed; we injected an error!");
         } else {
             let output = result.kind.unwrap();
             assert_eq!(output.lookup_node_output::<i32>("n1_out").unwrap(), 1);
             assert_eq!(output.lookup_node_output::<i32>("n2_out").unwrap(), 2);
         }
+        let counts = &arguments.counts;
         assert_eq!(context.get_count("do_n1"), counts[0].action);
         assert_eq!(context.get_count("undo_n1"), counts[0].undo);
         assert_eq!(context.get_count("do_n2"), counts[1].action);
@@ -1593,66 +1596,80 @@ mod test {
     // Tests the "normal flow" for a newly created saga: create + start.
     #[tokio::test]
     async fn test_saga_create_and_start_executes_saga() {
-        saga_runner_helper(
-            /* repeat= */ None,
-            /* fail= */ None,
-            &[Counts { action: 1, undo: 0 }, Counts { action: 1, undo: 0 }],
-        )
+        saga_runner_helper(TestArguments {
+            repeat: None,
+            fail_node: None,
+            counts: &[
+                Counts { action: 1, undo: 0 },
+                Counts { action: 1, undo: 0 },
+            ],
+        })
         .await;
     }
 
     #[tokio::test]
     async fn test_saga_inject_repeat_and_then_succeed() {
-        saga_runner_helper(
-            /* repeat= */
-            Some((NodeIndex::new(0), RepeatInjected::Action)),
-            /* fail= */ None,
-            &[Counts { action: 2, undo: 0 }, Counts { action: 1, undo: 0 }],
-        )
+        saga_runner_helper(TestArguments {
+            repeat: Some((NodeIndex::new(0), RepeatInjected::Action)),
+            fail_node: None,
+            counts: &[
+                Counts { action: 2, undo: 0 },
+                Counts { action: 1, undo: 0 },
+            ],
+        })
         .await;
     }
 
     #[tokio::test]
     async fn test_saga_inject_repeat_and_then_fail() {
-        saga_runner_helper(
-            /* repeat= */
-            Some((NodeIndex::new(0), RepeatInjected::Action)),
-            /* fail= */ Some(NodeIndex::new(1)),
-            &[Counts { action: 2, undo: 1 }, Counts { action: 0, undo: 0 }],
-        )
+        saga_runner_helper(TestArguments {
+            repeat: Some((NodeIndex::new(0), RepeatInjected::Action)),
+            fail_node: Some(NodeIndex::new(1)),
+            counts: &[
+                Counts { action: 2, undo: 1 },
+                Counts { action: 0, undo: 0 },
+            ],
+        })
         .await;
     }
 
     #[tokio::test]
     async fn test_saga_inject_repeat_fail_and_repeat_undo() {
-        saga_runner_helper(
-            /* repeat= */
-            Some((NodeIndex::new(0), RepeatInjected::Both)),
-            /* fail= */ Some(NodeIndex::new(1)),
-            &[Counts { action: 2, undo: 2 }, Counts { action: 0, undo: 0 }],
-        )
+        saga_runner_helper(TestArguments {
+            repeat: Some((NodeIndex::new(0), RepeatInjected::Both)),
+            fail_node: Some(NodeIndex::new(1)),
+            counts: &[
+                Counts { action: 2, undo: 2 },
+                Counts { action: 0, undo: 0 },
+            ],
+        })
         .await;
     }
 
     #[tokio::test]
     async fn test_saga_inject_and_fail_repeat_undo_only() {
-        saga_runner_helper(
-            /* repeat= */
-            Some((NodeIndex::new(0), RepeatInjected::Undo)),
-            /* fail= */ Some(NodeIndex::new(1)),
-            &[Counts { action: 1, undo: 2 }, Counts { action: 0, undo: 0 }],
-        )
+        saga_runner_helper(TestArguments {
+            repeat: Some((NodeIndex::new(0), RepeatInjected::Undo)),
+            fail_node: Some(NodeIndex::new(1)),
+            counts: &[
+                Counts { action: 1, undo: 2 },
+                Counts { action: 0, undo: 0 },
+            ],
+        })
         .await;
     }
 
     // Tests error injection skips execution of the actions, and fails the saga.
     #[tokio::test]
     async fn test_saga_fails_after_error_injection() {
-        saga_runner_helper(
-            /* repeat= */ None,
-            /* fail= */ Some(NodeIndex::new(0)),
-            &[Counts { action: 0, undo: 0 }, Counts { action: 0, undo: 0 }],
-        )
+        saga_runner_helper(TestArguments {
+            repeat: None,
+            fail_node: Some(NodeIndex::new(0)),
+            counts: &[
+                Counts { action: 0, undo: 0 },
+                Counts { action: 0, undo: 0 },
+            ],
+        })
         .await;
     }
 
