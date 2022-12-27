@@ -421,11 +421,17 @@ impl SagaStateView {
 
 // SEC Client/Server interface
 
+/// Arguments which can be passed to the SEC instructing it to change
+/// the number of times a node is executed.
+///
+/// Providing the counts of "1" for action and undo acts as a no-op, since
+/// that's the default.
+///
+/// Should only be used for saga testing.
 #[derive(Debug, Copy, Clone)]
-pub enum RepeatInjected {
-    Action,
-    Undo,
-    Both,
+pub struct RepeatInjected {
+    pub action: NonZeroU32,
+    pub undo: NonZeroU32,
 }
 
 #[derive(Debug)]
@@ -1610,7 +1616,13 @@ mod test {
     #[tokio::test]
     async fn test_saga_inject_repeat_and_then_succeed() {
         saga_runner_helper(TestArguments {
-            repeat: Some((NodeIndex::new(0), RepeatInjected::Action)),
+            repeat: Some((
+                NodeIndex::new(0),
+                RepeatInjected {
+                    action: NonZeroU32::new(2).unwrap(),
+                    undo: NonZeroU32::new(1).unwrap(),
+                },
+            )),
             fail_node: None,
             counts: &[
                 Counts { action: 2, undo: 0 },
@@ -1623,7 +1635,13 @@ mod test {
     #[tokio::test]
     async fn test_saga_inject_repeat_and_then_fail() {
         saga_runner_helper(TestArguments {
-            repeat: Some((NodeIndex::new(0), RepeatInjected::Action)),
+            repeat: Some((
+                NodeIndex::new(0),
+                RepeatInjected {
+                    action: NonZeroU32::new(2).unwrap(),
+                    undo: NonZeroU32::new(1).unwrap(),
+                },
+            )),
             fail_node: Some(NodeIndex::new(1)),
             counts: &[
                 Counts { action: 2, undo: 1 },
@@ -1636,7 +1654,13 @@ mod test {
     #[tokio::test]
     async fn test_saga_inject_repeat_fail_and_repeat_undo() {
         saga_runner_helper(TestArguments {
-            repeat: Some((NodeIndex::new(0), RepeatInjected::Both)),
+            repeat: Some((
+                NodeIndex::new(0),
+                RepeatInjected {
+                    action: NonZeroU32::new(2).unwrap(),
+                    undo: NonZeroU32::new(2).unwrap(),
+                },
+            )),
             fail_node: Some(NodeIndex::new(1)),
             counts: &[
                 Counts { action: 2, undo: 2 },
@@ -1649,10 +1673,35 @@ mod test {
     #[tokio::test]
     async fn test_saga_inject_and_fail_repeat_undo_only() {
         saga_runner_helper(TestArguments {
-            repeat: Some((NodeIndex::new(0), RepeatInjected::Undo)),
+            repeat: Some((
+                NodeIndex::new(0),
+                RepeatInjected {
+                    action: NonZeroU32::new(1).unwrap(),
+                    undo: NonZeroU32::new(2).unwrap(),
+                },
+            )),
             fail_node: Some(NodeIndex::new(1)),
             counts: &[
                 Counts { action: 1, undo: 2 },
+                Counts { action: 0, undo: 0 },
+            ],
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_saga_inject_and_fail_repeat_many_times() {
+        saga_runner_helper(TestArguments {
+            repeat: Some((
+                NodeIndex::new(0),
+                RepeatInjected {
+                    action: NonZeroU32::new(3).unwrap(),
+                    undo: NonZeroU32::new(5).unwrap(),
+                },
+            )),
+            fail_node: Some(NodeIndex::new(1)),
+            counts: &[
+                Counts { action: 3, undo: 5 },
                 Counts { action: 0, undo: 0 },
             ],
         })

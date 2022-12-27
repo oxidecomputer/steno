@@ -1126,11 +1126,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
 
         let mut result = task_params.action.do_it(make_action_context()).await;
 
-        match task_params.injected_repeat {
-            Some(RepeatInjected::Action) | Some(RepeatInjected::Both) => {
+        if let Some(repeat) = task_params.injected_repeat {
+            for _ in 0..repeat.action.get() - 1 {
                 result = task_params.action.do_it(make_action_context()).await;
             }
-            Some(RepeatInjected::Undo) | None => (),
         }
 
         let node: Box<dyn SagaNodeRest<UserType>> = match result {
@@ -1186,15 +1185,14 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         // TODO-robustness We have to figure out what it means to fail here and
         // what we want to do about it.
         task_params.action.undo_it(make_action_context()).await.unwrap();
-        match task_params.injected_repeat {
-            Some(RepeatInjected::Undo) | Some(RepeatInjected::Both) => {
+        if let Some(repeat) = task_params.injected_repeat {
+            for _ in 0..repeat.undo.get() - 1 {
                 task_params
                     .action
                     .undo_it(make_action_context())
                     .await
                     .unwrap();
             }
-            Some(RepeatInjected::Action) | None => (),
         }
         let node = Box::new(SagaNode {
             node_id,
