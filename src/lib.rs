@@ -78,6 +78,7 @@ pub use saga_log::SagaNodeEvent;
 pub use saga_log::SagaNodeEventType;
 pub use saga_log::SagaNodeId;
 pub use sec::sec;
+pub use sec::RepeatInjected;
 pub use sec::SagaSerialized;
 pub use sec::SagaStateView;
 pub use sec::SagaView;
