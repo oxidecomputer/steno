@@ -13,7 +13,11 @@
 
 == Unreleased changes (release date TBD)
 
-https://github.com/oxidecomputer/steno/compare/v0.3.0\...HEAD[Full list of commits]
+https://github.com/oxidecomputer/steno/compare/v0.3.1\...HEAD[Full list of commits]
+
+== 0.3.1 (released 2023-01-06)
+
+https://github.com/oxidecomputer/steno/compare/v0.3.0\...v0.3.1[Full list of commits]
 
 * https://github.com/oxidecomputer/steno/pull/88[#88] Add `SecClient::saga_inject_repeat` method to help with testing idempotency
 
