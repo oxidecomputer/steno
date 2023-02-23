@@ -938,8 +938,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     // "self" to begin with.  However, the intent is to add capacity limits,
     // in which case we may return without having scheduled everything, and
     // we want to track whatever's still ready to go.)
-    // TODO revisit dance with the vec to satisfy borrow rules
-    // TODO implement unwinding
+    // TODO-cleanup revisit dance with the vec to satisfy borrow rules
     async fn kick_off_ready(
         &self,
         tx: &mpsc::Sender<TaskCompletion<UserType>>,
@@ -1071,7 +1070,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 // and clear way to do this.)
                 // TODO-robustness we validate that there's exactly one final
                 // node when we build the DAG, but we should also validate it
-                // during recovery or else fail more gracefully here.  See #32.
+                // during recovery or else fail more gracefully here.  See
+                // steno#32 and steno#106.
                 let ancestors: Vec<_> = dag
                     .graph
                     .neighbors_directed(node_index, Incoming)
@@ -1183,7 +1183,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         };
 
         // TODO-robustness We have to figure out what it means to fail here and
-        // what we want to do about it.
+        // what we want to do about it.  See steno#26.
         task_params.action.undo_it(make_action_context()).await.unwrap();
         if let Some(repeat) = task_params.injected_repeat {
             for _ in 0..repeat.undo.get() - 1 {
