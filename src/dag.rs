@@ -187,7 +187,7 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
     }
 }
 
-impl<UserType: SagaType> ActionRegistry<UserType> {
+impl<UserType: SagaType> Default for ActionRegistry<UserType> {
     fn default() -> Self {
         Self::new()
     }
