@@ -187,6 +187,12 @@ impl<UserType: SagaType> ActionRegistry<UserType> {
     }
 }
 
+impl<UserType: SagaType> ActionRegistry<UserType> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Describes a node in the saga DAG
 ///
 /// There are three kinds of nodes you can add to a graph:
