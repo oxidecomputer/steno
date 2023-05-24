@@ -78,7 +78,7 @@ fn cmd_run_stuck() {
         &run_example("run_stuck", |exec| {
             exec.arg("run")
                 .arg("--inject-error=instance_boot")
-                .arg("--inject-undo-error=instance_ip")
+                .arg("--inject-undo-error=instance_id")
         }),
     );
 }

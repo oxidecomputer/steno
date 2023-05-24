@@ -1,5 +1,5 @@
 will inject error at node "instance_boot"
-will inject error at node "instance_ip" undo action
+will inject error at node "instance_id" undo action
 *** running saga ***
 *** finished saga ***
 
@@ -7,13 +7,13 @@ will inject error at node "instance_ip" undo action
 + saga execution: 049b2522-308d-442e-bc65-9bfaef863597
 +-- done: (start node)
 +-- done: InstanceCreate (produces "instance_id")
-+-- done: (constant = {"number_of_things":1}) (produces "server_alloc_params")
++-- undone: (constant = {"number_of_things":1}) (produces "server_alloc_params")
 +-- (parallel actions):
-        +-- done: VpcAllocIp (produces "instance_ip")
+        +-- undone: VpcAllocIp (produces "instance_ip")
         +-- undone: VolumeCreate (produces "volume_id")
-        +-- done: (subsaga start: "server-alloc")
-                +-- done: ServerPick (produces "server_id")
-                +-- done: ServerReserve (produces "server_reserve")
+        +-- undone: (subsaga start: "server-alloc")
+                +-- undone: ServerPick (produces "server_id")
+                +-- undone: ServerReserve (produces "server_reserve")
         +-- undone: (subsaga end) (produces "server_alloc")
 +-- undone: InstanceConfigure (produces "instance_configure")
 +-- undone: VolumeAttach (produces "volume_attach")
@@ -25,7 +25,7 @@ result: ACTION FAILURE
 failed at node:    "instance_boot"
 failed with error: error injected
 FOLLOWED BY UNDO ACTION FAILURE
-failed at node:    "instance_ip"
+failed at node:    "instance_id"
 failed with error: undo action failed permanently: {
   "message": "undo action attempt 1: injected error"
 }
