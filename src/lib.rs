@@ -60,6 +60,7 @@ pub use dag::SagaDag;
 pub use dag::SagaId;
 pub use dag::SagaName;
 pub use saga_action_error::ActionError;
+pub use saga_action_error::UndoActionError;
 pub use saga_action_func::new_action_noop_undo;
 pub use saga_action_func::ActionFunc;
 pub use saga_action_func::ActionFuncResult;

@@ -231,7 +231,7 @@ impl SecClient {
         self.sec_cmd(ack_rx, SecClientMsg::SagaGet { ack_tx, saga_id }).await
     }
 
-    /// Inject an error into one saga
+    /// Inject an error into one saga node
     pub async fn saga_inject_error(
         &self,
         saga_id: SagaId,
@@ -244,7 +244,26 @@ impl SecClient {
                 ack_tx,
                 saga_id,
                 node_id,
-                error_type: ErrorInjected::Fail,
+                error_type: ErrorInjected::FailAction,
+            },
+        )
+        .await
+    }
+
+    /// Inject an error into a saga node's undo action
+    pub async fn saga_inject_error_undo(
+        &self,
+        saga_id: SagaId,
+        node_id: NodeIndex,
+    ) -> Result<(), anyhow::Error> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sec_cmd(
+            ack_rx,
+            SecClientMsg::SagaInjectError {
+                ack_tx,
+                saga_id,
+                node_id,
+                error_type: ErrorInjected::FailUndoAction,
             },
         )
         .await
@@ -436,7 +455,8 @@ pub struct RepeatInjected {
 
 #[derive(Debug)]
 enum ErrorInjected {
-    Fail,
+    FailAction,
+    FailUndoAction,
     Repeat(RepeatInjected),
 }
 
@@ -1221,6 +1241,7 @@ impl Sec {
             "saga_inject_error";
             "saga_id" => %saga_id,
             "node_id" => ?node_id,
+            "error_type" => ?error_type,
         );
         let maybe_saga = self.saga_lookup(saga_id);
         if let Err(e) = maybe_saga {
@@ -1244,8 +1265,11 @@ impl Sec {
         let log = self.log.new(o!());
         let fut = async move {
             match error_type {
-                ErrorInjected::Fail => {
+                ErrorInjected::FailAction => {
                     exec.inject_error(node_id).await;
+                }
+                ErrorInjected::FailUndoAction => {
+                    exec.inject_error_undo(node_id).await;
                 }
                 ErrorInjected::Repeat(repeat) => {
                     exec.inject_repeat(node_id, repeat).await;

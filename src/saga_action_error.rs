@@ -142,3 +142,11 @@ impl ActionError {
         ActionError::SubsagaCreateFailed { message }
     }
 }
+
+/// An error produced by a failed undo action
+#[derive(Clone, Debug, Deserialize, Error, JsonSchema, Serialize)]
+pub enum UndoActionError {
+    /// Undo action failed due to a consumer-specific error
+    #[error("undo action failed permanently: {source_error:#}")]
+    PermanentFailure { source_error: serde_json::Value },
+}

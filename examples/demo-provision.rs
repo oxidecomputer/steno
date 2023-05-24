@@ -18,6 +18,7 @@ use steno::ExampleSagaType;
 use steno::SagaDag;
 use steno::SagaId;
 use steno::SagaLog;
+use steno::SagaResultErr;
 use steno::SagaSerialized;
 use structopt::StructOpt;
 use uuid::Uuid;
@@ -165,6 +166,10 @@ struct RunArgs {
     #[structopt(long)]
     inject_error: Vec<String>,
 
+    /// simulate an error at the named saga node's undo action
+    #[structopt(long)]
+    inject_undo_error: Vec<String>,
+
     /// do not print to stdout
     #[structopt(long)]
     quiet: bool,
@@ -237,6 +242,18 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         }
     }
 
+    for node_name in &args.inject_undo_error {
+        let node_id = dag.get_index(node_name).with_context(|| {
+            format!("bad argument for --inject-undo-error: {:?}", node_name)
+        })?;
+        sec.saga_inject_error_undo(saga_id, node_id)
+            .await
+            .context("injecting error")?;
+        if !args.quiet {
+            println!("will inject error at node \"{}\" undo action", node_name);
+        }
+    }
+
     if !args.quiet {
         println!("*** running saga ***");
     }
@@ -263,10 +280,19 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
                     success_case.saga_output::<String>().unwrap()
                 );
             }
-            Err(error_case) => {
-                println!("FAILURE");
-                println!("failed at node:    {:?}", error_case.error_node_name);
-                println!("failed with error: {:#}", error_case.error_source);
+            Err(SagaResultErr {
+                error_node_name,
+                error_source,
+                undo_failure,
+            }) => {
+                println!("ACTION FAILURE");
+                println!("failed at node:    {:?}", error_node_name);
+                println!("failed with error: {:#}", error_source);
+                if let Some((undo_node_name, undo_error)) = undo_failure {
+                    println!("FOLLOWED BY UNDO ACTION FAILURE");
+                    println!("failed at node:    {:?}", undo_node_name);
+                    println!("failed with error: {:#}", undo_error);
+                }
             }
         }
     }

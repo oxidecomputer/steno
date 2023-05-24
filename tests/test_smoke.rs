@@ -72,6 +72,18 @@ fn cmd_run_error() {
 }
 
 #[test]
+fn cmd_run_stuck() {
+    assert_contents(
+        "tests/test_smoke_run_stuck.out",
+        &run_example("run_stuck", |exec| {
+            exec.arg("run")
+                .arg("--inject-error=instance_boot")
+                .arg("--inject-undo-error=instance_ip")
+        }),
+    );
+}
+
+#[test]
 fn cmd_run_recover() {
     // Do a normal run and save the log so we can try recovering from it.
     let log = run_example("recover1", |exec| {
