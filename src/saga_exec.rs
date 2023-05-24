@@ -938,12 +938,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             // TODO-design Every SagaExec should be able to run_saga() exactly
             // once.  We don't really want to let you re-run it and get a new
             // message on finish_tx.  However, we _do_ want to handle this
-            // particular case when we've recovered a finished saga and the
+            // particular case when we've recovered a "done" saga and the
             // consumer has run() it (once).
             let live_state = self.live_state.lock().await;
-            if live_state.exec_state == SagaCachedState::Done
-                || live_state.exec_state == SagaCachedState::Stuck
-            {
+            if live_state.exec_state == SagaCachedState::Done {
                 self.finish_tx.send(()).expect("failed to send finish message");
                 live_state.sec_hdl.saga_update(live_state.exec_state).await;
                 return;
@@ -993,18 +991,13 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     .saga_update(SagaCachedState::Unwinding)
                     .await;
             }
-            if live_state.exec_state == SagaCachedState::Done
-                || live_state.exec_state == SagaCachedState::Stuck
-            {
+            if live_state.exec_state == SagaCachedState::Done {
                 break;
             }
         }
 
         let live_state = self.live_state.try_lock().unwrap();
-        assert!(
-            live_state.exec_state == SagaCachedState::Done
-                || live_state.exec_state == SagaCachedState::Stuck
-        );
+        assert_eq!(live_state.exec_state, SagaCachedState::Done);
         self.finish_tx.send(()).expect("failed to send finish message");
         live_state.sec_hdl.saga_update(live_state.exec_state).await;
     }
@@ -1353,14 +1346,14 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .live_state
             .try_lock()
             .expect("attempted to get result while saga still running?");
-        assert!(
-            live_state.exec_state == SagaCachedState::Done
-                || live_state.exec_state == SagaCachedState::Stuck
-        );
+        assert_eq!(live_state.exec_state, SagaCachedState::Done);
 
-        if live_state.exec_state == SagaCachedState::Stuck {
+        if !live_state.undo_errors.is_empty() {
             let (error_node_id, error_source) =
-                live_state.node_errors.iter().next().unwrap();
+                live_state.node_errors.iter().next().expect(
+                    "expected an action to have failed if an \
+                        undo action failed",
+                );
             let (undo_error_node_id, undo_error_source) =
                 live_state.undo_errors.iter().next().unwrap();
             let error_node_name = self
@@ -1628,13 +1621,10 @@ impl SagaExecLiveState {
     }
 
     fn saga_stuck(&mut self) {
-        assert!(
-            self.exec_state == SagaCachedState::Unwinding
-                || self.exec_state == SagaCachedState::Stuck
-        );
+        assert!(self.exec_state == SagaCachedState::Unwinding);
         self.stopping = true;
         if self.node_tasks.is_empty() {
-            self.exec_state = SagaCachedState::Stuck;
+            self.exec_state = SagaCachedState::Done;
         }
     }
 
@@ -1650,7 +1640,7 @@ impl SagaExecLiveState {
             .expect("processing task completion with no task present");
 
         if self.stopping && self.node_tasks.is_empty() {
-            self.exec_state = SagaCachedState::Stuck;
+            self.exec_state = SagaCachedState::Done;
         }
 
         rv

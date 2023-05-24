@@ -67,7 +67,6 @@ pub struct SagaCreateParams {
 pub enum SagaCachedState {
     Running,
     Unwinding,
-    Stuck,
     Done,
 }
 
@@ -94,7 +93,6 @@ impl<'a> From<&'a SagaCachedState> for &'a str {
         match s {
             SagaCachedState::Running => "running",
             SagaCachedState::Unwinding => "unwinding",
-            SagaCachedState::Stuck => "stuck",
             SagaCachedState::Done => "done",
         }
     }
