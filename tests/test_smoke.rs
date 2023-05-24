@@ -148,3 +148,24 @@ fn cmd_run_recover_unwind() {
         }),
     );
 }
+
+#[test]
+fn cmd_run_recover_stuck() {
+    // Do a failed run and save the log so we can try recovering from it.
+    let log = run_example("recover_stuck1", |exec| {
+        exec.arg("run")
+            .arg("--dump-to=-")
+            .arg("--quiet")
+            .arg("--inject-error=instance_boot")
+            .arg("--inject-undo-error=instance_id")
+    });
+
+    // First, try recovery without having changed anything.
+    let recovery_done = run_example("recover_stuck2", |exec| {
+        exec.arg("run").arg("--recover-from=-").stdin(log.as_str())
+    });
+    assert_contents(
+        "tests/test_smoke_run_recover_stuck_done.out",
+        &recovery_done,
+    );
+}

@@ -268,7 +268,8 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
 
                     NodeExecState::QueuedToUndo
                     | NodeExecState::UndoInProgress
-                    | NodeExecState::Undone(_) => {
+                    | NodeExecState::Undone(_)
+                    | NodeExecState::UndoFailed => {
                         panic!(
                             "already undoing or undone node whose child was \
                              just now undone"
@@ -1536,6 +1537,7 @@ enum NodeExecState {
     QueuedToUndo,
     UndoInProgress,
     Undone(UndoMode),
+    UndoFailed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1558,6 +1560,7 @@ impl fmt::Display for NodeExecState {
             NodeExecState::Undone(UndoMode::ActionNeverRan) => "abandoned",
             NodeExecState::Undone(UndoMode::ActionUndone) => "undone",
             NodeExecState::Undone(UndoMode::ActionFailed) => "failed",
+            NodeExecState::UndoFailed => "undo-failed",
         })
     }
 }
@@ -1582,6 +1585,9 @@ impl SagaExecLiveState {
         } else if let SagaNodeLoadStatus::Failed(_) = load_status {
             assert!(self.node_errors.contains_key(&node_id));
             set.insert(NodeExecState::Failed);
+        } else if let SagaNodeLoadStatus::UndoFailed(_) = load_status {
+            assert!(self.undo_errors.contains_key(&node_id));
+            set.insert(NodeExecState::UndoFailed);
         } else if self.node_outputs.contains_key(&node_id) {
             if self.node_tasks.contains_key(&node_id) {
                 set.insert(NodeExecState::UndoInProgress);
@@ -2075,6 +2081,7 @@ fn recovery_validate_parent(
                 SagaNodeLoadStatus::Succeeded(_)
                     | SagaNodeLoadStatus::UndoStarted(_)
                     | SagaNodeLoadStatus::UndoFinished
+                    | SagaNodeLoadStatus::UndoFailed(_)
             )
         }
 
@@ -2085,6 +2092,7 @@ fn recovery_validate_parent(
             SagaNodeLoadStatus::Succeeded(_)
                 | SagaNodeLoadStatus::UndoStarted(_)
                 | SagaNodeLoadStatus::UndoFinished
+                | SagaNodeLoadStatus::UndoFailed(_)
         ),
 
         // If we've failed to undo the child node, then the parent must be
