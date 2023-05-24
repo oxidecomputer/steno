@@ -144,6 +144,16 @@ impl ActionError {
 }
 
 /// An error produced by a failed undo action
+///
+/// **Returning an error from an undo action should be avoided if at all
+/// possible.**  If undo actions experience transient issues, they should
+/// generally retry until the undo action completes successfully.  That's
+/// because by definition, failure of an undo action means that the saga's
+/// actions cannot be unwound.  The system cannot move forward to the desired
+/// saga end state nor backward to the initial state.  It's left forever in some
+/// partially-updated state.  This should really only happen because of a bug.
+/// It should be expected that human intervention will be required to repair the
+/// result of an undo action that has failed.
 #[derive(Clone, Debug, Deserialize, Error, JsonSchema, Serialize)]
 pub enum UndoActionError {
     /// Undo action failed due to a consumer-specific error
