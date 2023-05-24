@@ -1000,8 +1000,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             }
         }
 
-        // XXX-dap
-        // - review all places where we check SagaCachedState::Done
         let live_state = self.live_state.try_lock().unwrap();
         assert!(
             live_state.exec_state == SagaCachedState::Done
