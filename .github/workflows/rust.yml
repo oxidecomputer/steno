@@ -33,13 +33,11 @@ jobs:
       run: cargo clippy -- --version
     - name: Run Clippy Lints
       #
-      # Clippy overrides should go into src/lib.rs so that developers running
-      # `cargo clippy` see the same behavior as we see here in the GitHub
-      # Action.  In some cases, the overrides also need to appear here because
-      # clippy does not always honor the crate-wide overrides.  See
-      # rust-lang/rust-clippy#6610.
+      # Clippy's style nits are useful, but not worth keeping in CI.  This
+      # override belongs in src/lib.rs, and it is there, but that doesn't
+      # reliably work due to rust-lang/rust-clippy#6610.
       #
-      run: cargo clippy -- -A clippy::style -D warnings
+      run: cargo clippy --all-targets -- --deny warnings --allow clippy::style
 
   build-and-test:
     runs-on: ${{ matrix.os }}

@@ -1060,7 +1060,7 @@ mod test {
         builder.append(Node::constant("a", serde_json::Value::Null));
         builder.append_parallel(vec![
             Node::constant("c", serde_json::Value::Null),
-            Node::subsaga("b", subsaga_dag.clone(), "c"),
+            Node::subsaga("b", subsaga_dag, "c"),
         ]);
         let error = builder.build().unwrap_err();
         println!("{:?}", error);
