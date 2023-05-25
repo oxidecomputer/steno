@@ -21,6 +21,7 @@ use steno::Node;
 use steno::SagaDag;
 use steno::SagaId;
 use steno::SagaName;
+use steno::SagaResultErr;
 use steno::SagaType;
 use steno::SecClient;
 use uuid::Uuid;
@@ -116,9 +117,14 @@ async fn book_trip(
             );
             println!("\nraw summary:\n{:?}", success.saga_output::<Summary>());
         }
-        Err(error) => {
-            println!("action failed: {}", error.error_node_name.as_ref());
-            println!("error: {}", error.error_source);
+        Err(SagaResultErr { error_node_name, error_source, undo_failure }) => {
+            println!("action failed: {}", error_node_name.as_ref());
+            println!("error: {}", error_source);
+            if let Some((undo_node_name, undo_error_source)) = undo_failure {
+                println!("additionally:");
+                println!("undo action failed: {}", undo_node_name.as_ref());
+                println!("error: {}", undo_error_source);
+            }
         }
     }
 }

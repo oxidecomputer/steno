@@ -4,6 +4,7 @@ use crate::dag::InternalNode;
 use crate::dag::NodeName;
 use crate::rust_features::ExpectNone;
 use crate::saga_action_error::ActionError;
+use crate::saga_action_error::UndoActionError;
 use crate::saga_action_generic::Action;
 use crate::saga_action_generic::ActionConstant;
 use crate::saga_action_generic::ActionData;
@@ -28,6 +29,7 @@ use futures::future::BoxFuture;
 use futures::lock::Mutex;
 use futures::FutureExt;
 use futures::StreamExt;
+use futures::TryStreamExt;
 use petgraph::algo::toposort;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::Topo;
@@ -36,6 +38,7 @@ use petgraph::Direction;
 use petgraph::Graph;
 use petgraph::Incoming;
 use petgraph::Outgoing;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::convert::TryFrom;
@@ -52,6 +55,7 @@ use tokio::task::JoinHandle;
 struct SgnsDone(Arc<serde_json::Value>);
 struct SgnsFailed(ActionError);
 struct SgnsUndone(UndoMode);
+struct SgnsUndoFailed(UndoActionError);
 
 struct SagaNode<S: SagaNodeStateType> {
     node_id: NodeIndex,
@@ -62,6 +66,7 @@ trait SagaNodeStateType {}
 impl SagaNodeStateType for SgnsDone {}
 impl SagaNodeStateType for SgnsFailed {}
 impl SagaNodeStateType for SgnsUndone {}
+impl SagaNodeStateType for SgnsUndoFailed {}
 
 // TODO-design Is this right?  Is the trait supposed to be empty?
 trait SagaNodeRest<UserType: SagaType>: Send + Sync {
@@ -92,9 +97,15 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsDone> {
 
         if self.node_id == exec.dag.end_node {
             // If we've completed the last node, the saga is done.
+            assert!(!live_state.stopping);
             assert_eq!(live_state.exec_state, SagaCachedState::Running);
             assert_eq!(graph.node_count(), live_state.node_outputs.len());
             live_state.mark_saga_done();
+            return;
+        }
+
+        // If we're stopping, don't kick off anything else.
+        if live_state.stopping {
             return;
         }
 
@@ -140,6 +151,11 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsFailed> {
             .insert(self.node_id, self.state.0.clone())
             .expect_none("node finished twice (storing error)");
 
+        // If we're stopping, don't kick off anything else.
+        if live_state.stopping {
+            return;
+        }
+
         if live_state.exec_state == SagaCachedState::Unwinding {
             // This node failed while we're already unwinding.  We don't
             // need to kick off unwinding again.  We could in theory
@@ -183,7 +199,6 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
         live_state: &mut SagaExecLiveState,
     ) {
         let graph = &exec.dag.graph;
-        assert_eq!(live_state.exec_state, SagaCachedState::Unwinding);
         live_state
             .nodes_undone
             .insert(self.node_id, self.state.0)
@@ -191,9 +206,17 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
 
         if self.node_id == exec.dag.start_node {
             // If we've undone the start node, the saga is done.
+            assert!(!live_state.stopping);
             live_state.mark_saga_done();
             return;
         }
+
+        // If we're stopping, don't kick off anything else.
+        if live_state.stopping {
+            return;
+        }
+
+        assert_eq!(live_state.exec_state, SagaCachedState::Unwinding);
 
         // During unwinding, a node's becoming undone means it's time to check
         // ancestor nodes to see if they're now undoable.
@@ -245,7 +268,8 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
 
                     NodeExecState::QueuedToUndo
                     | NodeExecState::UndoInProgress
-                    | NodeExecState::Undone(_) => {
+                    | NodeExecState::Undone(_)
+                    | NodeExecState::UndoFailed => {
                         panic!(
                             "already undoing or undone node whose child was \
                              just now undone"
@@ -254,6 +278,27 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
                 }
             }
         }
+    }
+}
+
+impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndoFailed> {
+    fn log_event(&self) -> SagaNodeEventType {
+        SagaNodeEventType::UndoFailed(self.state.0.clone())
+    }
+
+    fn propagate(
+        &self,
+        _exec: &SagaExecutor<UserType>,
+        live_state: &mut SagaExecLiveState,
+    ) {
+        assert!(live_state.exec_state == SagaCachedState::Unwinding);
+        live_state
+            .undo_errors
+            .insert(self.node_id, self.state.0.clone())
+            .expect_none("undo node failed twice (storing error)");
+
+        // Once any node's undo action has failed, the saga becomes stuck.
+        live_state.saga_stuck();
     }
 }
 
@@ -391,6 +436,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         // not a result of corrupted database state.
         let forward = !sglog.unwinding();
         let mut live_state = SagaExecLiveState {
+            stopping: false,
             exec_state: if forward {
                 SagaCachedState::Running
             } else {
@@ -402,8 +448,10 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             node_outputs: BTreeMap::new(),
             nodes_undone: BTreeMap::new(),
             node_errors: BTreeMap::new(),
+            undo_errors: BTreeMap::new(),
             sglog,
             injected_errors: BTreeSet::new(),
+            injected_undo_errors: BTreeSet::new(),
             injected_repeats: BTreeMap::new(),
             sec_hdl,
             saga_id,
@@ -618,6 +666,16 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     live_state
                         .nodes_undone
                         .insert(node_id, UndoMode::ActionUndone);
+                }
+                SagaNodeLoadStatus::UndoFailed(error) => {
+                    assert!(!forward);
+                    live_state
+                        .undo_errors
+                        .insert(node_id, error.clone())
+                        .expect_none(
+                            "recovered node twice (undo failure case)",
+                        );
+                    live_state.saga_stuck();
                 }
             }
 
@@ -845,6 +903,16 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         live_state.injected_errors.insert(node_id);
     }
 
+    /// Simulates an error in the undo action at a given node in the saga graph
+    ///
+    /// When unwinding reaches this node, instead of running the normal undo
+    /// action for this node, an error will be generated and processed as though
+    /// the undo action itself had produced the error.
+    pub async fn inject_error_undo(&self, node_id: NodeIndex) {
+        let mut live_state = self.live_state.lock().await;
+        live_state.injected_undo_errors.insert(node_id);
+    }
+
     /// Forces a given node to be executed twice
     ///
     /// When execution reaches this node, the action and undo actions
@@ -874,7 +942,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             let live_state = self.live_state.lock().await;
             if live_state.exec_state == SagaCachedState::Done {
                 self.finish_tx.send(()).expect("failed to send finish message");
-                live_state.sec_hdl.saga_update(SagaCachedState::Done).await;
+                live_state.sec_hdl.saga_update(live_state.exec_state).await;
                 return;
             }
         }
@@ -930,7 +998,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let live_state = self.live_state.try_lock().unwrap();
         assert_eq!(live_state.exec_state, SagaCachedState::Done);
         self.finish_tx.send(()).expect("failed to send finish message");
-        live_state.sec_hdl.saga_update(SagaCachedState::Done).await;
+        live_state.sec_hdl.saga_update(live_state.exec_state).await;
     }
 
     // Kick off any nodes that are ready to run.  (Right now, we kick off
@@ -944,6 +1012,13 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         tx: &mpsc::Sender<TaskCompletion<UserType>>,
     ) {
         let mut live_state = self.live_state.lock().await;
+
+        if live_state.stopping {
+            // We're waiting for outstanding tasks to stop.  Don't kick off any
+            // more.
+            assert!(!live_state.node_tasks.is_empty());
+            return;
+        }
 
         // TODO is it possible to deadlock with a concurrency limit given that
         // we always do "todo" before "undo"?
@@ -1015,7 +1090,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             );
 
             let saga_params = self.saga_params_for(&live_state, node_id);
-            let sgaction = self.node_action(&live_state, node_id);
+            let sgaction = if live_state.injected_undo_errors.contains(&node_id)
+            {
+                Arc::new(ActionInjectError {}) as Arc<dyn Action<UserType>>
+            } else {
+                self.node_action(&live_state, node_id)
+            };
             let task_params = TaskParams {
                 dag: Arc::clone(&self.dag),
                 live_state: Arc::clone(&self.live_state),
@@ -1110,7 +1190,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 SagaNodeLoadStatus::Succeeded(_)
                 | SagaNodeLoadStatus::Failed(_)
                 | SagaNodeLoadStatus::UndoStarted(_)
-                | SagaNodeLoadStatus::UndoFinished => {
+                | SagaNodeLoadStatus::UndoFinished
+                | SagaNodeLoadStatus::UndoFailed(_) => {
                     panic!("starting node in bad state")
                 }
             }
@@ -1168,7 +1249,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 SagaNodeLoadStatus::NeverStarted
                 | SagaNodeLoadStatus::Started
                 | SagaNodeLoadStatus::Failed(_)
-                | SagaNodeLoadStatus::UndoFinished => {
+                | SagaNodeLoadStatus::UndoFinished
+                | SagaNodeLoadStatus::UndoFailed(_) => {
                     panic!("undoing node in bad state")
                 }
             }
@@ -1182,23 +1264,34 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             user_context: Arc::clone(&task_params.user_context),
         };
 
-        // TODO-robustness We have to figure out what it means to fail here and
-        // what we want to do about it.  See steno#26.
-        task_params.action.undo_it(make_action_context()).await.unwrap();
-        if let Some(repeat) = task_params.injected_repeat {
-            for _ in 0..repeat.undo.get() - 1 {
-                task_params
-                    .action
+        let count =
+            task_params.injected_repeat.map(|r| r.undo.get()).unwrap_or(1);
+        let action = &task_params.action;
+        let undo_error = futures::stream::iter(0..count)
+            .map(Ok::<u32, _>)
+            .try_for_each(|i| async move {
+                action
                     .undo_it(make_action_context())
                     .await
-                    .unwrap();
-            }
-        }
-        let node = Box::new(SagaNode {
-            node_id,
-            state: SgnsUndone(UndoMode::ActionUndone),
-        });
-        SagaExecutor::finish_task(task_params, node).await;
+                    .with_context(|| format!("undo action attempt {}", i + 1))
+            })
+            .await;
+
+        if let Err(error) = undo_error {
+            let node = Box::new(SagaNode {
+                node_id,
+                state: SgnsUndoFailed(UndoActionError::PermanentFailure {
+                    source_error: json!({ "message": format!("{:#}", error) }),
+                }),
+            });
+            SagaExecutor::finish_task(task_params, node).await;
+        } else {
+            let node = Box::new(SagaNode {
+                node_id,
+                state: SgnsUndone(UndoMode::ActionUndone),
+            });
+            SagaExecutor::finish_task(task_params, node).await;
+        };
     }
 
     async fn finish_task(
@@ -1254,6 +1347,42 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .expect("attempted to get result while saga still running?");
         assert_eq!(live_state.exec_state, SagaCachedState::Done);
 
+        if !live_state.undo_errors.is_empty() {
+            let (error_node_id, error_source) =
+                live_state.node_errors.iter().next().expect(
+                    "expected an action to have failed if an \
+                        undo action failed",
+                );
+            let (undo_error_node_id, undo_error_source) =
+                live_state.undo_errors.iter().next().unwrap();
+            let error_node_name = self
+                .dag
+                .get(*error_node_id)
+                .unwrap()
+                .node_name()
+                .expect("unexpected failure from unnamed node")
+                .clone();
+            let undo_error_node_name = self
+                .dag
+                .get(*undo_error_node_id)
+                .unwrap()
+                .node_name()
+                .expect("unexpected failure from unnamed undo node")
+                .clone();
+            return SagaResult {
+                saga_id: self.saga_id,
+                saga_log: live_state.sglog.clone(),
+                kind: Err(SagaResultErr {
+                    error_node_name,
+                    error_source: error_source.clone(),
+                    undo_failure: Some((
+                        undo_error_node_name,
+                        undo_error_source.clone(),
+                    )),
+                }),
+            };
+        }
+
         if live_state.nodes_undone.contains_key(&self.dag.start_node) {
             assert!(live_state.nodes_undone.contains_key(&self.dag.end_node));
 
@@ -1278,6 +1407,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 kind: Err(SagaResultErr {
                     error_node_name,
                     error_source: error_source.clone(),
+                    undo_failure: None,
                 }),
             };
         }
@@ -1360,6 +1490,11 @@ struct SagaExecLiveState {
     /// Overall execution state
     exec_state: SagaCachedState,
 
+    /// We're coming to rest, neither having fully finished nor unwound
+    /// (as might happen if encountering an unretryable error from an undo
+    /// action)
+    stopping: bool,
+
     /// Queue of nodes that have not started but whose deps are satisfied
     queue_todo: Vec<NodeIndex>,
     /// Queue of nodes whose undo action needs to be run.
@@ -1374,12 +1509,17 @@ struct SagaExecLiveState {
     nodes_undone: BTreeMap<NodeIndex, UndoMode>,
     /// Errors produced by failed actions.
     node_errors: BTreeMap<NodeIndex, ActionError>,
+    /// Errors produced by failed undo actions.
+    undo_errors: BTreeMap<NodeIndex, UndoActionError>,
 
     /// Persistent state
     sglog: SagaLog,
 
     /// Injected errors
     injected_errors: BTreeSet<NodeIndex>,
+
+    /// Injected errors into undo actions
+    injected_undo_errors: BTreeSet<NodeIndex>,
 
     /// Injected actions which should be called repeatedly
     injected_repeats: BTreeMap<NodeIndex, RepeatInjected>,
@@ -1395,6 +1535,7 @@ enum NodeExecState {
     QueuedToUndo,
     UndoInProgress,
     Undone(UndoMode),
+    UndoFailed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1417,6 +1558,7 @@ impl fmt::Display for NodeExecState {
             NodeExecState::Undone(UndoMode::ActionNeverRan) => "abandoned",
             NodeExecState::Undone(UndoMode::ActionUndone) => "undone",
             NodeExecState::Undone(UndoMode::ActionFailed) => "failed",
+            NodeExecState::UndoFailed => "undo-failed",
         })
     }
 }
@@ -1441,6 +1583,9 @@ impl SagaExecLiveState {
         } else if let SagaNodeLoadStatus::Failed(_) = load_status {
             assert!(self.node_errors.contains_key(&node_id));
             set.insert(NodeExecState::Failed);
+        } else if let SagaNodeLoadStatus::UndoFailed(_) = load_status {
+            assert!(self.undo_errors.contains_key(&node_id));
+            set.insert(NodeExecState::UndoFailed);
         } else if self.node_outputs.contains_key(&node_id) {
             if self.node_tasks.contains_key(&node_id) {
                 set.insert(NodeExecState::UndoInProgress);
@@ -1469,6 +1614,7 @@ impl SagaExecLiveState {
     }
 
     fn mark_saga_done(&mut self) {
+        assert!(!self.stopping);
         assert!(self.queue_todo.is_empty());
         assert!(self.queue_undo.is_empty());
         assert!(
@@ -1478,14 +1624,30 @@ impl SagaExecLiveState {
         self.exec_state = SagaCachedState::Done;
     }
 
+    fn saga_stuck(&mut self) {
+        assert!(self.exec_state == SagaCachedState::Unwinding);
+        self.stopping = true;
+        if self.node_tasks.is_empty() {
+            self.exec_state = SagaCachedState::Done;
+        }
+    }
+
     fn node_task(&mut self, node_id: NodeIndex, task: JoinHandle<()>) {
+        assert!(!self.stopping);
         self.node_tasks.insert(node_id, task);
     }
 
     fn node_task_done(&mut self, node_id: NodeIndex) -> JoinHandle<()> {
-        self.node_tasks
+        let rv = self
+            .node_tasks
             .remove(&node_id)
-            .expect("processing task completion with no task present")
+            .expect("processing task completion with no task present");
+
+        if self.stopping && self.node_tasks.is_empty() {
+            self.exec_state = SagaCachedState::Done;
+        }
+
+        rv
     }
 
     fn node_output(&self, node_id: NodeIndex) -> Arc<serde_json::Value> {
@@ -1548,9 +1710,14 @@ impl SagaResultOk {
 ///
 /// When a saga fails, it's always one action's failure triggers failure of the
 /// saga.  It's possible that other actions also failed, but only if they were
-/// running concurrently.  This structure represents one of these errors, any of
-/// which could have caused the saga to fail, depending on the order in which
-/// they completed.
+/// running concurrently.  This structure describes one of these errors, any of
+/// which _could_ have caused the saga to fail (depending on the order in which
+/// they completed).
+///
+/// After such a failure, when the saga is unwinding, it's possible for an undo
+/// action to also fail.   Again, there could be more than one undo action
+/// failure.  If any undo actions failed, this structure also describes one of
+/// those failures.
 // TODO-coverage We should test that sagas do the right thing when two actions
 // fail concurrently.
 //
@@ -1566,8 +1733,12 @@ impl SagaResultOk {
 // running, but not after it's failed.)
 #[derive(Clone, Debug)]
 pub struct SagaResultErr {
+    /// name of a node whose action failed
     pub error_node_name: NodeName,
+    /// details about the action failure
     pub error_source: ActionError,
+    /// if an undo action also failed, details about that failure
+    pub undo_failure: Option<(NodeName, UndoActionError)>,
 }
 
 /// Summarizes in-progress execution state of a saga
@@ -1908,6 +2079,7 @@ fn recovery_validate_parent(
                 SagaNodeLoadStatus::Succeeded(_)
                     | SagaNodeLoadStatus::UndoStarted(_)
                     | SagaNodeLoadStatus::UndoFinished
+                    | SagaNodeLoadStatus::UndoFailed(_)
             )
         }
 
@@ -1918,7 +2090,14 @@ fn recovery_validate_parent(
             SagaNodeLoadStatus::Succeeded(_)
                 | SagaNodeLoadStatus::UndoStarted(_)
                 | SagaNodeLoadStatus::UndoFinished
+                | SagaNodeLoadStatus::UndoFailed(_)
         ),
+
+        // If we've failed to undo the child node, then the parent must be
+        // "done".
+        SagaNodeLoadStatus::UndoFailed(_) => {
+            matches!(parent_status, SagaNodeLoadStatus::Succeeded(_))
+        }
 
         // If a node has never started, the only illegal states for a parent are
         // those associated with undoing, since the child must be undone first.
@@ -2049,6 +2228,12 @@ pub trait SagaExecManager: fmt::Debug + Send + Sync {
     /// See [`Dag::get_index()`] to get the node_id for a node.
     fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()>;
 
+    /// Replaces the undo action at the specified node with one that just
+    /// generates an error
+    ///
+    /// See [`Dag::get_index()`] to get the node_id for a node.
+    fn inject_error_undo(&self, node_id: NodeIndex) -> BoxFuture<'_, ()>;
+
     /// Replaces the action at the specified node with one that calls both the
     /// action (and undo action, if called) twice.
     ///
@@ -2078,6 +2263,10 @@ where
 
     fn inject_error(&self, node_id: NodeIndex) -> BoxFuture<'_, ()> {
         self.inject_error(node_id).boxed()
+    }
+
+    fn inject_error_undo(&self, node_id: NodeIndex) -> BoxFuture<'_, ()> {
+        self.inject_error_undo(node_id).boxed()
     }
 
     fn inject_repeat(

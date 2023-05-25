@@ -39,6 +39,6 @@ recovered state
 +-- abandoned: Print (produces "print")
 +-- abandoned: (end node)
 
-result: FAILURE
+result: ACTION FAILURE
 failed at node:    "instance_boot"
 failed with error: error injected

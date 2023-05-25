@@ -1,6 +1,7 @@
 //! Persistent state for sagas
 
 use crate::saga_action_error::ActionError;
+use crate::saga_action_error::UndoActionError;
 use crate::SagaId;
 use anyhow::anyhow;
 use anyhow::Context;
@@ -84,6 +85,8 @@ pub enum SagaNodeEventType {
     UndoStarted,
     /// The undo action has finished
     UndoFinished,
+    /// The undo action has failed
+    UndoFailed(UndoActionError),
 }
 
 impl fmt::Display for SagaNodeEventType {
@@ -100,6 +103,7 @@ impl SagaNodeEventType {
             SagaNodeEventType::Failed(_) => "failed",
             SagaNodeEventType::UndoStarted => "undo_started",
             SagaNodeEventType::UndoFinished => "undo_finished",
+            SagaNodeEventType::UndoFailed(_) => "undo_failed",
         }
     }
 }
@@ -126,8 +130,10 @@ pub enum SagaNodeLoadStatus {
     Failed(ActionError),
     /// The undo action has started running (with output data from success)
     UndoStarted(Arc<serde_json::Value>),
-    /// The undo action has finished
+    /// The undo action has finished successfully
     UndoFinished,
+    /// The undo action has failed
+    UndoFailed(UndoActionError),
 }
 
 impl SagaNodeLoadStatus {
@@ -155,6 +161,10 @@ impl SagaNodeLoadStatus {
                 SagaNodeLoadStatus::UndoStarted(_),
                 SagaNodeEventType::UndoFinished,
             ) => Ok(SagaNodeLoadStatus::UndoFinished),
+            (
+                SagaNodeLoadStatus::UndoStarted(_),
+                SagaNodeEventType::UndoFailed(e),
+            ) => Ok(SagaNodeLoadStatus::UndoFailed(e.clone())),
             _ => Err(SagaLogError::IllegalEventForState {
                 current_status: self.clone(),
                 event_type: event_type.clone(),
@@ -213,6 +223,7 @@ impl SagaLog {
             SagaNodeEventType::Failed(_) => 3,
             SagaNodeEventType::UndoStarted => 4,
             SagaNodeEventType::UndoFinished => 5,
+            SagaNodeEventType::UndoFailed(_) => 6,
         });
 
         // Replay the events for this saga.

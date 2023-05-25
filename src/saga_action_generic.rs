@@ -165,8 +165,9 @@ impl<UserType: SagaType> Action<UserType> for ActionInjectError {
     }
 
     fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
-        // We should never undo an action that failed.
-        unimplemented!();
+        // We should never undo an action that failed.  But this same impl is
+        // plugged into a saga when an "undo action" error is injected.
+        Box::pin(futures::future::err(anyhow::anyhow!("error injected")))
     }
 
     fn name(&self) -> ActionName {

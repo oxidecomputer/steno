@@ -15,6 +15,10 @@
 
 https://github.com/oxidecomputer/steno/compare/v0.3.1\...HEAD[Full list of commits]
 
+=== Breaking changes
+
+* https://github.com/oxidecomputer/steno/pull/138[#138] Steno no longer panics when an undo action fails.  `SagaResultErr` has a new optional field describing whether any undo action failed during unwinding.  **You should check this.**  If an undo action fails, then the program has failed to provide the usual guarantee that a saga either runs to completion or completely unwinds.  What to do next is application-specific but in general this cannot be automatically recovered from.  (If there are steps that can automatically recover in this case, the undo action that failed should probably do that instead.)
+
 == 0.3.1 (released 2023-01-06)
 
 https://github.com/oxidecomputer/steno/compare/v0.3.0\...v0.3.1[Full list of commits]
