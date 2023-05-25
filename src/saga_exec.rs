@@ -292,7 +292,6 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndoFailed> {
         live_state: &mut SagaExecLiveState,
     ) {
         assert!(live_state.exec_state == SagaCachedState::Unwinding);
-        assert!(!live_state.undo_errors.contains_key(&self.node_id));
         live_state
             .undo_errors
             .insert(self.node_id, self.state.0.clone())
@@ -670,7 +669,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 }
                 SagaNodeLoadStatus::UndoFailed(error) => {
                     assert!(!forward);
-                    assert!(!live_state.undo_errors.contains_key(&node_id));
                     live_state
                         .undo_errors
                         .insert(node_id, error.clone())
