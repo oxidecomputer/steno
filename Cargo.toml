@@ -24,7 +24,8 @@ features =  [ "serde-1" ]
 
 [dependencies.chrono]
 version = "0.4"
-features = [ "serde" ]
+features = [ "clock", "serde", "std" ]
+default-features = false
 
 [dependencies.schemars]
 version = "0.8.12"
