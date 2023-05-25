@@ -45,5 +45,5 @@ failed with error: error injected
 FOLLOWED BY UNDO ACTION FAILURE
 failed at node:    "instance_id"
 failed with error: undo action failed permanently: {
-  "message": "undo action attempt 1: injected error"
+  "message": "undo action attempt 1: error injected"
 }
