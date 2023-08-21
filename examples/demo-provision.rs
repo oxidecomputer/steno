@@ -131,8 +131,8 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
 
     println!("*** initial state ***");
     let saga_id = make_saga_id();
-    let uctx = Arc::new(ExampleContext::default());
-    let _ = sec.saga_create(saga_id, uctx, dag, registry).await?;
+    let uctx = Arc::new(ExampleContext {});
+    let _unused_future = sec.saga_create(saga_id, uctx, dag, registry).await?;
 
     let saga = sec.saga_get(saga_id).await.unwrap();
     let status = saga.state.status();
@@ -187,7 +187,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
     let log = make_log();
     let sec = make_sec(&log);
     let registry = make_example_action_registry();
-    let uctx = Arc::new(ExampleContext::default());
+    let uctx = Arc::new(ExampleContext {});
     let (saga_id, future, dag) =
         if let Some(input_log_path) = &args.recover_from {
             if !args.quiet {
