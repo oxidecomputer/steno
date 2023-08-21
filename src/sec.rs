@@ -1820,7 +1820,7 @@ mod test {
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
-        let _ = sec
+        let _unused_future = sec
             .saga_create(
                 saga_id,
                 Arc::clone(&context),
@@ -1874,7 +1874,7 @@ mod test {
         // Saga Creation
         let saga_id = SagaId(Uuid::new_v4());
         let context = Arc::new(TestContext::new());
-        let _ = sec
+        let _unused_future = sec
             .saga_create(saga_id, Arc::clone(&context), dag, registry)
             .await
             .expect("failed to create saga");
