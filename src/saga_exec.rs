@@ -1,5 +1,8 @@
 //! Manages execution of a saga
 
+// Work around proptest-rs/proptest#364.
+#![allow(clippy::arc_with_non_send_sync)]
+
 use crate::dag::InternalNode;
 use crate::dag::NodeName;
 use crate::rust_features::ExpectNone;
