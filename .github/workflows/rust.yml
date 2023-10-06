@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
     # actions/checkout@v2
-    - uses: actions/checkout@72f2cec99f417b1a1c5e2e88945068983b7965f9
+    - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
     - name: Report cargo version
       run: cargo --version
     - name: Report rustfmt version
@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
     # actions/checkout@v2
-    - uses: actions/checkout@72f2cec99f417b1a1c5e2e88945068983b7965f9
+    - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
     - name: Report cargo version
       run: cargo --version
     - name: Report Clippy version
@@ -46,7 +46,7 @@ jobs:
         os: [ ubuntu-20.04, windows-2022, macos-12 ]
     steps:
     # actions/checkout@v2
-    - uses: actions/checkout@72f2cec99f417b1a1c5e2e88945068983b7965f9
+    - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608
     - uses: actions-rs/toolchain@88dc2356392166efad76775c878094f4e83ff746
       with:
         profile: minimal
