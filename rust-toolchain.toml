@@ -2,5 +2,5 @@
 # developers and test environments.  The intent is to keep this updated as new
 # stable versions are released.
 [toolchain]
-channel = "1.74.1"
+channel = "1.75.0"
 profile = "default"
