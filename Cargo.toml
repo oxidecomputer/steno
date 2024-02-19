@@ -50,7 +50,7 @@ features = [ "serde", "v4" ]
 [dev-dependencies]
 expectorate = "1.0"
 slog-async = "2.8"
-slog-term = "2.8"
+slog-term = "2.9"
 structopt = "0.3"
 subprocess = "0.2.6"
 proptest = "1.4.0"
