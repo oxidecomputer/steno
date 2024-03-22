@@ -309,6 +309,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
             file_holder = fs::OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(true)
                 .open(output_log_path)
                 .with_context(|| {
                     format!("open output log \"{}\"", output_log_path.display())
