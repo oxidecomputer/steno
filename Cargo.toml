@@ -28,7 +28,7 @@ features = [ "clock", "serde", "std" ]
 default-features = false
 
 [dependencies.schemars]
-version = "0.8.16"
+version = "0.8.21"
 features = [ "chrono", "uuid1" ]
 
 [dependencies.serde]
