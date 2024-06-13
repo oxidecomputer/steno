@@ -907,7 +907,7 @@ impl Sec {
                 waiter: done_tx,
             },
         };
-        if self.sagas.get(&saga_id).is_some() {
+        if self.sagas.contains_key(&saga_id) {
             return Sec::client_respond(
                 &log,
                 ack_tx,
