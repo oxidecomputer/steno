@@ -4,7 +4,6 @@ use crate::saga_action_generic::ActionData;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::json;
 use std::fmt::Display;
 use thiserror::Error;
 
@@ -156,16 +155,19 @@ impl ActionError {
 /// It should be expected that human intervention will be required to repair the
 /// result of an undo action that has failed.
 #[derive(Clone, Debug, Deserialize, Error, JsonSchema, Serialize)]
-pub enum UndoActionError {
-    /// Undo action failed due to a consumer-specific error
-    #[error("undo action failed permanently: {source_error:#}")]
-    PermanentFailure { source_error: serde_json::Value },
+#[error("undo action failed permanently: {message}")]
+pub struct UndoActionPermanentError {
+    message: String,
 }
 
-impl UndoActionError {
-    pub fn permanent_failure(error: anyhow::Error) -> UndoActionError {
-        UndoActionError::PermanentFailure {
-            source_error: json!({ "message": format!("{:#}", error) }),
-        }
+impl From<anyhow::Error> for UndoActionPermanentError {
+    fn from(value: anyhow::Error) -> Self {
+        UndoActionPermanentError { message: format!("{:#}", value) }
+    }
+}
+
+impl From<ActionError> for UndoActionPermanentError {
+    fn from(value: ActionError) -> Self {
+        UndoActionPermanentError::from(anyhow::Error::from(value))
     }
 }

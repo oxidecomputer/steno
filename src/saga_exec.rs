@@ -7,7 +7,6 @@ use crate::dag::InternalNode;
 use crate::dag::NodeName;
 use crate::rust_features::ExpectNone;
 use crate::saga_action_error::ActionError;
-use crate::saga_action_error::UndoActionError;
 use crate::saga_action_generic::Action;
 use crate::saga_action_generic::ActionConstant;
 use crate::saga_action_generic::ActionData;
@@ -24,6 +23,7 @@ use crate::SagaLog;
 use crate::SagaNodeEvent;
 use crate::SagaNodeId;
 use crate::SagaType;
+use crate::UndoActionPermanentError;
 use anyhow::anyhow;
 use anyhow::ensure;
 use anyhow::Context;
@@ -57,7 +57,7 @@ use tokio::task::JoinHandle;
 struct SgnsDone(Arc<serde_json::Value>);
 struct SgnsFailed(ActionError);
 struct SgnsUndone(UndoMode);
-struct SgnsUndoFailed(UndoActionError);
+struct SgnsUndoFailed(UndoActionPermanentError);
 
 struct SagaNode<S: SagaNodeStateType> {
     node_id: NodeIndex,
@@ -1505,7 +1505,7 @@ struct SagaExecLiveState {
     /// Errors produced by failed actions.
     node_errors: BTreeMap<NodeIndex, ActionError>,
     /// Errors produced by failed undo actions.
-    undo_errors: BTreeMap<NodeIndex, UndoActionError>,
+    undo_errors: BTreeMap<NodeIndex, UndoActionPermanentError>,
 
     /// Persistent state
     sglog: SagaLog,
@@ -1733,7 +1733,7 @@ pub struct SagaResultErr {
     /// details about the action failure
     pub error_source: ActionError,
     /// if an undo action also failed, details about that failure
-    pub undo_failure: Option<(NodeName, UndoActionError)>,
+    pub undo_failure: Option<(NodeName, UndoActionPermanentError)>,
 }
 
 /// Summarizes in-progress execution state of a saga

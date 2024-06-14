@@ -17,48 +17,13 @@ https://github.com/oxidecomputer/steno/compare/v0.4.0\...HEAD[Full list of commi
 
 === Breaking changes
 
-* The error type for undo actions is now called `UndoActionError`.  It used to be simply `anyhow::Error`.  `UndoActionError` is an enum that currently has only one variant called `PermanentFailure`, and it can be constructed from an `anyhow::Error` using `UndoActionError::permanent_failure(anyhow_error)`.
+* The error type for undo actions is now called `UndoActionPermanentError`.  It used to be simply `anyhow::Error`.  Steno's behavior when undo actions return an error has _not_ changed.  This explicit type was added to better communicate that if you return an error from an undo action, the saga will become stuck.  For convenience, there are `From` impls to produce an `UndoActionPermanentError` from an `anyhow::Error` or an `ActionError`.
 +
 **What you need to do:** For any function implementing an undo action:
 +
 ** If the return type was `Result<(), anyhow::Error>`, change it to `Result<(), UndoActionError>`.  If the return type was `UndoResult`, then you don't need to change the return type.
-** In the body of the function, any returned errors must be wrapped with `UndoActionError::permanent_failure`.
-*** If you were directly returning `Err(anyhow!("some message"))`, you can instead return `Err(UndoActionError::permanent_failure(anyhow!("some message")))`.
-*** If you were doing something like `fallible_function().context("some message")?` to convert some _other_ error into an `anyhow::Error` with additional context and then return it, you can instead use `fallible_function().context("some message").map_err(UndoActionError::permanent_failure)?`
-+
-For example, if you had this with Steno 0.4:
-[source,rust]
-----
-async fn saga_cancel_car(
-    action_context: ActionContext<TripSaga>,
-) -> Result<(), anyhow::Error> {
-    // ...
-    let trip_context = action_context.user_data();
-    let confirmation: CarReservation = action_context
-        .lookup("car")
-	.context("looking up action's output")?;
-    // ... (make request to another service -- must not fail)
-    Ok(())
-}
-----
-+
-You'd change it to this:
-+
-[source,rust]
-----
-async fn saga_cancel_car(
-    action_context: ActionContext<TripSaga>,
-) -> Result<(), UndoActionError> {
-    // ...
-    let trip_context = action_context.user_data();
-    let confirmation: CarReservation = action_context
-        .lookup("car")
-	.context("looking up action's output")
-        .map_err(UndoActionError::permanent_failure)?;
-    // ... (make request to another service -- must not fail)
-    Ok(())
-}
-----
+*** If you were directly returning `Err(some_anyhow_error)`, you can instead return `Err(UndoActionPermanentError::from(some_anyhow_error))`.
+*** If you were returning an error using `foo()?` that was _not_ an `anyhow::Error` or an `ActionError`, you can generally use `foo().map_err(anyhow::Error::from).map_err(UndoActionPermanentError::from)`.  (Your error type must have been convertible to `anyhow::Error` for it to compile before.  Now you're explicitly converting it to that, and then to `UndoActionPermanentError`.)
 
 == 0.4.0 (released 2023-05-25)
 
