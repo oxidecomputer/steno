@@ -24,6 +24,7 @@ use steno::SagaName;
 use steno::SagaResultErr;
 use steno::SagaType;
 use steno::SecClient;
+use steno::UndoActionError;
 use uuid::Uuid;
 
 // This is where we're going: this program will collect payment and book a whole
@@ -283,12 +284,15 @@ async fn saga_charge_card(
 
 async fn saga_refund_card(
     action_context: ActionContext<TripSaga>,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), UndoActionError> {
     // Fetch the payment confirmation.  The undo function is only ever invoked
     // after the action function has succeeded.  This node is called "payment",
     // so we fetch our own action's output by looking up the data for "payment".
     let trip_context = action_context.user_data();
-    let p: PaymentConfirmation = action_context.lookup("payment")?;
+    let p: PaymentConfirmation = action_context
+        .lookup("payment")
+        .map_err(anyhow::Error::from)
+        .map_err(UndoActionError::permanent_failure)?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
@@ -306,10 +310,13 @@ async fn saga_book_hotel(
 
 async fn saga_cancel_hotel(
     action_context: ActionContext<TripSaga>,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), UndoActionError> {
     // ...
     let trip_context = action_context.user_data();
-    let confirmation: HotelReservation = action_context.lookup("hotel")?;
+    let confirmation: HotelReservation = action_context
+        .lookup("hotel")
+        .map_err(anyhow::Error::from)
+        .map_err(UndoActionError::permanent_failure)?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
@@ -327,10 +334,13 @@ async fn saga_book_flight(
 
 async fn saga_cancel_flight(
     action_context: ActionContext<TripSaga>,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), UndoActionError> {
     // ...
     let trip_context = action_context.user_data();
-    let confirmation: FlightReservation = action_context.lookup("flight")?;
+    let confirmation: FlightReservation = action_context
+        .lookup("flight")
+        .map_err(anyhow::Error::from)
+        .map_err(UndoActionError::permanent_failure)?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }
@@ -348,10 +358,13 @@ async fn saga_book_car(
 
 async fn saga_cancel_car(
     action_context: ActionContext<TripSaga>,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), UndoActionError> {
     // ...
     let trip_context = action_context.user_data();
-    let confirmation: CarReservation = action_context.lookup("car")?;
+    let confirmation: CarReservation = action_context
+        .lookup("car")
+        .map_err(anyhow::Error::from)
+        .map_err(UndoActionError::permanent_failure)?;
     // ... (make request to another service -- must not fail)
     Ok(())
 }

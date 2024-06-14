@@ -41,7 +41,6 @@ use petgraph::Direction;
 use petgraph::Graph;
 use petgraph::Incoming;
 use petgraph::Outgoing;
-use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::convert::TryFrom;
@@ -1272,21 +1271,14 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let action = &task_params.action;
         let undo_error = futures::stream::iter(0..count)
             .map(Ok::<u32, _>)
-            .try_for_each(|i| async move {
-                action
-                    .undo_it(make_action_context())
-                    .await
-                    .with_context(|| format!("undo action attempt {}", i + 1))
+            .try_for_each(|_| async move {
+                action.undo_it(make_action_context()).await
             })
             .await;
 
         if let Err(error) = undo_error {
-            let node = Box::new(SagaNode {
-                node_id,
-                state: SgnsUndoFailed(UndoActionError::PermanentFailure {
-                    source_error: json!({ "message": format!("{:#}", error) }),
-                }),
-            });
+            let node =
+                Box::new(SagaNode { node_id, state: SgnsUndoFailed(error) });
             SagaExecutor::finish_task(task_params, node).await;
         } else {
             let node = Box::new(SagaNode {

@@ -7,6 +7,7 @@
 use crate::saga_action_error::ActionError;
 use crate::saga_exec::ActionContext;
 use crate::ActionName;
+use crate::UndoActionError;
 use futures::future::BoxFuture;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -65,7 +66,7 @@ pub type ActionResult = Result<Arc<serde_json::Value>, ActionError>;
 // TODO-design what should the error type here be?  Maybe something that can
 // encompass "general framework error"?  This might put the saga into a "needs
 // attention" state?
-pub type UndoResult = Result<(), anyhow::Error>;
+pub type UndoResult = Result<(), UndoActionError>;
 
 /// Building blocks of sagas
 ///
@@ -167,7 +168,9 @@ impl<UserType: SagaType> Action<UserType> for ActionInjectError {
     fn undo_it(&self, _: ActionContext<UserType>) -> BoxFuture<'_, UndoResult> {
         // We should never undo an action that failed.  But this same impl is
         // plugged into a saga when an "undo action" error is injected.
-        Box::pin(futures::future::err(anyhow::anyhow!("error injected")))
+        Box::pin(futures::future::err(UndoActionError::permanent_failure(
+            anyhow::anyhow!("error injected"),
+        )))
     }
 
     fn name(&self) -> ActionName {

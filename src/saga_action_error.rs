@@ -4,6 +4,7 @@ use crate::saga_action_generic::ActionData;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::json;
 use std::fmt::Display;
 use thiserror::Error;
 
@@ -159,4 +160,12 @@ pub enum UndoActionError {
     /// Undo action failed due to a consumer-specific error
     #[error("undo action failed permanently: {source_error:#}")]
     PermanentFailure { source_error: serde_json::Value },
+}
+
+impl UndoActionError {
+    pub fn permanent_failure(error: anyhow::Error) -> UndoActionError {
+        UndoActionError::PermanentFailure {
+            source_error: json!({ "message": format!("{:#}", error) }),
+        }
+    }
 }
