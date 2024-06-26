@@ -1450,7 +1450,7 @@ mod test {
     use super::*;
     use crate::{
         ActionContext, ActionError, ActionFunc, DagBuilder, Node, SagaId,
-        SagaName,
+        SagaName, UndoActionPermanentError,
     };
     use serde::{Deserialize, Serialize};
     use slog::Drain;
@@ -1526,7 +1526,7 @@ mod test {
         }
         async fn undo_n1(
             ctx: ActionContext<TestSaga>,
-        ) -> Result<(), anyhow::Error> {
+        ) -> Result<(), UndoActionPermanentError> {
             ctx.user_data().call("undo_n1");
             Ok(())
         }
@@ -1539,7 +1539,7 @@ mod test {
         }
         async fn undo_n2(
             ctx: ActionContext<TestSaga>,
-        ) -> Result<(), anyhow::Error> {
+        ) -> Result<(), UndoActionPermanentError> {
             ctx.user_data().call("undo_n2");
             Ok(())
         }

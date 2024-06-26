@@ -15,6 +15,16 @@
 
 https://github.com/oxidecomputer/steno/compare/v0.4.0\...HEAD[Full list of commits]
 
+=== Breaking changes
+
+* The error type for undo actions is now called `UndoActionPermanentError`.  It used to be simply `anyhow::Error`.  Steno's behavior when undo actions return an error has _not_ changed.  This explicit type was added to better communicate that if you return an error from an undo action, the saga will become stuck.  For convenience, there are `From` impls to produce an `UndoActionPermanentError` from an `anyhow::Error` or an `ActionError`.
++
+**What you need to do:** For any function implementing an undo action:
++
+** If the return type was `Result<(), anyhow::Error>`, change it to `Result<(), UndoActionError>`.  If the return type was `UndoResult`, then you don't need to change the return type.
+*** If you were directly returning `Err(some_anyhow_error)`, you can instead return `Err(UndoActionPermanentError::from(some_anyhow_error))`.
+*** If you were returning an error using `foo()?` that was _not_ an `anyhow::Error` or an `ActionError`, you can generally use `foo().map_err(anyhow::Error::from).map_err(UndoActionPermanentError::from)`.  (Your error type must have been convertible to `anyhow::Error` for it to compile before.  Now you're explicitly converting it to that, and then to `UndoActionPermanentError`.)
+
 == 0.4.0 (released 2023-05-25)
 
 https://github.com/oxidecomputer/steno/compare/v0.3.1\...v0.4.0[Full list of commits]

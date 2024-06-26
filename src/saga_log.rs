@@ -1,7 +1,7 @@
 //! Persistent state for sagas
 
 use crate::saga_action_error::ActionError;
-use crate::saga_action_error::UndoActionError;
+use crate::saga_action_error::UndoActionPermanentError;
 use crate::SagaId;
 use anyhow::anyhow;
 use anyhow::Context;
@@ -86,7 +86,7 @@ pub enum SagaNodeEventType {
     /// The undo action has finished
     UndoFinished,
     /// The undo action has failed
-    UndoFailed(UndoActionError),
+    UndoFailed(UndoActionPermanentError),
 }
 
 impl fmt::Display for SagaNodeEventType {
@@ -133,7 +133,7 @@ pub enum SagaNodeLoadStatus {
     /// The undo action has finished successfully
     UndoFinished,
     /// The undo action has failed
-    UndoFailed(UndoActionError),
+    UndoFailed(UndoActionPermanentError),
 }
 
 impl SagaNodeLoadStatus {

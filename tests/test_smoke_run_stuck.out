@@ -26,6 +26,4 @@ failed at node:    "instance_boot"
 failed with error: error injected
 FOLLOWED BY UNDO ACTION FAILURE
 failed at node:    "instance_id"
-failed with error: undo action failed permanently: {
-  "message": "undo action attempt 1: error injected"
-}
+failed with error: undo action failed permanently: error injected

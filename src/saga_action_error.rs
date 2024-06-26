@@ -155,8 +155,19 @@ impl ActionError {
 /// It should be expected that human intervention will be required to repair the
 /// result of an undo action that has failed.
 #[derive(Clone, Debug, Deserialize, Error, JsonSchema, Serialize)]
-pub enum UndoActionError {
-    /// Undo action failed due to a consumer-specific error
-    #[error("undo action failed permanently: {source_error:#}")]
-    PermanentFailure { source_error: serde_json::Value },
+#[error("undo action failed permanently: {message}")]
+pub struct UndoActionPermanentError {
+    message: String,
+}
+
+impl From<anyhow::Error> for UndoActionPermanentError {
+    fn from(value: anyhow::Error) -> Self {
+        UndoActionPermanentError { message: format!("{:#}", value) }
+    }
+}
+
+impl From<ActionError> for UndoActionPermanentError {
+    fn from(value: ActionError) -> Self {
+        UndoActionPermanentError::from(anyhow::Error::from(value))
+    }
 }
