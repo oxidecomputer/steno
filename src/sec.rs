@@ -1143,7 +1143,7 @@ impl Sec {
             .map_err(ActionError::new_serialize)
             .context("serializing new saga dag")
             .unwrap();
-        debug!(&log, "saga create";
+        info!(&log, "saga create";
              "dag" => serde_json::to_string(&serialized_dag).unwrap()
         );
 
