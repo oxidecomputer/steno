@@ -1035,10 +1035,10 @@ impl Sec {
                         format!("{:?}", error_node_name),
                     "action_error_source" => format!("{:?}", error_source),
                 ));
-                if let Some(undo) = undo_failure {
+                if let Some((node_name, error)) = undo_failure {
                     error!(&log, "saga finished";
-                        "undo_error_node_name" => ?undo.0,
-                        "undo_error" => ?undo.1,
+                        "undo_error_node_name" => ?node_name,
+                        "undo_error" => ?error,
                     );
                 } else {
                     warn!(&log, "saga finished"; "undo_result" => "success");
