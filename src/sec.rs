@@ -66,6 +66,8 @@ use crate::SagaId;
 use crate::SagaLog;
 use crate::SagaNodeEvent;
 use crate::SagaResult;
+use crate::SagaResultErr;
+use crate::SagaResultOk;
 use crate::SagaType;
 use anyhow::anyhow;
 use anyhow::Context;
@@ -962,6 +964,8 @@ impl Sec {
             }
         };
 
+        info!(&log, "saga start");
+
         self.sagas.insert(
             saga_id,
             Saga {
@@ -993,7 +997,55 @@ impl Sec {
     fn saga_finished(&mut self, done_data: SagaDoneData) {
         let saga_id = done_data.saga_id;
         let saga = self.sagas.remove(&saga_id).unwrap();
-        info!(&saga.log, "saga finished");
+
+        // Log every saga completion, regardless of what happened:
+        //
+        // * There will be exactly one log entry for every saga that finishes.
+        // * The message will always say "saga finished".
+        // * There is always a "result" field that's either "success" or
+        //   "failure".
+        //
+        // There are three cases:
+        //
+        // 1. Successful completion (no errors).  This will be an "info" level
+        //    message.
+        //
+        // 2. Clean failure (no errors during unwinding).  This will be a "warn"
+        //    level message and have "undo_result" = "success".
+        //
+        // 3. Stuck (an error was generated during unwinding).  This will be an
+        //    "error" level message and have "undo_result" = "failure".
+        //
+        // This should make it fairly straightforward to summarize the results
+        // programmatically.  The saga id and name are already in the saga.log
+        // object so that will also make it easy to summarize by saga name or to
+        // find the entry for a particular saga.
+        match &done_data.result.kind {
+            Ok(SagaResultOk { .. }) => {
+                info!(&saga.log, "saga finished"; "result" => "success");
+            }
+            Err(SagaResultErr {
+                error_node_name,
+                error_source,
+                undo_failure,
+            }) => {
+                let log = saga.log.new(o!(
+                    "result" => "failure",
+                    "action_error_node_name" =>
+                        format!("{:?}", error_node_name),
+                    "action_error_source" => format!("{:?}", error_source),
+                ));
+                if let Some((node_name, error)) = undo_failure {
+                    error!(&log, "saga finished";
+                        "undo_error_node_name" => ?node_name,
+                        "undo_error" => ?error,
+                    );
+                } else {
+                    warn!(&log, "saga finished"; "undo_result" => "success");
+                }
+            }
+        }
+
         if let SagaRunState::Running { waiter, .. } = saga.run_state {
             Sec::client_respond(&saga.log, waiter, done_data.result.clone());
             self.sagas.insert(
@@ -1091,7 +1143,7 @@ impl Sec {
             .map_err(ActionError::new_serialize)
             .context("serializing new saga dag")
             .unwrap();
-        debug!(&log, "saga create";
+        info!(&log, "saga create";
              "dag" => serde_json::to_string(&serialized_dag).unwrap()
         );
 
