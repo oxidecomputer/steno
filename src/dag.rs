@@ -342,7 +342,7 @@ pub struct NodeEntry<'a> {
     index: NodeIndex,
 }
 
-impl<'a> NodeEntry<'a> {
+impl NodeEntry<'_> {
     pub fn name(&self) -> &NodeName {
         self.internal.node_name().unwrap()
     }
@@ -473,7 +473,7 @@ impl SagaDag {
 /// something like `dot -Tpng -o graph.png graph.out` to produce `graph.png`, a
 /// visual representation of the saga graph.
 pub struct DagDot<'a>(&'a Graph<InternalNode, (), Directed, u32>);
-impl<'a> fmt::Display for DagDot<'a> {
+impl fmt::Display for DagDot<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let config = &[dot::Config::EdgeNoLabel];
         let dot = dot::Dot::with_config(&self.0, config);

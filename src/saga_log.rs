@@ -291,7 +291,7 @@ pub struct SagaLogPretty<'a> {
     log: &'a SagaLog,
 }
 
-impl<'a> fmt::Debug for SagaLogPretty<'a> {
+impl fmt::Debug for SagaLogPretty<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "SAGA LOG:\n")?;
         write!(f, "saga id:   {}\n", self.log.saga_id)?;
