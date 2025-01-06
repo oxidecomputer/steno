@@ -19,7 +19,7 @@ thiserror = "2.0"
 lazy_static = "1.5.0"
 
 [dependencies.petgraph]
-version = "0.6.5"
+version = "0.7.0"
 features =  [ "serde-1" ]
 
 [dependencies.chrono]
