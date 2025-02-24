@@ -10,7 +10,7 @@ description = "distributed saga implementation"
 #panic = "abort"
 
 [dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.96"
 async-trait = "0.1.86"
 futures = "0.3.31"
 newtype_derive = "0.1.6"
