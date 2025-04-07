@@ -1611,7 +1611,7 @@ impl SagaExecLiveState {
             }
         } else {
             assert_eq!(set.len(), 1);
-            let the_state = set.into_iter().last().unwrap();
+            let the_state = set.into_iter().next().unwrap();
             the_state
         }
     }
