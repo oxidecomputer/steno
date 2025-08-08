@@ -66,12 +66,6 @@ enum ExampleError {
 
 type ExFuncResult<T> = ActionFuncResult<T, ActionError>;
 
-#[derive(Debug)]
-struct ExampleSubsagaType {}
-impl SagaType for ExampleSubsagaType {
-    type ExecContextType = ExampleContext;
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 struct ExampleSubsagaParams {
     number_of_things: u32,
