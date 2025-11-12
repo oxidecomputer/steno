@@ -80,7 +80,7 @@ fn make_sec(log: &slog::Logger) -> steno::SecClient {
 fn reader_for_log_input(
     path: &Path,
 ) -> Result<Box<dyn io::Read>, anyhow::Error> {
-    if *path == PathBuf::from("-") {
+    if path == Path::new("-") {
         Ok(Box::new(io::stdin()))
     } else {
         Ok(Box::new(fs::File::open(&path).with_context(|| {
@@ -301,7 +301,7 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
         let serialized = saga.serialized();
         let (mut stdout_holder, mut file_holder);
         let (label, out): (String, &mut dyn io::Write) = if *output_log_path
-            == PathBuf::from("-")
+            == Path::new("-")
         {
             stdout_holder = io::stdout();
             (String::from("stdout"), &mut stdout_holder)
