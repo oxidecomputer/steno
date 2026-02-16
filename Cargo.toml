@@ -12,7 +12,7 @@ description = "distributed saga implementation"
 [dependencies]
 anyhow = "1.0.101"
 async-trait = "0.1.89"
-futures = "0.3.31"
+futures = "0.3.32"
 newtype_derive = "0.1.6"
 serde_json = "1.0"
 thiserror = "2.0"
