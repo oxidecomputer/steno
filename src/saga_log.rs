@@ -118,6 +118,19 @@ impl SagaNodeEventType {
             SagaNodeEventType::UndoFailed(_) => SagaNodeEventKind::UndoFailed,
         }
     }
+
+    /// Returns which of a node's two completions this event terminates, or
+    /// `None` if it's a non-terminal (start) event.
+    pub fn completion(&self) -> Option<Completion> {
+        match self {
+            SagaNodeEventType::Succeeded(_) | SagaNodeEventType::Failed(_) => {
+                Some(Completion::Action)
+            }
+            SagaNodeEventType::UndoFinished
+            | SagaNodeEventType::UndoFailed(_) => Some(Completion::Undo),
+            SagaNodeEventType::Started | SagaNodeEventType::UndoStarted => None,
+        }
+    }
 }
 
 /// The kind of a [`SagaNodeEventType`] without associated data.
@@ -131,6 +144,14 @@ pub enum SagaNodeEventKind {
     UndoStarted,
     UndoFinished,
     UndoFailed,
+}
+
+/// Which of a node's two completions an event or action refers to: the forward
+/// action's, or the undo action's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Completion {
+    Action,
+    Undo,
 }
 
 /// Persistent status for a saga node
