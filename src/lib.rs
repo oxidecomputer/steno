@@ -76,6 +76,7 @@ pub use saga_exec::SagaResultErr;
 pub use saga_exec::SagaResultOk;
 pub use saga_log::SagaLog;
 pub use saga_log::SagaNodeEvent;
+pub use saga_log::SagaNodeEventKind;
 pub use saga_log::SagaNodeEventType;
 pub use saga_log::SagaNodeId;
 pub use sec::sec;
