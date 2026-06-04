@@ -2212,15 +2212,36 @@ fn recovery_validate_parent(
             matches!(parent_status, SagaNodeLoadStatus::Succeeded(_))
         }
 
-        // If a node has never started, the only illegal states for a parent are
-        // those associated with undoing, since the child must be undone first.
-        SagaNodeLoadStatus::NeverStarted => matches!(
-            parent_status,
+        // A node that never started has nothing to undo, so it imposes no
+        // ordering constraint on its parents: any parent load status is
+        // legal. In particular, the undoing states are valid: a fan-in (join)
+        // node whose parents include a failed branch never becomes ready (we
+        // only run a node once all its parents have succeeded), so it remains
+        // in the `NeverStarted` state while its other, succeeded parents are
+        // unwound.
+        //
+        // For example, take the diamond `start -> {a, p} -> c -> end` and
+        // suppose `p` fails. Say `a` succeeds and is then unwound to
+        // `UndoFinished`. The join node `c` never becomes ready (one parent
+        // failed) and so stays `NeverStarted`. At this point, if the process
+        // crashes and we later attempt recovery, while validating the edge
+        // `a -> c` we ask whether parent `UndoFinished` is legal for child
+        // `NeverStarted`. Rejecting the undo states on the premise that the
+        // child "must be undone first" would be wrong here: doing that would
+        // make the saga permanently unrecoverable.
+        // See oxidecomputer/omicron#10531.
+        //
+        // This is written as an exhaustive match so that adding a new load
+        // status fails with a compile error.
+        SagaNodeLoadStatus::NeverStarted => match parent_status {
             SagaNodeLoadStatus::NeverStarted
-                | SagaNodeLoadStatus::Started
-                | SagaNodeLoadStatus::Succeeded(_)
-                | SagaNodeLoadStatus::Failed(_)
-        ),
+            | SagaNodeLoadStatus::Started
+            | SagaNodeLoadStatus::Succeeded(_)
+            | SagaNodeLoadStatus::Failed(_)
+            | SagaNodeLoadStatus::UndoStarted(_)
+            | SagaNodeLoadStatus::UndoFinished
+            | SagaNodeLoadStatus::UndoFailed(_) => true,
+        },
     }
 }
 
