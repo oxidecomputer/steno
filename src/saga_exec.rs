@@ -12,8 +12,10 @@ use crate::saga_action_generic::Action;
 use crate::saga_action_generic::ActionConstant;
 use crate::saga_action_generic::ActionData;
 use crate::saga_action_generic::ActionInjectError;
+use crate::saga_log::Completion;
 use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
+use crate::sec::PauseInjected;
 use crate::sec::RepeatInjected;
 use crate::sec::SecExecClient;
 use crate::ActionRegistry;
@@ -120,7 +122,10 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsDone> {
             if neighbors_all(graph, &self.node_id, Outgoing, |child| {
                 live_state.nodes_undone.contains_key(child)
             }) {
-                live_state.queue_undo.push(self.node_id);
+                live_state.queue_undo.push(QueuedNode {
+                    node_id: self.node_id,
+                    node_start: NodeStart::Fresh,
+                });
             }
             return;
         }
@@ -131,7 +136,10 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsDone> {
             if neighbors_all(graph, &child, Incoming, |parent| {
                 live_state.node_outputs.contains_key(parent)
             }) {
-                live_state.queue_todo.push(child);
+                live_state.queue_todo.push(QueuedNode {
+                    node_id: child,
+                    node_start: NodeStart::Fresh,
+                });
             }
         }
     }
@@ -266,7 +274,10 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
 
                     NodeExecState::Done => {
                         // We have to actually run the undo action.
-                        live_state.queue_undo.push(parent);
+                        live_state.queue_undo.push(QueuedNode {
+                            node_id: parent,
+                            node_start: NodeStart::Fresh,
+                        });
                     }
 
                     NodeExecState::QueuedToUndo
@@ -340,6 +351,8 @@ struct TaskParams<UserType: SagaType> {
     /// times, and the latter result should be used. This is useful
     /// when testing idempotency of a user-specified action.
     injected_repeat: Option<RepeatInjected>,
+    /// Node start state.
+    node_start: NodeStart,
 }
 
 /// Executes a saga
@@ -456,6 +469,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             injected_errors: BTreeSet::new(),
             injected_undo_errors: BTreeSet::new(),
             injected_repeats: BTreeMap::new(),
+            injected_pauses: BTreeMap::new(),
             sec_hdl,
             saga_id,
         };
@@ -583,8 +597,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                         RecoveryDirection::Forward(true) => {
                             // We're recovering a node in the forward direction
                             // where all parents completed successfully.  Add it
-                            // to the ready queue.
-                            live_state.queue_todo.push(node_id);
+                            // to the ready queue.  It never started, so this is
+                            // a fresh start.
+                            live_state.queue_todo.push(QueuedNode {
+                                node_id,
+                                node_start: NodeStart::Fresh,
+                            });
                         }
                         RecoveryDirection::Unwind(true) => {
                             // We're recovering a node in the reverse direction
@@ -615,8 +633,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 }
                 SagaNodeLoadStatus::Started => {
                     // Whether we're unwinding or not, we have to finish
-                    // execution of this action.
-                    live_state.queue_todo.push(node_id);
+                    // execution of this action.  It already recorded `Started`
+                    // durably, so this is a resume.
+                    live_state.queue_todo.push(QueuedNode {
+                        node_id,
+                        node_start: NodeStart::Resumed,
+                    });
                 }
                 SagaNodeLoadStatus::Succeeded(output) => {
                     // If the node has finished executing and not started
@@ -629,7 +651,12 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                         .insert(node_id, Arc::clone(output))
                         .expect_none("recovered node twice (success case)");
                     if let RecoveryDirection::Unwind(true) = direction {
-                        live_state.queue_undo.push(node_id);
+                        // The action succeeded.  Its undo hasn't started, so this
+                        // is a fresh undo.
+                        live_state.queue_undo.push(QueuedNode {
+                            node_id,
+                            node_start: NodeStart::Fresh,
+                        });
                     }
                 }
                 SagaNodeLoadStatus::Failed(error) => {
@@ -651,9 +678,14 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 }
                 SagaNodeLoadStatus::UndoStarted(output) => {
                     // We know we're unwinding. (Otherwise, we should have
-                    // failed validation earlier.)  Execute the undo action.
+                    // failed validation earlier.)  Execute the undo action.  It
+                    // already recorded `UndoStarted` durably, so this is a
+                    // resume.
                     assert!(!forward);
-                    live_state.queue_undo.push(node_id);
+                    live_state.queue_undo.push(QueuedNode {
+                        node_id,
+                        node_start: NodeStart::Resumed,
+                    });
 
                     // We still need to record the output because it's available
                     // to the undo action.
@@ -931,6 +963,24 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         live_state.injected_repeats.insert(node_id, repeat);
     }
 
+    /// Arranges for the worker running `completion` (the action or undo action)
+    /// at `node_id` to pause after recording it durably, but before reporting
+    /// completion to the executor loop.
+    ///
+    /// The worker signals `pause.reached` once it's paused, then waits for
+    /// `pause.release` before continuing.  Like [`Self::inject_error`], this is a
+    /// testing aid for deterministically observing execution state at a node's
+    /// completion; the caller must fire the release half.
+    pub async fn inject_pause(
+        &self,
+        node_id: NodeIndex,
+        completion: Completion,
+        pause: PauseInjected,
+    ) {
+        let mut live_state = self.live_state.lock().await;
+        live_state.injected_pauses.insert((node_id, completion), pause);
+    }
+
     /// Runs the saga
     ///
     /// This might be running a saga that has never been started before or
@@ -967,33 +1017,60 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             // TODO-robustness Can we assert that there are outstanding tasks
             // when we block on this channel?
             let message = rx.next().await.expect("broken tx");
-            let task = {
+
+            // Record this node's completion in the in-memory log, mark its task
+            // done, and propagate its effects.
+            //
+            // Importantly, we do this all in a single critical section.  The
+            // worker task already persisted this event durably in
+            // `finish_task`.  Here, we update the in-memory log atomically with
+            // `propagate`.
+            //
+            // Why do we update the in-memory log here and not in the
+            // worker?  If the worker updated the in-memory log, other parts of
+            // steno can then see torn state where the log is updated, but
+            // derived maps such as `node_errors` and `node_outputs` are not.
+            // (For example, on an action failure, the worker would record
+            // "failed" and only later would `propagate` populate
+            // `node_errors`.)  During that window, `node_exec_state` would see a
+            // node the log has recorded as "failed" but that `node_errors`
+            // doesn't know about.  See issue #17.
+            let event_type = message.node.log_event();
+            let (task, done) = {
                 let mut live_state = self.live_state.lock().await;
-                live_state.node_task_done(message.node_id)
+                let task = live_state.node_task_done(message.node_id);
+                record_in_memory(&mut live_state, message.node_id, event_type);
+                let prev_state = live_state.exec_state;
+                message.node.propagate(&self, &mut live_state);
+                // TODO-cleanup This condition ought to be simplified.  We want
+                // to update the saga state when we become Unwinding (which we do
+                // here) and when we become Done (which we do below).  There may
+                // be a better place to put this logic that's less ad hoc.
+                if live_state.exec_state == SagaCachedState::Unwinding
+                    && prev_state != SagaCachedState::Unwinding
+                {
+                    live_state
+                        .sec_hdl
+                        .saga_update(SagaCachedState::Unwinding)
+                        .await;
+                }
+                let done = live_state.exec_state == SagaCachedState::Done;
+                (task, done)
             };
 
-            // This should really not take long, as there's nothing else this
-            // task does after sending the message that we just received.  It's
-            // good to wait here to make sure things are cleaned up.
+            // Wait for the worker task to finish.  As of this writing,
+            // this is just hygiene, since the task does nothing after sending
+            // the `TaskCompletion` via the `rx`.  The panic should never be
+            // hit, either, because the task does nothing after sending the
+            // `TaskCompletion`.
+            //
+            // We join the task here, outside the critical section, so the lock
+            // isn't held across an await point.
+            //
             // TODO-robustness can we enforce that this won't take long?
             task.await.expect("node task failed unexpectedly");
 
-            let mut live_state = self.live_state.lock().await;
-            let prev_state = live_state.exec_state;
-            message.node.propagate(&self, &mut live_state);
-            // TODO-cleanup This condition ought to be simplified.  We want to
-            // update the saga state when we become Unwinding (which we do here)
-            // and when we become Done (which we do below).  There may be a
-            // better place to put this logic that's less ad hoc.
-            if live_state.exec_state == SagaCachedState::Unwinding
-                && prev_state != SagaCachedState::Unwinding
-            {
-                live_state
-                    .sec_hdl
-                    .saga_update(SagaCachedState::Unwinding)
-                    .await;
-            }
-            if live_state.exec_state == SagaCachedState::Done {
+            if done {
                 break;
             }
         }
@@ -1029,7 +1106,18 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let todo_queue = live_state.queue_todo.clone();
         live_state.queue_todo = Vec::new();
 
-        for node_id in todo_queue {
+        for QueuedNode { node_id, node_start } in todo_queue {
+            // For a fresh start, record this node's `Started` event in-memory
+            // now (the worker persists it durably before running the action).
+            // A resumed node already recorded it when it first started.
+            if node_start == NodeStart::Fresh {
+                record_in_memory(
+                    &mut live_state,
+                    node_id,
+                    SagaNodeEventType::Started,
+                );
+            }
+
             // TODO-design It would be good to check whether the saga is
             // unwinding, and if so, whether this action has ever started
             // running before.  If not, then we can send this straight to
@@ -1066,6 +1154,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     .injected_repeats
                     .get(&node_id)
                     .map(|r| *r),
+                node_start,
             };
 
             let task = tokio::spawn(SagaExecutor::exec_node(task_params));
@@ -1080,7 +1169,18 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let undo_queue = live_state.queue_undo.clone();
         live_state.queue_undo = Vec::new();
 
-        for node_id in undo_queue {
+        for QueuedNode { node_id, node_start } in undo_queue {
+            // As in the forward loop above, record a fresh undo's `UndoStarted`
+            // event in-memory now (the worker persists it durably before
+            // running the action).  A resumed node already recorded it.
+            if node_start == NodeStart::Fresh {
+                record_in_memory(
+                    &mut live_state,
+                    node_id,
+                    SagaNodeEventType::UndoStarted,
+                );
+            }
+
             // TODO commonize with code above
             // TODO we could be much more efficient without copying this tree
             // each time.
@@ -1112,6 +1212,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     .injected_repeats
                     .get(&node_id)
                     .map(|r| *r),
+                node_start,
             };
 
             let task = tokio::spawn(SagaExecutor::undo_node(task_params));
@@ -1171,34 +1272,16 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     async fn exec_node(task_params: TaskParams<UserType>) {
         let node_id = task_params.node_id;
 
-        {
-            // TODO-liveness We don't want to hold this lock across a call
-            // to the database.  It's fair to say that if the database
-            // hangs, the saga's corked anyway, but we should at least be
-            // able to view its state, and we can't do that with this
-            // design.
-            let mut live_state = task_params.live_state.lock().await;
-            let load_status =
-                live_state.sglog.load_status_for_node(node_id.into());
-            match load_status {
-                SagaNodeLoadStatus::NeverStarted => {
-                    record_now(
-                        &mut live_state,
-                        node_id,
-                        SagaNodeEventType::Started,
-                    )
-                    .await;
-                }
-                SagaNodeLoadStatus::Started => (),
-                SagaNodeLoadStatus::Succeeded(_)
-                | SagaNodeLoadStatus::Failed(_)
-                | SagaNodeLoadStatus::UndoStarted(_)
-                | SagaNodeLoadStatus::UndoFinished
-                | SagaNodeLoadStatus::UndoFailed(_) => {
-                    panic!("starting node in bad state")
-                }
-            }
-        }
+        // The executor loop already recorded `Started` in the in-memory log when
+        // it kicked us off.  Persist it durably here before running the action,
+        // so a crash mid-action is recoverable.
+        persist_fresh_start(
+            &task_params.live_state,
+            node_id,
+            task_params.node_start,
+            SagaNodeEventType::Started,
+        )
+        .await;
 
         let make_action_context = || ActionContext {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
@@ -1235,29 +1318,16 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     async fn undo_node(task_params: TaskParams<UserType>) {
         let node_id = task_params.node_id;
 
-        {
-            let mut live_state = task_params.live_state.lock().await;
-            let load_status =
-                live_state.sglog.load_status_for_node(node_id.into());
-            match load_status {
-                SagaNodeLoadStatus::Succeeded(_) => {
-                    record_now(
-                        &mut live_state,
-                        node_id,
-                        SagaNodeEventType::UndoStarted,
-                    )
-                    .await;
-                }
-                SagaNodeLoadStatus::UndoStarted(_) => (),
-                SagaNodeLoadStatus::NeverStarted
-                | SagaNodeLoadStatus::Started
-                | SagaNodeLoadStatus::Failed(_)
-                | SagaNodeLoadStatus::UndoFinished
-                | SagaNodeLoadStatus::UndoFailed(_) => {
-                    panic!("undoing node in bad state")
-                }
-            }
-        }
+        // As in `exec_node`, the executor loop recorded `UndoStarted` in the
+        // in-memory log when it kicked us off.  Persist it durably before
+        // running the undo action.
+        persist_fresh_start(
+            &task_params.live_state,
+            node_id,
+            task_params.node_start,
+            SagaNodeEventType::UndoStarted,
+        )
+        .await;
 
         let make_action_context = || ActionContext {
             ancestor_tree: Arc::clone(&task_params.ancestor_tree),
@@ -1304,9 +1374,28 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         let node_id = task_params.node_id;
         let event_type = node.log_event();
 
-        {
+        let completion = event_type
+            .completion()
+            .expect("finish_task should only be called with a terminal event");
+
+        // Persist this event durably to the SEC.  We deliberately do not update
+        // the in-memory log here!  Instead, the executor loop does that
+        // atomically with `propagate` (see `run_saga`), so the in-memory log is
+        // always consistent with the derived maps.
+        //
+        // While we hold the lock, also take any injected pause registered for
+        // this node's completion.
+        let pause = {
             let mut live_state = task_params.live_state.lock().await;
-            record_now(&mut live_state, node_id, event_type).await;
+            record_durable(&live_state, node_id, event_type).await;
+            live_state.injected_pauses.remove(&(node_id, completion))
+        };
+
+        // If a pause was injected, act on it now to let a caller observe
+        // execution state at this precise point.
+        if let Some(pause) = pause {
+            let _ = pause.reached_tx.send(());
+            let _ = pause.resume_rx.await;
         }
 
         task_params
@@ -1499,9 +1588,9 @@ struct SagaExecLiveState {
     stopping: bool,
 
     /// Queue of nodes that have not started but whose deps are satisfied
-    queue_todo: Vec<NodeIndex>,
+    queue_todo: Vec<QueuedNode>,
     /// Queue of nodes whose undo action needs to be run.
-    queue_undo: Vec<NodeIndex>,
+    queue_undo: Vec<QueuedNode>,
 
     /// Outstanding tokio tasks for each node in the graph
     node_tasks: BTreeMap<NodeIndex, JoinHandle<()>>,
@@ -1526,6 +1615,27 @@ struct SagaExecLiveState {
 
     /// Injected actions which should be called repeatedly
     injected_repeats: BTreeMap<NodeIndex, RepeatInjected>,
+
+    /// `(node, completion)` pairs at which a worker should pause after recording
+    /// the completion but before reporting it to the executor loop.
+    injected_pauses: BTreeMap<(NodeIndex, Completion), PauseInjected>,
+}
+
+/// A node queued for execution, together with how it enters the queue.
+#[derive(Clone, Copy, Debug)]
+struct QueuedNode {
+    node_id: NodeIndex,
+    node_start: NodeStart,
+}
+
+/// How a node enters one of the executor's work queues.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NodeStart {
+    /// A fresh start, corresponding to `Started` for actions, or `UndoStarted`
+    /// for undo actions.
+    Fresh,
+    /// A resume after recovery.
+    Resumed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1581,7 +1691,7 @@ impl SagaExecLiveState {
         let load_status = self.sglog.load_status_for_node(node_id.into());
         if let Some(undo_mode) = self.nodes_undone.get(&node_id) {
             set.insert(NodeExecState::Undone(*undo_mode));
-        } else if self.queue_undo.contains(&node_id) {
+        } else if self.queue_undo.iter().any(|q| q.node_id == node_id) {
             set.insert(NodeExecState::QueuedToUndo);
         } else if let SagaNodeLoadStatus::Failed(_) = load_status {
             assert!(self.node_errors.contains_key(&node_id));
@@ -1599,7 +1709,7 @@ impl SagaExecLiveState {
             set.insert(NodeExecState::TaskInProgress);
         }
 
-        if self.queue_todo.contains(&node_id) {
+        if self.queue_todo.iter().any(|q| q.node_id == node_id) {
             set.insert(NodeExecState::QueuedToRun);
         }
 
@@ -2029,7 +2139,7 @@ impl<'a> PrintOrderer<'a> {
     }
 }
 
-/// Return true if all neighbors of `node_id` in the given `direction`  
+/// Return true if all neighbors of `node_id` in the given `direction`
 /// return true for the predicate `test`.
 fn neighbors_all<F>(
     graph: &Graph<InternalNode, ()>,
@@ -2187,11 +2297,13 @@ impl From<NodeIndex> for SagaNodeId {
     }
 }
 
-/// Wrapper for SagaLog.record_now() that maps internal node indexes to
-/// stable node ids.
-// TODO Consider how we do map internal node indexes to stable node ids.
-// TODO clean up this interface
-async fn record_now(
+// TODO Consider how we map internal node indexes to stable node ids.
+
+/// Records `event_type` for `node` in the in-memory saga log.
+///
+/// Always called by the executor loop, which uses this to update the in-memory
+/// log atomically with derived maps.
+fn record_in_memory(
     live_state: &mut SagaExecLiveState,
     node: NodeIndex,
     event_type: SagaNodeEventType,
@@ -2204,7 +2316,47 @@ async fn record_now(
     // program.
     let event = SagaNodeEvent { saga_id, node_id, event_type };
     live_state.sglog.record(&event).unwrap();
+}
+
+/// Records `event_type` for `node` durably (to the SEC).
+///
+/// Always called by worker tasks to persist a node's start event when the task
+/// first starts, and its completion event before handing it back to the
+/// executor loop.
+async fn record_durable(
+    live_state: &SagaExecLiveState,
+    node: NodeIndex,
+    event_type: SagaNodeEventType,
+) {
+    let saga_id = live_state.saga_id;
+    let node_id = node.into();
+
+    // The only possible failure here today is attempting to record an event
+    // that's illegal for the current node state.  That's a bug in this
+    // program.
+    let event = SagaNodeEvent { saga_id, node_id, event_type };
     live_state.sec_hdl.record(event).await;
+}
+
+/// For a freshly-started node, persists its start event (`Started` for actions,
+/// `UndoStarted` for undo actions) durably before the worker runs the action.
+///
+/// A resumed node already recorded its start durably when it first ran, so this
+/// is a no-op for it.
+async fn persist_fresh_start(
+    live_state: &Arc<Mutex<SagaExecLiveState>>,
+    node: NodeIndex,
+    node_start: NodeStart,
+    event_type: SagaNodeEventType,
+) {
+    if node_start == NodeStart::Fresh {
+        // TODO-liveness We don't want to hold this lock across a call to the
+        // database.  It's fair to say that if the database hangs, the saga's
+        // corked anyway, but we should at least be able to view its state, and
+        // we can't do that with this design.
+        let live_state = live_state.lock().await;
+        record_durable(&live_state, node, event_type).await;
+    }
 }
 
 /// Consumer's handle for querying and controlling the execution of a single
@@ -2246,6 +2398,14 @@ pub trait SagaExecManager: fmt::Debug + Send + Sync {
         node_id: NodeIndex,
         repeat: RepeatInjected,
     ) -> BoxFuture<'_, ()>;
+
+    /// Pause the worker that records the given completion at the specified node.
+    fn inject_pause(
+        &self,
+        node_id: NodeIndex,
+        completion: Completion,
+        pause: PauseInjected,
+    ) -> BoxFuture<'_, ()>;
 }
 
 impl<T> SagaExecManager for SagaExecutor<T>
@@ -2278,6 +2438,15 @@ where
         repeat: RepeatInjected,
     ) -> BoxFuture<'_, ()> {
         self.inject_repeat(node_id, repeat).boxed()
+    }
+
+    fn inject_pause(
+        &self,
+        node_id: NodeIndex,
+        completion: Completion,
+        pause: PauseInjected,
+    ) -> BoxFuture<'_, ()> {
+        self.inject_pause(node_id, completion, pause).boxed()
     }
 }
 
