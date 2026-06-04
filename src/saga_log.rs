@@ -106,6 +106,52 @@ impl SagaNodeEventType {
             SagaNodeEventType::UndoFailed(_) => "undo_failed",
         }
     }
+
+    /// Returns this event's [`SagaNodeEventKind`] (its variant without associated data).
+    pub fn kind(&self) -> SagaNodeEventKind {
+        match self {
+            SagaNodeEventType::Started => SagaNodeEventKind::Started,
+            SagaNodeEventType::Succeeded(_) => SagaNodeEventKind::Succeeded,
+            SagaNodeEventType::Failed(_) => SagaNodeEventKind::Failed,
+            SagaNodeEventType::UndoStarted => SagaNodeEventKind::UndoStarted,
+            SagaNodeEventType::UndoFinished => SagaNodeEventKind::UndoFinished,
+            SagaNodeEventType::UndoFailed(_) => SagaNodeEventKind::UndoFailed,
+        }
+    }
+
+    /// Returns which of a node's two completions this event terminates, or
+    /// `None` if it's a non-terminal (start) event.
+    pub fn completion(&self) -> Option<Completion> {
+        match self {
+            SagaNodeEventType::Succeeded(_) | SagaNodeEventType::Failed(_) => {
+                Some(Completion::Action)
+            }
+            SagaNodeEventType::UndoFinished
+            | SagaNodeEventType::UndoFailed(_) => Some(Completion::Undo),
+            SagaNodeEventType::Started | SagaNodeEventType::UndoStarted => None,
+        }
+    }
+}
+
+/// The kind of a [`SagaNodeEventType`] without associated data.
+///
+/// The order is semantically meaningful: see [`SagaLog::new_recover`].
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum SagaNodeEventKind {
+    Started,
+    Succeeded,
+    Failed,
+    UndoStarted,
+    UndoFinished,
+    UndoFailed,
+}
+
+/// Which of a node's two completions an event or action refers to: the forward
+/// action's, or the undo action's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Completion {
+    Action,
+    Undo,
 }
 
 /// Persistent status for a saga node
@@ -209,22 +255,7 @@ impl SagaLog {
         // destroys the sequential order.  This should only really matter for a
         // person looking at the sequence of entries (as they appear in memory)
         // for debugging.
-        events.sort_by_key(|f| match f.event_type {
-            // TODO-cleanup Is there a better way to do this?  We want to sort
-            // by the event type, where event types are compared by the order
-            // they're defined in SagaEventType.  We could almost use derived
-            // PartialOrd and PartialEq implementations for SagaEventType,
-            // except that one variant has a payload that does _not_
-            // necessarily implement PartialEq or PartialOrd.  It
-            // seems like that means we have to implement this by
-            // hand.
-            SagaNodeEventType::Started => 1,
-            SagaNodeEventType::Succeeded(_) => 2,
-            SagaNodeEventType::Failed(_) => 3,
-            SagaNodeEventType::UndoStarted => 4,
-            SagaNodeEventType::UndoFinished => 5,
-            SagaNodeEventType::UndoFailed(_) => 6,
-        });
+        events.sort_by_key(|f| f.event_type.kind());
 
         // Replay the events for this saga.
         for event in events {

@@ -56,6 +56,7 @@
 use crate::dag::SagaDag;
 use crate::saga_exec::SagaExecManager;
 use crate::saga_exec::SagaExecutor;
+use crate::saga_log::Completion;
 use crate::store::SagaCachedState;
 use crate::store::SagaCreateParams;
 use crate::store::SecStore;
@@ -292,6 +293,29 @@ impl SecClient {
         .await
     }
 
+    /// Pause the worker at `node_id` with the given `completion`, after it
+    /// records the event in the SEC, but before it reports its completion to
+    /// the executor loop.
+    pub async fn saga_inject_pause(
+        &self,
+        saga_id: SagaId,
+        node_id: NodeIndex,
+        completion: Completion,
+        pause: PauseInjected,
+    ) -> Result<(), anyhow::Error> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sec_cmd(
+            ack_rx,
+            SecClientMsg::SagaInjectError {
+                ack_tx,
+                saga_id,
+                node_id,
+                error_type: ErrorInjected::Pause(completion, pause),
+            },
+        )
+        .await
+    }
+
     /// Shut down the SEC and wait for it to come to rest.
     pub async fn shutdown(mut self) {
         self.shutdown = true;
@@ -455,11 +479,26 @@ pub struct RepeatInjected {
     pub undo: NonZeroU32,
 }
 
+/// The executor's half of an injected pause
+///
+/// The worker that records a node's completion fires `reached_tx` once it has
+/// paused, then waits on `resume_rx` before continuing.
+///
+/// Intended for saga testing.
+#[derive(Debug)]
+pub struct PauseInjected {
+    /// Fired by the worker once it is paused.
+    pub reached_tx: oneshot::Sender<()>,
+    /// Awaited by the worker.  Fire the other end to release it.
+    pub resume_rx: oneshot::Receiver<()>,
+}
+
 #[derive(Debug)]
 enum ErrorInjected {
     FailAction,
     FailUndoAction,
     Repeat(RepeatInjected),
+    Pause(Completion, PauseInjected),
 }
 
 /// Message passed from the [`SecClient`] to the [`Sec`]
@@ -1326,6 +1365,9 @@ impl Sec {
                 ErrorInjected::Repeat(repeat) => {
                     exec.inject_repeat(node_id, repeat).await;
                 }
+                ErrorInjected::Pause(completion, pause) => {
+                    exec.inject_pause(node_id, completion, pause).await;
+                }
             }
             Sec::client_respond(&log, ack_tx, Ok(()));
             None
@@ -1500,9 +1542,10 @@ impl TryFrom<SagaSerialized> for SagaLog {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::saga_log::SagaNodeLoadStatus;
     use crate::{
-        ActionContext, ActionError, ActionFunc, DagBuilder, Node, SagaId,
-        SagaName,
+        Action, ActionContext, ActionError, ActionFunc, DagBuilder, Node,
+        SagaId, SagaName, SagaNodeEventKind, SagaNodeId,
     };
     use serde::{Deserialize, Serialize};
     use slog::Drain;
@@ -1897,6 +1940,280 @@ mod test {
         assert!(err.to_string().contains("cannot be inserted; already in use"));
     }
 
+    // Truncates a captured saga log to simulate a crash immediately after
+    // `node` recorded an event of kind `kind`, dropping everything recorded
+    // after it.  The result is a log in which `node` is left in an in-progress
+    // state, which recovery must treat as a resume.
+    fn truncate_log_after(
+        events: &[SagaNodeEvent],
+        node: NodeIndex,
+        kind: SagaNodeEventKind,
+    ) -> Vec<SagaNodeEvent> {
+        let node_id = SagaNodeId::from(node);
+        let last = events
+            .iter()
+            .position(|e| e.node_id == node_id && e.event_type.kind() == kind)
+            .unwrap_or_else(|| {
+                panic!(
+                    "captured log should contain a {:?} event for the node",
+                    kind,
+                )
+            });
+        // ..=last rather than ..last because we want to include the event
+        // identified by (node, kind) in the truncated log.
+        events[..=last].to_vec()
+    }
+
+    async fn resume_from_truncated_log(
+        inject_at: Option<&str>,
+        cut_at: &str,
+        cut_kind: SagaNodeEventKind,
+    ) -> (Arc<TestContext>, SagaResult) {
+        let log = new_log();
+        let (registry, dag) = make_test_saga();
+        let saga_id = SagaId(Uuid::new_v4());
+
+        // Phase 1: run the saga and capture its log.
+        let captured = {
+            let sec = new_sec(&log);
+            let context = Arc::new(TestContext::new());
+            let saga_future = sec
+                .saga_create(
+                    saga_id,
+                    context,
+                    Arc::clone(&dag),
+                    Arc::clone(&registry),
+                )
+                .await
+                .expect("failed to create saga");
+            if let Some(name) = inject_at {
+                let node =
+                    dag.get_index(name).expect("inject node should exist");
+                sec.saga_inject_error(saga_id, node)
+                    .await
+                    .expect("inject error");
+            }
+            sec.saga_start(saga_id).await.expect("failed to start saga");
+            saga_future.await.saga_log.events().to_vec()
+        };
+
+        // Leave `cut_at` in an in-progress state, as if it crashed mid-action.
+        let cut_node = dag.get_index(cut_at).expect("cut node should exist");
+        let resume_log = truncate_log_after(&captured, cut_node, cut_kind);
+
+        // Phase 2: a fresh SEC resumes from the truncated log.
+        let sec = new_sec(&log);
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_resume(
+                saga_id,
+                Arc::clone(&context),
+                serde_json::to_value(&*dag).unwrap(),
+                Arc::clone(&registry),
+                resume_log,
+            )
+            .await
+            .expect("failed to resume saga");
+        sec.saga_start(saga_id).await.expect("failed to start resumed saga");
+        let result = saga_future.await;
+        (context, result)
+    }
+
+    #[tokio::test]
+    async fn test_resume_forward_in_progress_node() {
+        // Set things up so that `n2` durably started but, as far as the durable
+        // log is concerned, crashed mid-action.
+        let (context, result) = resume_from_truncated_log(
+            None,
+            "n2_out",
+            SagaNodeEventKind::Started,
+        )
+        .await;
+        let output = result.kind.expect("resumed saga should succeed");
+
+        // `n1` was durably marked as `Succeeded`, so its action is not re-run.
+        assert_eq!(context.get_count("do_n1"), 0, "n1 must not re-run");
+        // `n2` resumes and runs exactly once.
+        assert_eq!(
+            context.get_count("do_n2"),
+            1,
+            "n2 must resume and run exactly once"
+        );
+        // No undo runs.
+        assert_eq!(context.get_count("undo_n1"), 0);
+        assert_eq!(context.get_count("undo_n2"), 0);
+        assert_eq!(output.lookup_node_output::<i32>("n2_out").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_resume_undo_in_progress_node() {
+        // Set things up so that:
+        //
+        // * `n2` fails and the saga unwinds.
+        // * `n1`'s undo durably started but crashed before finishing.
+        // * `n2` remains `Failed`.
+        let (context, result) = resume_from_truncated_log(
+            Some("n2_out"),
+            "n1_out",
+            SagaNodeEventKind::UndoStarted,
+        )
+        .await;
+        result.kind.expect_err("resumed saga should remain failed");
+
+        // `n1`'s undo resumes and runs exactly once.
+        assert_eq!(
+            context.get_count("undo_n1"),
+            1,
+            "n1 undo must resume and run exactly once"
+        );
+        // No forward actions are re-run.
+        assert_eq!(context.get_count("do_n1"), 0, "n1 forward must not re-run");
+        assert_eq!(context.get_count("do_n2"), 0, "n2 forward must not re-run");
+        // `n2` (which failed) is never undone.
+        assert_eq!(context.get_count("undo_n2"), 0, "failed n2 is not undone");
+    }
+
+    // Helper to test recovering a saga that crashed mid-unwind, where a
+    // fan-in (join) node never started because one of its parent branches
+    // failed.
+    //
+    // This helper runs the diamond saga fixture with `p` injected to fail (and,
+    // when `fail_a_undo` is set, `a`'s undo injected to fail too), truncates
+    // the durable log just after `a` records `cut_at_a`, and recovers a fresh
+    // SEC from it.
+    async fn recover_unwound_diamond_join(
+        cut_at_a: SagaNodeEventKind,
+        fail_a_undo: bool,
+    ) -> (Arc<TestContext>, SagaResult) {
+        let log = new_log();
+        let (registry, dag) = make_diamond_saga();
+        let saga_id = SagaId(Uuid::new_v4());
+        let a = dag.get_index("a_out").expect("a_out should exist");
+        let c = dag.get_index("c_out").expect("c_out should exist");
+
+        // Phase 1: run the diamond to a terminal state and capture its durable
+        // log.  Only `p` fails in the forward direction; `a` succeeds and is
+        // then unwound. (If `fail_a_undo` is set, `a`'s undo fails as well.)
+        let captured = {
+            let sec = new_sec(&log);
+            let context = Arc::new(TestContext::new());
+            let saga_future = sec
+                .saga_create(
+                    saga_id,
+                    context,
+                    Arc::clone(&dag),
+                    Arc::clone(&registry),
+                )
+                .await
+                .expect("failed to create saga");
+            let p = dag.get_index("p_out").expect("p_out should exist");
+            sec.saga_inject_error(saga_id, p).await.expect("inject p");
+            if fail_a_undo {
+                sec.saga_inject_error_undo(saga_id, a)
+                    .await
+                    .expect("inject a undo");
+            }
+            sec.saga_start(saga_id).await.expect("failed to start saga");
+            let result = saga_future.await;
+            result
+                .kind
+                .expect_err("saga should have failed; we injected an error");
+            result.saga_log.events().to_vec()
+        };
+
+        // Truncate just after `cut_at_a`, leaving the saga mid-unwind with `a`
+        // in an undoing state and `start` not yet undone.
+        let resume_log = truncate_log_after(&captured, a, cut_at_a);
+
+        // Confirm the truncated log holds the expected combination of events.
+        let resume_status = SagaLog::new_recover(saga_id, resume_log.clone())
+            .expect("truncated log should rebuild");
+        match resume_status.load_status_for_node(a.into()) {
+            SagaNodeLoadStatus::UndoStarted(_)
+            | SagaNodeLoadStatus::UndoFinished
+            | SagaNodeLoadStatus::UndoFailed(_) => {}
+            other => panic!("expected `a` in an undoing state, got {other:?}"),
+        }
+        match resume_status.load_status_for_node(c.into()) {
+            SagaNodeLoadStatus::NeverStarted => {}
+            other => {
+                panic!(
+                    "expected join node `c` to be NeverStarted, got {other:?}"
+                )
+            }
+        }
+
+        // Phase 2: a fresh SEC recovers from the truncated log.  Recovery must
+        // succeed, then drive the saga to a failed terminal state.
+        let sec = new_sec(&log);
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_resume(
+                saga_id,
+                Arc::clone(&context),
+                serde_json::to_value(&*dag).unwrap(),
+                Arc::clone(&registry),
+                resume_log,
+            )
+            .await
+            .expect("recovery must succeed for a legal mid-unwind log");
+        sec.saga_start(saga_id).await.expect("failed to start recovered saga");
+        let result = saga_future.await;
+        (context, result)
+    }
+
+    // Recover when the join's parent crashed with its undo already finished:
+    // `a` is `UndoFinished`, so only the rest of the unwind remains.
+    #[tokio::test]
+    async fn test_recover_unwound_join_parent_undo_finished() {
+        let (context, result) = recover_unwound_diamond_join(
+            SagaNodeEventKind::UndoFinished,
+            false,
+        )
+        .await;
+        result.kind.expect_err("recovered saga should remain failed");
+
+        // `a` had already finished undoing and `p` failed, so finishing the
+        // unwind (undoing the internal `start` node) re-runs no user action or
+        // undo.
+        assert_eq!(context.get_count("do_node"), 0, "no action should re-run");
+        assert_eq!(context.get_count("undo_node"), 0, "no undo should re-run");
+    }
+
+    // Recover when the join's parent crashed with its undo in progress: `a` is
+    // `UndoStarted`, so recovery must resume and complete that undo.
+    #[tokio::test]
+    async fn test_recover_unwound_join_parent_undo_started() {
+        let (context, result) =
+            recover_unwound_diamond_join(SagaNodeEventKind::UndoStarted, false)
+                .await;
+        result.kind.expect_err("recovered saga should remain failed");
+
+        // `a`'s undo was only `UndoStarted` durably, so recovery resumes it and
+        // runs it exactly once; no forward action re-runs.
+        assert_eq!(context.get_count("do_node"), 0, "no action should re-run");
+        assert_eq!(
+            context.get_count("undo_node"),
+            1,
+            "`a`'s undo should resume and run exactly once"
+        );
+    }
+
+    // Recover when the join's parent's undo had already failed: `a` is
+    // `UndoFailed`, so the saga is stuck and recovery re-runs nothing.
+    #[tokio::test]
+    async fn test_recover_unwound_join_parent_undo_failed() {
+        let (context, result) =
+            recover_unwound_diamond_join(SagaNodeEventKind::UndoFailed, true)
+                .await;
+        result.kind.expect_err("recovered saga should remain failed");
+
+        // `a`'s undo had already failed durably, so recovery records the
+        // failure without re-running any action or undo.
+        assert_eq!(context.get_count("do_node"), 0, "no action should re-run");
+        assert_eq!(context.get_count("undo_node"), 0, "no undo should re-run");
+    }
+
     // Tests that started sagas must have previously been created (or resumed).
     #[tokio::test]
     async fn test_saga_start_without_create_fails() {
@@ -1938,5 +2255,193 @@ mod test {
             .err()
             .expect("Double starting a saga should fail");
         assert!(err.to_string().contains("saga not in \"ready\" state"));
+    }
+
+    fn single_action_registry(
+    ) -> (Arc<ActionRegistry<TestSaga>>, Arc<dyn Action<TestSaga>>) {
+        async fn do_node(
+            ctx: ActionContext<TestSaga>,
+        ) -> Result<i32, ActionError> {
+            ctx.user_data().call("do_node");
+            Ok(1)
+        }
+        async fn undo_node(
+            ctx: ActionContext<TestSaga>,
+        ) -> Result<(), anyhow::Error> {
+            ctx.user_data().call("undo_node");
+            Ok(())
+        }
+
+        let mut registry = ActionRegistry::new();
+        let action = ActionFunc::new_action("node_action", do_node, undo_node);
+        registry.register(Arc::clone(&action));
+        (Arc::new(registry), action)
+    }
+
+    // Builds a linear saga: start -> a -> b -> end.
+    fn make_linear_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<SagaDag>) {
+        let (registry, action) = single_action_registry();
+        let mut builder = DagBuilder::new(SagaName::new("linear-saga"));
+        builder.append(Node::action("a_out", "a", &*action));
+        builder.append(Node::action("b_out", "b", &*action));
+        (
+            registry,
+            Arc::new(SagaDag::new(
+                builder.build().unwrap(),
+                serde_json::to_value(TestParams {}).unwrap(),
+            )),
+        )
+    }
+
+    // Builds a diamond saga: start -> {a, p} -> c -> end
+    fn make_diamond_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<SagaDag>) {
+        let (registry, action) = single_action_registry();
+        let mut builder = DagBuilder::new(SagaName::new("diamond-saga"));
+        builder.append_parallel(vec![
+            Node::action("a_out", "a", &*action),
+            Node::action("p_out", "p", &*action),
+        ]);
+        builder.append(Node::action("c_out", "c", &*action));
+        (
+            registry,
+            Arc::new(SagaDag::new(
+                builder.build().unwrap(),
+                serde_json::to_value(TestParams {}).unwrap(),
+            )),
+        )
+    }
+
+    // Test a situation where two parallel nodes both fail.
+    //
+    // Without the in-memory log and the derived maps being updated atomically,
+    // the executor records one node's failure in the in-memory log, but hasn't
+    // yet processed that completion message (so `node_errors` doesn't contain
+    // it). Meanwhile, the other failed node's completion causes the saga to
+    // unwind, which calls `node_exec_state` on the first node and trips:
+    //
+    //     assert!(self.node_errors.contains_key(&node_id));
+    //
+    // in `SagaExecLiveState::node_exec_state`.  This causes the executor to
+    // panic, which kills the SEC task and makes `saga_future.await`
+    // panic with "failed to wait for saga to finish".
+    #[tokio::test]
+    async fn test_concurrent_failures_dont_panic() {
+        let log = new_log();
+        let sec = new_sec(&log);
+        let (registry, dag) = make_diamond_saga();
+
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(
+                saga_id,
+                Arc::clone(&context),
+                Arc::clone(&dag),
+                registry,
+            )
+            .await
+            .expect("failed to create saga");
+
+        // Inject failures into both parallel nodes.
+        let a = dag.get_index("a_out").expect("a_out should exist");
+        let p = dag.get_index("p_out").expect("p_out should exist");
+        sec.saga_inject_error(saga_id, a).await.expect("inject a");
+        sec.saga_inject_error(saga_id, p).await.expect("inject p");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga");
+
+        let result = saga_future.await;
+        result
+            .kind
+            .expect_err("saga should have failed; we injected two errors");
+    }
+
+    // Runs the linear saga, injects a failure at `b`, suspends `pause_node` at
+    // its `pause_completion`, observes `status()` at that suspended point, and
+    // asserts both that the observation is consistent and that the saga
+    // ultimately fails.
+    //
+    // If `also_fail_undo` is `Some`, that node's undo action is injected to
+    // fail too.
+    async fn assert_status_consistent_at_failure(
+        pause_node: &str,
+        pause_completion: Completion,
+        also_fail_undo: Option<&str>,
+    ) {
+        let log = new_log();
+        let sec = new_sec(&log);
+        let (registry, dag) = make_linear_saga();
+
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(saga_id, context, Arc::clone(&dag), registry)
+            .await
+            .expect("failed to create saga");
+        let b = dag.get_index("b_out").expect("b_out should exist");
+        sec.saga_inject_error(saga_id, b).await.expect("inject b");
+        if let Some(undo_node) = also_fail_undo {
+            let node =
+                dag.get_index(undo_node).expect("undo node should exist");
+            sec.saga_inject_error_undo(saga_id, node)
+                .await
+                .expect("inject undo error");
+        }
+
+        // Suspend `pause_node` right after it records its completion, before the
+        // executor processes it.
+        let paused =
+            dag.get_index(pause_node).expect("pause node should exist");
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        sec.saga_inject_pause(
+            saga_id,
+            paused,
+            pause_completion,
+            PauseInjected { reached_tx, resume_rx },
+        )
+        .await
+        .expect("inject pause");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga");
+
+        // Wait until the worker is paused in its failure window, then observe
+        // its status.
+        reached_rx.await.expect("worker should pause at its failure");
+        sec.saga_get(saga_id).await.expect("status should be consistent");
+
+        // Release the worker and let the saga finish.
+        let _ = resume_tx.send(());
+        let result = saga_future.await;
+        result.kind.expect_err("saga should have failed");
+    }
+
+    /// Test a race monitoring an action failure via an external `status()`
+    /// observer
+    ///
+    /// `b`'s forward action is paused right after it records its failure.
+    /// Without the in-memory log and derived maps being updated atomically, the
+    /// saga log says `b` failed while `node_errors` doesn't know it yet.
+    #[tokio::test]
+    async fn test_status_during_action_failure_is_consistent() {
+        assert_status_consistent_at_failure("b_out", Completion::Action, None)
+            .await;
+    }
+
+    /// Test a race monitoring an undo failure via an external `status()`
+    /// observer
+    ///
+    /// Set up a situation with the linear saga where `a` succeeds, `b` fails,
+    /// and `a`'s undo is made to fail.  Without the in-memory log and derived
+    /// maps being updated atomically, the saga log says `a`'s undo failed while
+    /// `undo_errors` doesn't know it yet.
+    #[tokio::test]
+    async fn test_status_during_undo_failure_is_consistent() {
+        assert_status_consistent_at_failure(
+            "a_out",
+            Completion::Undo,
+            Some("a_out"),
+        )
+        .await;
     }
 }
