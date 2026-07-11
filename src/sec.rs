@@ -1502,7 +1502,7 @@ mod test {
     use super::*;
     use crate::{
         ActionContext, ActionError, ActionFunc, DagBuilder, Node, SagaId,
-        SagaName,
+        SagaName, SagaNodeEventKind, SagaNodeId,
     };
     use serde::{Deserialize, Serialize};
     use slog::Drain;
@@ -1895,6 +1895,139 @@ mod test {
             .expect("Resuming the saga should fail");
 
         assert!(err.to_string().contains("cannot be inserted; already in use"));
+    }
+
+    // Truncates a captured saga log to simulate a crash immediately after
+    // `node` recorded an event of kind `kind`, dropping everything recorded
+    // after it.  The result is a log in which `node` is left in an in-progress
+    // state, which recovery must treat as a resume.
+    fn truncate_log_after(
+        events: &[SagaNodeEvent],
+        node: NodeIndex,
+        kind: SagaNodeEventKind,
+    ) -> Vec<SagaNodeEvent> {
+        let node_id = SagaNodeId::from(node);
+        let last = events
+            .iter()
+            .position(|e| e.node_id == node_id && e.event_type.kind() == kind)
+            .unwrap_or_else(|| {
+                panic!(
+                    "captured log should contain a {:?} event for the node",
+                    kind,
+                )
+            });
+        // ..=last rather than ..last because we want to include the event
+        // identified by (node, kind) in the truncated log.
+        events[..=last].to_vec()
+    }
+
+    async fn resume_from_truncated_log(
+        inject_at: Option<&str>,
+        cut_at: &str,
+        cut_kind: SagaNodeEventKind,
+    ) -> (Arc<TestContext>, SagaResult) {
+        let log = new_log();
+        let (registry, dag) = make_test_saga();
+        let saga_id = SagaId(Uuid::new_v4());
+
+        // Phase 1: run the saga and capture its log.
+        let captured = {
+            let sec = new_sec(&log);
+            let context = Arc::new(TestContext::new());
+            let saga_future = sec
+                .saga_create(
+                    saga_id,
+                    context,
+                    Arc::clone(&dag),
+                    Arc::clone(&registry),
+                )
+                .await
+                .expect("failed to create saga");
+            if let Some(name) = inject_at {
+                let node =
+                    dag.get_index(name).expect("inject node should exist");
+                sec.saga_inject_error(saga_id, node)
+                    .await
+                    .expect("inject error");
+            }
+            sec.saga_start(saga_id).await.expect("failed to start saga");
+            saga_future.await.saga_log.events().to_vec()
+        };
+
+        // Leave `cut_at` in an in-progress state, as if it crashed mid-action.
+        let cut_node = dag.get_index(cut_at).expect("cut node should exist");
+        let resume_log = truncate_log_after(&captured, cut_node, cut_kind);
+
+        // Phase 2: a fresh SEC resumes from the truncated log.
+        let sec = new_sec(&log);
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_resume(
+                saga_id,
+                Arc::clone(&context),
+                serde_json::to_value(&*dag).unwrap(),
+                Arc::clone(&registry),
+                resume_log,
+            )
+            .await
+            .expect("failed to resume saga");
+        sec.saga_start(saga_id).await.expect("failed to start resumed saga");
+        let result = saga_future.await;
+        (context, result)
+    }
+
+    #[tokio::test]
+    async fn test_resume_forward_in_progress_node() {
+        // Set things up so that `n2` durably started but, as far as the durable
+        // log is concerned, crashed mid-action.
+        let (context, result) = resume_from_truncated_log(
+            None,
+            "n2_out",
+            SagaNodeEventKind::Started,
+        )
+        .await;
+        let output = result.kind.expect("resumed saga should succeed");
+
+        // `n1` was durably marked as `Succeeded`, so its action is not re-run.
+        assert_eq!(context.get_count("do_n1"), 0, "n1 must not re-run");
+        // `n2` resumes and runs exactly once.
+        assert_eq!(
+            context.get_count("do_n2"),
+            1,
+            "n2 must resume and run exactly once"
+        );
+        // No undo runs.
+        assert_eq!(context.get_count("undo_n1"), 0);
+        assert_eq!(context.get_count("undo_n2"), 0);
+        assert_eq!(output.lookup_node_output::<i32>("n2_out").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_resume_undo_in_progress_node() {
+        // Set things up so that:
+        //
+        // * `n2` fails and the saga unwinds.
+        // * `n1`'s undo durably started but crashed before finishing.
+        // * `n2` remains `Failed`.
+        let (context, result) = resume_from_truncated_log(
+            Some("n2_out"),
+            "n1_out",
+            SagaNodeEventKind::UndoStarted,
+        )
+        .await;
+        result.kind.expect_err("resumed saga should remain failed");
+
+        // `n1`'s undo resumes and runs exactly once.
+        assert_eq!(
+            context.get_count("undo_n1"),
+            1,
+            "n1 undo must resume and run exactly once"
+        );
+        // No forward actions are re-run.
+        assert_eq!(context.get_count("do_n1"), 0, "n1 forward must not re-run");
+        assert_eq!(context.get_count("do_n2"), 0, "n2 forward must not re-run");
+        // `n2` (which failed) is never undone.
+        assert_eq!(context.get_count("undo_n2"), 0, "failed n2 is not undone");
     }
 
     // Tests that started sagas must have previously been created (or resumed).
