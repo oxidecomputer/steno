@@ -120,7 +120,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsDone> {
             if neighbors_all(graph, &self.node_id, Outgoing, |child| {
                 live_state.nodes_undone.contains_key(child)
             }) {
-                live_state.queue_undo.push(self.node_id);
+                live_state.enqueue_undo(self.node_id);
             }
             return;
         }
@@ -131,7 +131,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsDone> {
             if neighbors_all(graph, &child, Incoming, |parent| {
                 live_state.node_outputs.contains_key(parent)
             }) {
-                live_state.queue_todo.push(child);
+                live_state.enqueue_todo(child);
             }
         }
     }
@@ -266,7 +266,7 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndone> {
 
                     NodeExecState::Done => {
                         // We have to actually run the undo action.
-                        live_state.queue_undo.push(parent);
+                        live_state.enqueue_undo(parent);
                     }
 
                     NodeExecState::QueuedToUndo
@@ -584,7 +584,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                             // We're recovering a node in the forward direction
                             // where all parents completed successfully.  Add it
                             // to the ready queue.
-                            live_state.queue_todo.push(node_id);
+                            live_state.enqueue_todo(node_id);
                         }
                         RecoveryDirection::Unwind(true) => {
                             // We're recovering a node in the reverse direction
@@ -616,7 +616,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                 SagaNodeLoadStatus::Started => {
                     // Whether we're unwinding or not, we have to finish
                     // execution of this action.
-                    live_state.queue_todo.push(node_id);
+                    live_state.enqueue_todo(node_id);
                 }
                 SagaNodeLoadStatus::Succeeded(output) => {
                     // If the node has finished executing and not started
@@ -629,7 +629,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                         .insert(node_id, Arc::clone(output))
                         .expect_none("recovered node twice (success case)");
                     if let RecoveryDirection::Unwind(true) = direction {
-                        live_state.queue_undo.push(node_id);
+                        live_state.enqueue_undo(node_id);
                     }
                 }
                 SagaNodeLoadStatus::Failed(error) => {
@@ -653,7 +653,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     // We know we're unwinding. (Otherwise, we should have
                     // failed validation earlier.)  Execute the undo action.
                     assert!(!forward);
-                    live_state.queue_undo.push(node_id);
 
                     // We still need to record the output because it's available
                     // to the undo action.
@@ -661,6 +660,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                         .node_outputs
                         .insert(node_id, Arc::clone(output))
                         .expect_none("recovered node twice (undo case)");
+
+                    live_state.enqueue_undo(node_id);
                 }
                 SagaNodeLoadStatus::UndoFinished => {
                     // Again, we know we're unwinding.  We've also finished
@@ -981,6 +982,20 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             let mut live_state = self.live_state.lock().await;
             let prev_state = live_state.exec_state;
             message.node.propagate(&self, &mut live_state);
+
+            // `propagate` must account for this node in one of the maps that
+            // `node_exec_state` reads.  If it did not, the node would look like
+            // it had never started, and unwinding would abandon it without
+            // running its undo action.
+            let node_id = &message.node_id;
+            assert!(
+                live_state.node_outputs.contains_key(node_id)
+                    || live_state.node_errors.contains_key(node_id)
+                    || live_state.nodes_undone.contains_key(node_id)
+                    || live_state.undo_errors.contains_key(node_id),
+                "completed node is not recorded in any state map"
+            );
+
             // TODO-cleanup This condition ought to be simplified.  We want to
             // update the saga state when we become Unwinding (which we do here)
             // and when we become Done (which we do below).  There may be a
@@ -1567,53 +1582,64 @@ impl fmt::Display for NodeExecState {
 }
 
 impl SagaExecLiveState {
-    // TODO-design The current implementation does not use explicit state.  In
-    // most cases, this made things better than before because each hunk of code
-    // was structured to accept only nodes in states that were valid.  But
-    // there are a few cases where we need a bit more state than we're currently
-    // keeping.  This function is used there.
-    //
-    // It's especially questionable to use load_status here -- or is that the
-    // way we should go more generally?  See TODO-design in new_recover().
+    /// Determines a node's execution state
     fn node_exec_state(&self, node_id: NodeIndex) -> NodeExecState {
-        // This seems like overkill but it seems helpful to validate state.
-        let mut set: BTreeSet<NodeExecState> = BTreeSet::new();
-        let load_status = self.sglog.load_status_for_node(node_id.into());
+        // A node's undo action only runs once its action succeeded, and a node
+        // whose action succeeded never records an action error.  So these two
+        // maps are disjoint.
+        assert!(
+            !(self.node_errors.contains_key(&node_id)
+                && self.undo_errors.contains_key(&node_id)),
+            "node's action and undo action both failed"
+        );
+
         if let Some(undo_mode) = self.nodes_undone.get(&node_id) {
-            set.insert(NodeExecState::Undone(*undo_mode));
+            NodeExecState::Undone(*undo_mode)
         } else if self.queue_undo.contains(&node_id) {
-            set.insert(NodeExecState::QueuedToUndo);
-        } else if let SagaNodeLoadStatus::Failed(_) = load_status {
-            assert!(self.node_errors.contains_key(&node_id));
-            set.insert(NodeExecState::Failed);
-        } else if let SagaNodeLoadStatus::UndoFailed(_) = load_status {
-            assert!(self.undo_errors.contains_key(&node_id));
-            set.insert(NodeExecState::UndoFailed);
+            NodeExecState::QueuedToUndo
+        } else if self.undo_errors.contains_key(&node_id) {
+            NodeExecState::UndoFailed
+        } else if self.node_errors.contains_key(&node_id) {
+            NodeExecState::Failed
         } else if self.node_outputs.contains_key(&node_id) {
             if self.node_tasks.contains_key(&node_id) {
-                set.insert(NodeExecState::UndoInProgress);
+                NodeExecState::UndoInProgress
             } else {
-                set.insert(NodeExecState::Done);
+                NodeExecState::Done
             }
         } else if self.node_tasks.contains_key(&node_id) {
-            set.insert(NodeExecState::TaskInProgress);
-        }
-
-        if self.queue_todo.contains(&node_id) {
-            set.insert(NodeExecState::QueuedToRun);
-        }
-
-        if set.is_empty() {
-            if let SagaNodeLoadStatus::NeverStarted = load_status {
-                NodeExecState::Blocked
-            } else {
-                panic!("could not determine node state");
-            }
+            NodeExecState::TaskInProgress
+        } else if self.queue_todo.contains(&node_id) {
+            NodeExecState::QueuedToRun
         } else {
-            assert_eq!(set.len(), 1);
-            let the_state = set.into_iter().next().unwrap();
-            the_state
+            NodeExecState::Blocked
         }
+    }
+
+    /// Queues `node_id` to run its action.
+    fn enqueue_todo(&mut self, node_id: NodeIndex) {
+        assert!(
+            !self.node_tasks.contains_key(&node_id),
+            "queued an action for a node that is already running"
+        );
+        assert!(
+            !self.queue_todo.contains(&node_id),
+            "queued an action for a node that is already queued"
+        );
+        self.queue_todo.push(node_id);
+    }
+
+    /// Queues `node_id` to run its undo action.
+    fn enqueue_undo(&mut self, node_id: NodeIndex) {
+        assert!(
+            !self.node_tasks.contains_key(&node_id),
+            "queued an undo action for a node that is already running"
+        );
+        assert!(
+            !self.queue_undo.contains(&node_id),
+            "queued an undo action for a node that is already queued"
+        );
+        self.queue_undo.push(node_id);
     }
 
     fn mark_saga_done(&mut self) {
