@@ -108,7 +108,7 @@ impl SagaNodeEventType {
     }
 
     /// Returns this event's [`SagaNodeEventKind`] (its variant without associated data).
-    pub fn kind(&self) -> SagaNodeEventKind {
+    pub(crate) fn kind(&self) -> SagaNodeEventKind {
         match self {
             SagaNodeEventType::Started => SagaNodeEventKind::Started,
             SagaNodeEventType::Succeeded(_) => SagaNodeEventKind::Succeeded,
@@ -124,7 +124,7 @@ impl SagaNodeEventType {
 ///
 /// The order is semantically meaningful: see [`SagaLog::new_recover`].
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum SagaNodeEventKind {
+pub(crate) enum SagaNodeEventKind {
     Started,
     Succeeded,
     Failed,

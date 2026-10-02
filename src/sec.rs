@@ -1500,9 +1500,10 @@ impl TryFrom<SagaSerialized> for SagaLog {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::saga_log::SagaNodeEventKind;
     use crate::{
         ActionContext, ActionError, ActionFunc, DagBuilder, Node, SagaId,
-        SagaName, SagaNodeEventKind, SagaNodeId,
+        SagaName, SagaNodeId,
     };
     use serde::{Deserialize, Serialize};
     use slog::Drain;
@@ -1897,10 +1898,12 @@ mod test {
         assert!(err.to_string().contains("cannot be inserted; already in use"));
     }
 
-    // Truncates a captured saga log to simulate a crash immediately after
-    // `node` recorded an event of kind `kind`, dropping everything recorded
-    // after it.  The result is a log in which `node` is left in an in-progress
-    // state, which recovery must treat as a resume.
+    /// Truncate a captured saga log to simulate a crash immediately after
+    /// `node` recorded an event of kind `kind`, dropping everything recorded
+    /// after it.
+    ///
+    /// The result is a log in which the saga is left in an in-progress state,
+    /// which recovery must treat as a resume.
     fn truncate_log_after(
         events: &[SagaNodeEvent],
         node: NodeIndex,
@@ -1921,10 +1924,26 @@ mod test {
         events[..=last].to_vec()
     }
 
+    /// Simulate a saga that crashed partway through and was then recovered.
+    ///
+    /// This works in two phases:
+    ///
+    /// 1. Run the test saga to completion and capture its log.  If
+    ///    `inject_error_at_node` is `Some`, an error is injected at that node
+    ///    first, to simulate a saga failure and resulting unwind.
+    ///
+    /// 2. Truncate the log just after `truncate_after_node`'s first
+    ///    `truncate_after_event_kind` event, then resume from it in a second
+    ///    context.
+    ///
+    /// Returns:
+    ///
+    /// * The second `TestContext`.
+    /// * The result of the recovered run.
     async fn resume_from_truncated_log(
-        inject_at: Option<&str>,
-        cut_at: &str,
-        cut_kind: SagaNodeEventKind,
+        inject_error_at_node: Option<&str>,
+        truncate_after_node: &str,
+        truncate_after_event_kind: SagaNodeEventKind,
     ) -> (Arc<TestContext>, SagaResult) {
         let log = new_log();
         let (registry, dag) = make_test_saga();
@@ -1942,21 +1961,29 @@ mod test {
                     Arc::clone(&registry),
                 )
                 .await
-                .expect("failed to create saga");
-            if let Some(name) = inject_at {
+                .expect("created saga");
+            if let Some(name) = inject_error_at_node {
                 let node =
                     dag.get_index(name).expect("inject node should exist");
                 sec.saga_inject_error(saga_id, node)
                     .await
-                    .expect("inject error");
+                    .expect("injecting an error succeeded");
             }
-            sec.saga_start(saga_id).await.expect("failed to start saga");
+            sec.saga_start(saga_id).await.expect("started saga");
             saga_future.await.saga_log.events().to_vec()
         };
 
-        // Leave `cut_at` in an in-progress state, as if it crashed mid-action.
-        let cut_node = dag.get_index(cut_at).expect("cut node should exist");
-        let resume_log = truncate_log_after(&captured, cut_node, cut_kind);
+        // Leave `truncate_after_node` in the state after
+        // `truncate_after_event_kind`. This can be an in-progress or completed
+        // state.
+        let truncation_node = dag
+            .get_index(truncate_after_node)
+            .expect("truncation node should exist");
+        let resume_log = truncate_log_after(
+            &captured,
+            truncation_node,
+            truncate_after_event_kind,
+        );
 
         // Phase 2: a fresh SEC resumes from the truncated log.
         let sec = new_sec(&log);
@@ -1970,8 +1997,8 @@ mod test {
                 resume_log,
             )
             .await
-            .expect("failed to resume saga");
-        sec.saga_start(saga_id).await.expect("failed to start resumed saga");
+            .expect("created resumed saga");
+        sec.saga_start(saga_id).await.expect("started resumed saga");
         let result = saga_future.await;
         (context, result)
     }
