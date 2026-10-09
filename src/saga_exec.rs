@@ -12,6 +12,8 @@ use crate::saga_action_generic::Action;
 use crate::saga_action_generic::ActionConstant;
 use crate::saga_action_generic::ActionData;
 use crate::saga_action_generic::ActionInjectError;
+#[cfg(test)]
+use crate::saga_log::SagaNodeEventKind;
 use crate::saga_log::SagaNodeEventType;
 use crate::saga_log::SagaNodeLoadStatus;
 use crate::sec::RepeatInjected;
@@ -456,6 +458,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             injected_errors: BTreeSet::new(),
             injected_undo_errors: BTreeSet::new(),
             injected_repeats: BTreeMap::new(),
+            #[cfg(test)]
+            injected_task_exit_pauses: BTreeMap::new(),
             sec_hdl,
             saga_id,
         };
@@ -932,6 +936,28 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
         live_state.injected_repeats.insert(node_id, repeat);
     }
 
+    /// Simulates a pause in the worker task after a node's completion is
+    /// recorded in both the in-memory and durable logs, but before it is
+    /// finished.
+    #[cfg(test)]
+    async fn inject_task_exit_pause(
+        &self,
+        node_id: NodeIndex,
+        event_kind: SagaNodeEventKind,
+    ) -> TaskExitPauseHandle {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let mut live_state = self.live_state.lock().await;
+        live_state
+            .injected_task_exit_pauses
+            .insert(
+                (node_id, event_kind),
+                TaskExitPause { reached_tx, resume_rx },
+            )
+            .expect_none("task exit pause injected twice");
+        TaskExitPauseHandle { reached_rx, resume_tx }
+    }
+
     /// Runs the saga
     ///
     /// This might be running a saga that has never been started before or
@@ -1318,6 +1344,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
     ) {
         let node_id = task_params.node_id;
         let event_type = node.log_event();
+        #[cfg(test)]
+        let event_kind = event_type.kind();
 
         {
             let mut live_state = task_params.live_state.lock().await;
@@ -1328,6 +1356,23 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             .done_tx
             .try_send(TaskCompletion { node_id, node })
             .expect("unexpected channel failure");
+
+        #[cfg(test)]
+        {
+            let pause = task_params
+                .live_state
+                .lock()
+                .await
+                .injected_task_exit_pauses
+                .remove(&(node_id, event_kind));
+            if let Some(pause) = pause {
+                pause
+                    .reached_tx
+                    .send(())
+                    .expect("test is waiting for the pause to be reached");
+                pause.resume_rx.await.expect("test released the paused worker");
+            }
+        }
     }
 
     // TODO-design Today, callers that invoke run() maintain a handle to the
@@ -1541,6 +1586,41 @@ struct SagaExecLiveState {
 
     /// Injected actions which should be called repeatedly
     injected_repeats: BTreeMap<NodeIndex, RepeatInjected>,
+
+    /// Injected pauses for worker tasks, after completion is reported but
+    /// before the task exits.
+    #[cfg(test)]
+    injected_task_exit_pauses:
+        BTreeMap<(NodeIndex, SagaNodeEventKind), TaskExitPause>,
+}
+
+/// The worker side of an injected task exit pause.
+#[cfg(test)]
+#[derive(Debug)]
+struct TaskExitPause {
+    reached_tx: tokio::sync::oneshot::Sender<()>,
+    resume_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// The test side of an injected task exit pause.
+#[cfg(test)]
+#[derive(Debug)]
+struct TaskExitPauseHandle {
+    reached_rx: tokio::sync::oneshot::Receiver<()>,
+    resume_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+#[cfg(test)]
+impl TaskExitPauseHandle {
+    async fn reached(&mut self) {
+        (&mut self.reached_rx)
+            .await
+            .expect("worker sent its completion and paused");
+    }
+
+    fn release(self) {
+        self.resume_tx.send(()).expect("paused worker is waiting for release");
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2317,9 +2397,11 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::test_helpers::{make_test_saga, TestContext, TestSaga};
     use crate::{DagBuilder, Node, SagaDag, SagaName};
     use petgraph::graph::NodeIndex;
     use std::fmt::Write;
+    use uuid::Uuid;
 
     // Return a constant node with a null value
     fn constant(name: &str) -> Node {
@@ -2571,6 +2653,138 @@ End
 ";
 
         assert_eq!(actual, expected);
+    }
+
+    fn new_executor(
+        registry: Arc<ActionRegistry<TestSaga>>,
+        dag: Arc<SagaDag>,
+    ) -> SagaExecutor<TestSaga> {
+        let saga_id = SagaId(Uuid::new_v4());
+        SagaExecutor::new(
+            slog::Logger::root(slog::Discard, slog::o!()),
+            saga_id,
+            dag,
+            registry,
+            Arc::new(TestContext::new()),
+            SecExecClient::new_acking_for_test(saga_id),
+        )
+        .expect("created executor")
+    }
+
+    struct TaskExitScenario {
+        fail_action: Option<&'static str>,
+        fail_undo: Option<&'static str>,
+        pause_node: &'static str,
+        pause_event: SagaNodeEventKind,
+        /// The is the first state it reports after completion.
+        settled: NodeExecState,
+    }
+
+    /// Runs the linear saga, holds pause_node's worker open after it reports,
+    /// and checks the value of status() in the intermediate state before the
+    /// task exits.
+    async fn assert_status_at_task_exit(scenario: TaskExitScenario) {
+        let (registry, dag) = make_test_saga();
+        let exec = new_executor(registry, Arc::clone(&dag));
+        let node_index =
+            |name: &str| dag.get_index(name).expect("node exists in test saga");
+
+        if let Some(name) = scenario.fail_action {
+            exec.inject_error(node_index(name)).await;
+        }
+        if let Some(name) = scenario.fail_undo {
+            exec.inject_error_undo(node_index(name)).await;
+        }
+        let paused = node_index(scenario.pause_node);
+        // The expected `status()` return value until the executor loop picks
+        // up its completion.
+        let in_progress = match scenario.pause_event {
+            SagaNodeEventKind::Succeeded | SagaNodeEventKind::Failed => {
+                NodeExecState::TaskInProgress
+            }
+            SagaNodeEventKind::UndoFinished | SagaNodeEventKind::UndoFailed => {
+                NodeExecState::UndoInProgress
+            }
+            SagaNodeEventKind::Started | SagaNodeEventKind::UndoStarted => {
+                panic!("a task only exits after a completion event")
+            }
+        };
+        let mut pause =
+            exec.inject_task_exit_pause(paused, scenario.pause_event).await;
+
+        let observe = async {
+            pause.reached().await;
+            let observed = loop {
+                let status = exec.status().await;
+                let state = status.node_exec_states[&paused];
+                if state != in_progress {
+                    break state;
+                }
+                tokio::task::yield_now().await;
+            };
+            pause.release();
+            observed
+        };
+        let ((), observed) = tokio::join!(exec.run(), observe);
+
+        assert_eq!(observed, scenario.settled);
+        assert_eq!(
+            exec.result().kind.is_ok(),
+            scenario.fail_action.is_none(),
+            "saga outcome matches the injected failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_status_at_task_exit_after_action_success() {
+        assert_status_at_task_exit(TaskExitScenario {
+            fail_action: None,
+            fail_undo: None,
+            pause_node: "n1_out",
+            pause_event: SagaNodeEventKind::Succeeded,
+            // BUG: The action succeeded, so this should be Done.
+            settled: NodeExecState::Blocked,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_status_at_task_exit_after_action_failure() {
+        assert_status_at_task_exit(TaskExitScenario {
+            fail_action: Some("n2_out"),
+            fail_undo: None,
+            pause_node: "n2_out",
+            pause_event: SagaNodeEventKind::Failed,
+            // BUG: The action failed, so this should be Undone(ActionFailed).
+            settled: NodeExecState::Blocked,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_status_at_task_exit_after_undo_success() {
+        assert_status_at_task_exit(TaskExitScenario {
+            fail_action: Some("n2_out"),
+            fail_undo: None,
+            pause_node: "n1_out",
+            pause_event: SagaNodeEventKind::UndoFinished,
+            // BUG: The undo finished, so this should be Undone(ActionUndone).
+            settled: NodeExecState::Done,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_status_at_task_exit_after_undo_failure() {
+        assert_status_at_task_exit(TaskExitScenario {
+            fail_action: Some("n2_out"),
+            fail_undo: Some("n1_out"),
+            pause_node: "n1_out",
+            pause_event: SagaNodeEventKind::UndoFailed,
+            // BUG: The undo failed, so this should be UndoFailed.
+            settled: NodeExecState::Done,
+        })
+        .await;
     }
 }
 
