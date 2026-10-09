@@ -2281,4 +2281,44 @@ mod test {
             )),
         )
     }
+
+    // Test the situation described in #17 and fixed by #466:
+    //
+    // * Two parallel nodes fail.
+    // * Unwinding from the first causes the state of the second to be checked.
+    // * The failure of the second is recorded in the in-memory log but not yet
+    //   in `node_errors`.
+    //
+    // Before #466, this tripped the `node_errors` assertion in
+    // `node_exec_state`.
+    #[tokio::test]
+    async fn test_concurrent_failures_dont_panic() {
+        let log = new_log();
+        let sec = new_sec(&log);
+        let (registry, dag) = make_diamond_saga();
+
+        let saga_id = SagaId(Uuid::new_v4());
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(
+                saga_id,
+                Arc::clone(&context),
+                Arc::clone(&dag),
+                registry,
+            )
+            .await
+            .expect("failed to create saga");
+
+        let a = dag.get_index("a_out").expect("a_out should exist");
+        let p = dag.get_index("p_out").expect("p_out should exist");
+        sec.saga_inject_error(saga_id, a).await.expect("inject a");
+        sec.saga_inject_error(saga_id, p).await.expect("inject p");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga");
+
+        let result = saga_future.await;
+        result.kind.expect_err(
+            "saga should have failed, since we injected two errors",
+        );
+    }
 }
