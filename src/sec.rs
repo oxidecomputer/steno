@@ -1501,9 +1501,10 @@ impl TryFrom<SagaSerialized> for SagaLog {
 mod test {
     use super::*;
     use crate::saga_log::SagaNodeEventKind;
+    use crate::saga_log::SagaNodeLoadStatus;
     use crate::{
-        ActionContext, ActionError, ActionFunc, DagBuilder, Node, SagaId,
-        SagaName, SagaNodeId,
+        Action, ActionContext, ActionError, ActionFunc, DagBuilder, Node,
+        SagaId, SagaName, SagaNodeId,
     };
     use serde::{Deserialize, Serialize};
     use slog::Drain;
@@ -2057,6 +2058,148 @@ mod test {
         assert_eq!(context.get_count("undo_n2"), 0, "failed n2 is not undone");
     }
 
+    // Helper to test recovering a saga that crashed mid-unwind, where a
+    // fan-in (join) node never started because one of its parent branches
+    // failed.
+    //
+    // This helper runs the diamond saga fixture with `p` injected to fail (and,
+    // when `fail_a_undo` is set, `a`'s undo injected to fail too), truncates
+    // the durable log just after `a` records `truncate_after_event_kind`, and
+    // recovers a fresh SEC from it.
+    async fn recover_unwound_diamond_join(
+        truncate_after_event_kind: SagaNodeEventKind,
+        fail_a_undo: bool,
+    ) -> (Arc<TestContext>, SagaResult) {
+        let log = new_log();
+        let (registry, dag) = make_diamond_saga();
+        let saga_id = SagaId(Uuid::new_v4());
+        let a = dag.get_index("a_out").expect("a_out should exist");
+        let c = dag.get_index("c_out").expect("c_out should exist");
+
+        // Phase 1: run the diamond to a terminal state and capture its durable
+        // log.  Only `p` fails in the forward direction; `a` succeeds and is
+        // then unwound. (If `fail_a_undo` is set, `a`'s undo fails as well.)
+        let captured = {
+            let sec = new_sec(&log);
+            let context = Arc::new(TestContext::new());
+            let saga_future = sec
+                .saga_create(
+                    saga_id,
+                    context,
+                    Arc::clone(&dag),
+                    Arc::clone(&registry),
+                )
+                .await
+                .expect("failed to create saga");
+            let p = dag.get_index("p_out").expect("p_out should exist");
+            sec.saga_inject_error(saga_id, p).await.expect("inject p");
+            if fail_a_undo {
+                sec.saga_inject_error_undo(saga_id, a)
+                    .await
+                    .expect("inject a undo");
+            }
+            sec.saga_start(saga_id).await.expect("failed to start saga");
+            let result = saga_future.await;
+            result
+                .kind
+                .expect_err("saga should have failed; we injected an error");
+            result.saga_log.events().to_vec()
+        };
+
+        // Truncate just after `truncate_after_event_kind`, leaving the saga
+        // mid-unwind with `a` in an undoing state and `start` not yet undone.
+        let resume_log =
+            truncate_log_after(&captured, a, truncate_after_event_kind);
+
+        // Confirm the truncated log holds the expected combination of events.
+        let resume_status = SagaLog::new_recover(saga_id, resume_log.clone())
+            .expect("truncated log should rebuild");
+        match resume_status.load_status_for_node(a.into()) {
+            SagaNodeLoadStatus::UndoStarted(_)
+            | SagaNodeLoadStatus::UndoFinished
+            | SagaNodeLoadStatus::UndoFailed(_) => {}
+            other => panic!("expected `a` in an undoing state, got {other:?}"),
+        }
+        match resume_status.load_status_for_node(c.into()) {
+            SagaNodeLoadStatus::NeverStarted => {}
+            other => {
+                panic!(
+                    "expected join node `c` to be NeverStarted, got {other:?}"
+                )
+            }
+        }
+
+        // Phase 2: a fresh SEC recovers from the truncated log.  Recovery must
+        // succeed, then drive the saga to a failed terminal state.
+        let sec = new_sec(&log);
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_resume(
+                saga_id,
+                Arc::clone(&context),
+                serde_json::to_value(&*dag).unwrap(),
+                Arc::clone(&registry),
+                resume_log,
+            )
+            .await
+            .expect("recovery must succeed for a legal mid-unwind log");
+        sec.saga_start(saga_id).await.expect("failed to start recovered saga");
+        let result = saga_future.await;
+        (context, result)
+    }
+
+    // Recover when the join's parent crashed with its undo already finished:
+    // `a` is `UndoFinished`, so only the rest of the unwind remains.
+    #[tokio::test]
+    async fn test_recover_unwound_join_parent_undo_finished() {
+        let (context, result) = recover_unwound_diamond_join(
+            SagaNodeEventKind::UndoFinished,
+            false,
+        )
+        .await;
+        result.kind.expect_err("recovered saga should remain failed");
+
+        // `a` had already finished undoing and `p` failed, so finishing the
+        // unwind (undoing the internal `start` node) re-runs no user action or
+        // undo.
+        assert_eq!(context.get_count("do_node"), 0, "no action should re-run");
+        assert_eq!(context.get_count("undo_node"), 0, "no undo should re-run");
+    }
+
+    // Recover when the join's parent crashed with its undo in progress: `a` is
+    // `UndoStarted`, so recovery must resume and complete that undo.
+    #[tokio::test]
+    async fn test_recover_unwound_join_parent_undo_started() {
+        let (context, result) =
+            recover_unwound_diamond_join(SagaNodeEventKind::UndoStarted, false)
+                .await;
+        result.kind.expect_err("recovered saga should remain failed");
+
+        // `a`'s undo was only `UndoStarted` durably, so recovery resumes it and
+        // runs it exactly once; no forward action re-runs.
+        assert_eq!(context.get_count("do_node"), 0, "no action should re-run");
+        assert_eq!(
+            context.get_count("undo_node"),
+            1,
+            "`a`'s undo should resume and run exactly once"
+        );
+    }
+
+    // Recover when the join's parent's undo had already failed: `a` is
+    // `UndoFailed`, so the saga is stuck and recovery re-runs nothing.
+    #[tokio::test]
+    async fn test_recover_unwound_join_parent_undo_failed() {
+        let (context, result) =
+            recover_unwound_diamond_join(SagaNodeEventKind::UndoFailed, true)
+                .await;
+        result.kind.expect_err("recovered saga should remain failed");
+
+        // `a`'s undo had already failed durably, so recovery records the
+        // failure without re-running any action or undo.
+        assert_eq!(context.get_count("do_node"), 0, "no action should re-run");
+        assert_eq!(context.get_count("undo_node"), 0, "no undo should re-run");
+    }
+
     // Tests that started sagas must have previously been created (or resumed).
     #[tokio::test]
     async fn test_saga_start_without_create_fails() {
@@ -2098,5 +2241,44 @@ mod test {
             .err()
             .expect("Double starting a saga should fail");
         assert!(err.to_string().contains("saga not in \"ready\" state"));
+    }
+
+    fn single_action_registry(
+    ) -> (Arc<ActionRegistry<TestSaga>>, Arc<dyn Action<TestSaga>>) {
+        async fn do_node(
+            ctx: ActionContext<TestSaga>,
+        ) -> Result<i32, ActionError> {
+            ctx.user_data().call("do_node");
+            Ok(1)
+        }
+        async fn undo_node(
+            ctx: ActionContext<TestSaga>,
+        ) -> Result<(), anyhow::Error> {
+            ctx.user_data().call("undo_node");
+            Ok(())
+        }
+
+        let mut registry = ActionRegistry::new();
+        let action = ActionFunc::new_action("node_action", do_node, undo_node);
+        registry.register(Arc::clone(&action));
+        (Arc::new(registry), action)
+    }
+
+    // Builds a diamond saga: start -> {a, p} -> c -> end
+    fn make_diamond_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<SagaDag>) {
+        let (registry, action) = single_action_registry();
+        let mut builder = DagBuilder::new(SagaName::new("diamond-saga"));
+        builder.append_parallel(vec![
+            Node::action("a_out", "a", &*action),
+            Node::action("p_out", "p", &*action),
+        ]);
+        builder.append(Node::action("c_out", "c", &*action));
+        (
+            registry,
+            Arc::new(SagaDag::new(
+                builder.build().unwrap(),
+                serde_json::to_value(TestParams {}).unwrap(),
+            )),
+        )
     }
 }
