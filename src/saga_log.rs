@@ -108,7 +108,7 @@ impl SagaNodeEventType {
     }
 
     /// Returns this event's [`SagaNodeEventKind`] (its variant without associated data).
-    pub fn kind(&self) -> SagaNodeEventKind {
+    pub(crate) fn kind(&self) -> SagaNodeEventKind {
         match self {
             SagaNodeEventType::Started => SagaNodeEventKind::Started,
             SagaNodeEventType::Succeeded(_) => SagaNodeEventKind::Succeeded,
@@ -118,40 +118,19 @@ impl SagaNodeEventType {
             SagaNodeEventType::UndoFailed(_) => SagaNodeEventKind::UndoFailed,
         }
     }
-
-    /// Returns which of a node's two completions this event terminates, or
-    /// `None` if it's a non-terminal (start) event.
-    pub fn completion(&self) -> Option<Completion> {
-        match self {
-            SagaNodeEventType::Succeeded(_) | SagaNodeEventType::Failed(_) => {
-                Some(Completion::Action)
-            }
-            SagaNodeEventType::UndoFinished
-            | SagaNodeEventType::UndoFailed(_) => Some(Completion::Undo),
-            SagaNodeEventType::Started | SagaNodeEventType::UndoStarted => None,
-        }
-    }
 }
 
 /// The kind of a [`SagaNodeEventType`] without associated data.
 ///
 /// The order is semantically meaningful: see [`SagaLog::new_recover`].
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum SagaNodeEventKind {
+pub(crate) enum SagaNodeEventKind {
     Started,
     Succeeded,
     Failed,
     UndoStarted,
     UndoFinished,
     UndoFailed,
-}
-
-/// Which of a node's two completions an event or action refers to: the forward
-/// action's, or the undo action's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Completion {
-    Action,
-    Undo,
 }
 
 /// Persistent status for a saga node
