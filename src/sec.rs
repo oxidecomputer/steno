@@ -727,6 +727,31 @@ impl SecExecClient {
     }
 }
 
+#[cfg(test)]
+impl SecExecClient {
+    pub(crate) fn new_acking_for_test(saga_id: SagaId) -> SecExecClient {
+        let (exec_tx, mut exec_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            while let Some(message) = exec_rx.recv().await {
+                match message {
+                    SecExecMsg::LogEvent(data) => {
+                        data.ack_tx.send(()).expect("executor awaits log ack");
+                    }
+                    SecExecMsg::UpdateCachedState(data) => {
+                        data.ack_tx
+                            .send(())
+                            .expect("executor awaits state ack");
+                    }
+                    SecExecMsg::SagaGet(_) => {
+                        panic!("test SEC stand-in does not serve saga_get")
+                    }
+                }
+            }
+        });
+        SecExecClient { saga_id, exec_tx }
+    }
+}
+
 /// Message passed from the [`SecExecClient`] to the [`Sec`]
 #[derive(Debug)]
 enum SecExecMsg {
@@ -1502,13 +1527,9 @@ mod test {
     use super::*;
     use crate::saga_log::SagaNodeEventKind;
     use crate::saga_log::SagaNodeLoadStatus;
-    use crate::{
-        Action, ActionContext, ActionError, ActionFunc, DagBuilder, Node,
-        SagaId, SagaName, SagaNodeId,
-    };
-    use serde::{Deserialize, Serialize};
+    use crate::test_helpers::{make_diamond_saga, make_test_saga, TestContext};
+    use crate::{SagaId, SagaNodeId};
     use slog::Drain;
-    use std::sync::Mutex;
     use uuid::Uuid;
 
     fn new_log() -> slog::Logger {
@@ -1523,96 +1544,6 @@ mod test {
         crate::sec(
             log.new(slog::o!()),
             Arc::new(crate::InMemorySecStore::new()),
-        )
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct TestParams;
-
-    // This context object is a dynamically typed bucket of
-    // information for use by the following tests.
-    //
-    // It can be used by tests to monitor:
-    // - Frequency of saga node execution
-    #[derive(Debug)]
-    struct TestContext {
-        counters: Mutex<BTreeMap<String, u32>>,
-    }
-
-    impl TestContext {
-        fn new() -> Self {
-            TestContext { counters: Mutex::new(BTreeMap::new()) }
-        }
-
-        // Identifies that a function `name` has been called.
-        fn call(&self, name: &str) {
-            let mut map = self.counters.lock().unwrap();
-            if let Some(count) = map.get_mut(name) {
-                *count += 1;
-            } else {
-                map.insert(name.to_string(), 1);
-            }
-        }
-
-        // Returns the number of times `name` has been called.
-        fn get_count(&self, name: &str) -> u32 {
-            let map = self.counters.lock().unwrap();
-            if let Some(count) = map.get(name) {
-                *count
-            } else {
-                0
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    struct TestSaga;
-    impl SagaType for TestSaga {
-        type ExecContextType = TestContext;
-    }
-
-    fn make_test_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<SagaDag>) {
-        async fn do_n1(
-            ctx: ActionContext<TestSaga>,
-        ) -> Result<i32, ActionError> {
-            ctx.user_data().call("do_n1");
-            Ok(1)
-        }
-        async fn undo_n1(
-            ctx: ActionContext<TestSaga>,
-        ) -> Result<(), anyhow::Error> {
-            ctx.user_data().call("undo_n1");
-            Ok(())
-        }
-
-        async fn do_n2(
-            ctx: ActionContext<TestSaga>,
-        ) -> Result<i32, ActionError> {
-            ctx.user_data().call("do_n2");
-            Ok(2)
-        }
-        async fn undo_n2(
-            ctx: ActionContext<TestSaga>,
-        ) -> Result<(), anyhow::Error> {
-            ctx.user_data().call("undo_n2");
-            Ok(())
-        }
-
-        let mut registry = ActionRegistry::new();
-        let action_n1 = ActionFunc::new_action("n1_out", do_n1, undo_n1);
-        registry.register(Arc::clone(&action_n1));
-        let action_n2 = ActionFunc::new_action("n2_out", do_n2, undo_n2);
-        registry.register(Arc::clone(&action_n2));
-
-        let mut builder = DagBuilder::new(SagaName::new("test-saga"));
-        builder.append(Node::action("n1_out", "n1", &*action_n1));
-        builder.append(Node::action("n2_out", "n2", &*action_n2));
-        (
-            Arc::new(registry),
-            Arc::new(SagaDag::new(
-                builder.build().unwrap(),
-                serde_json::to_value(TestParams {}).unwrap(),
-            )),
         )
     }
 
@@ -2241,45 +2172,6 @@ mod test {
             .err()
             .expect("Double starting a saga should fail");
         assert!(err.to_string().contains("saga not in \"ready\" state"));
-    }
-
-    fn single_action_registry(
-    ) -> (Arc<ActionRegistry<TestSaga>>, Arc<dyn Action<TestSaga>>) {
-        async fn do_node(
-            ctx: ActionContext<TestSaga>,
-        ) -> Result<i32, ActionError> {
-            ctx.user_data().call("do_node");
-            Ok(1)
-        }
-        async fn undo_node(
-            ctx: ActionContext<TestSaga>,
-        ) -> Result<(), anyhow::Error> {
-            ctx.user_data().call("undo_node");
-            Ok(())
-        }
-
-        let mut registry = ActionRegistry::new();
-        let action = ActionFunc::new_action("node_action", do_node, undo_node);
-        registry.register(Arc::clone(&action));
-        (Arc::new(registry), action)
-    }
-
-    // Builds a diamond saga: start -> {a, p} -> c -> end
-    fn make_diamond_saga() -> (Arc<ActionRegistry<TestSaga>>, Arc<SagaDag>) {
-        let (registry, action) = single_action_registry();
-        let mut builder = DagBuilder::new(SagaName::new("diamond-saga"));
-        builder.append_parallel(vec![
-            Node::action("a_out", "a", &*action),
-            Node::action("p_out", "p", &*action),
-        ]);
-        builder.append(Node::action("c_out", "c", &*action));
-        (
-            registry,
-            Arc::new(SagaDag::new(
-                builder.build().unwrap(),
-                serde_json::to_value(TestParams {}).unwrap(),
-            )),
-        )
     }
 
     // Test the situation described in #17 and fixed by #466:
