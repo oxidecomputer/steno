@@ -37,6 +37,8 @@ mod saga_exec;
 mod saga_log;
 mod sec;
 mod store;
+#[cfg(test)]
+mod test_helpers;
 
 // TODO-cleanup The example_provision stuff should probably be in a separate
 // crate that depends on "steno".  That would ensure it only uses public
