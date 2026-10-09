@@ -998,7 +998,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             // Ensure that node_task_done and propagate occur in the same
             // critical section so intermediate state isn't externally visible.
             // See #468.
-            let (task, done) = {
+            let (task, is_done) = {
                 let mut live_state = self.live_state.lock().await;
                 let task = live_state.node_task_done(message.node_id);
                 let prev_state = live_state.exec_state;
@@ -1039,7 +1039,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             // TODO-robustness can we enforce that this won't take long?
             task.await.expect("node task failed unexpectedly");
 
-            if done {
+            if is_done {
                 break;
             }
         }
