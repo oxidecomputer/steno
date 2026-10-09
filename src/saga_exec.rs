@@ -2676,7 +2676,10 @@ End
         .expect("created executor")
     }
 
-    struct TaskExitScenario {
+    /// A test case for `assert_status_at_task_exit`, including parameters for
+    /// how to execute the test saga and the expected status of the task at the
+    /// point where the saga gets paused. See that function below for details.
+    struct TaskExitStatusTestCase {
         fail_action: Option<&'static str>,
         fail_undo: Option<&'static str>,
         pause_node: &'static str,
@@ -2685,10 +2688,26 @@ End
         settled: NodeExecState,
     }
 
-    /// Runs the linear saga, holds pause_node's worker open after it reports,
-    /// and checks the value of status() in the intermediate state before the
-    /// task exits.
-    async fn assert_status_at_task_exit(scenario: TaskExitScenario) {
+    /// Runs a saga to test for a known case where the `status()` reported
+    /// during saga execution reports the wrong status for a node that has
+    /// finished running, but whose completion hasn't been processed yet by the
+    /// main loop
+    ///
+    /// More precisely, this function:
+    ///
+    /// - Sets up a test saga, injecting an error into an action if
+    ///   `fail_action` is set and injecting an error into an undo action if
+    ///   `fail_undo` is set.
+    /// - Pauses it at a point where node `pause_node` is reporting event
+    ///   `pause_event`.
+    /// - Fetches the saga's execution status at that point, and records
+    ///   the reported state of `pause_node`.
+    /// - Waits for the saga to finish and then asserts that the recorded
+    ///   node status is `settled`.
+    ///
+    /// This is used to exercise a known issue (#468) where the status was wrong
+    /// at this point during execution.
+    async fn assert_status_at_task_exit(scenario: TaskExitStatusTestCase) {
         let (registry, dag) = make_test_saga();
         let exec = new_executor(registry, Arc::clone(&dag));
         let node_index =
@@ -2742,7 +2761,7 @@ End
 
     #[tokio::test]
     async fn test_status_at_task_exit_after_action_success() {
-        assert_status_at_task_exit(TaskExitScenario {
+        assert_status_at_task_exit(TaskExitStatusTestCase {
             fail_action: None,
             fail_undo: None,
             pause_node: "n1_out",
@@ -2754,7 +2773,7 @@ End
 
     #[tokio::test]
     async fn test_status_at_task_exit_after_action_failure() {
-        assert_status_at_task_exit(TaskExitScenario {
+        assert_status_at_task_exit(TaskExitStatusTestCase {
             fail_action: Some("n2_out"),
             fail_undo: None,
             pause_node: "n2_out",
@@ -2766,7 +2785,7 @@ End
 
     #[tokio::test]
     async fn test_status_at_task_exit_after_undo_success() {
-        assert_status_at_task_exit(TaskExitScenario {
+        assert_status_at_task_exit(TaskExitStatusTestCase {
             fail_action: Some("n2_out"),
             fail_undo: None,
             pause_node: "n1_out",
@@ -2778,7 +2797,7 @@ End
 
     #[tokio::test]
     async fn test_status_at_task_exit_after_undo_failure() {
-        assert_status_at_task_exit(TaskExitScenario {
+        assert_status_at_task_exit(TaskExitStatusTestCase {
             fail_action: Some("n2_out"),
             fail_undo: Some("n1_out"),
             pause_node: "n1_out",
