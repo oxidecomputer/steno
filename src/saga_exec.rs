@@ -994,9 +994,43 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             // TODO-robustness Can we assert that there are outstanding tasks
             // when we block on this channel?
             let message = rx.next().await.expect("broken tx");
-            let task = {
+
+            // Ensure that node_task_done and propagate occur in the same
+            // critical section so intermediate state isn't externally visible.
+            // See #468.
+            let (task, is_done) = {
                 let mut live_state = self.live_state.lock().await;
-                live_state.node_task_done(message.node_id)
+                let task = live_state.node_task_done(message.node_id);
+                let prev_state = live_state.exec_state;
+                message.node.propagate(&self, &mut live_state);
+
+                // `propagate` must account for this node in one of the maps
+                // that `node_exec_state` reads.  If it did not, the node would
+                // look like it had never started, and unwinding would abandon
+                // it without running its undo action.
+                let node_id = &message.node_id;
+                assert!(
+                    live_state.node_outputs.contains_key(node_id)
+                        || live_state.node_errors.contains_key(node_id)
+                        || live_state.nodes_undone.contains_key(node_id)
+                        || live_state.undo_errors.contains_key(node_id),
+                    "completed node is not recorded in any state map"
+                );
+
+                // TODO-cleanup This condition ought to be simplified.  We want
+                // to update the saga state when we become Unwinding (which we do
+                // here) and when we become Done (which we do below).  There may
+                // be a better place to put this logic that's less ad hoc.
+                if live_state.exec_state == SagaCachedState::Unwinding
+                    && prev_state != SagaCachedState::Unwinding
+                {
+                    live_state
+                        .sec_hdl
+                        .saga_update(SagaCachedState::Unwinding)
+                        .await;
+                }
+                let done = live_state.exec_state == SagaCachedState::Done;
+                (task, done)
             };
 
             // This should really not take long, as there's nothing else this
@@ -1005,36 +1039,7 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
             // TODO-robustness can we enforce that this won't take long?
             task.await.expect("node task failed unexpectedly");
 
-            let mut live_state = self.live_state.lock().await;
-            let prev_state = live_state.exec_state;
-            message.node.propagate(&self, &mut live_state);
-
-            // `propagate` must account for this node in one of the maps that
-            // `node_exec_state` reads.  If it did not, the node would look like
-            // it had never started, and unwinding would abandon it without
-            // running its undo action.
-            let node_id = &message.node_id;
-            assert!(
-                live_state.node_outputs.contains_key(node_id)
-                    || live_state.node_errors.contains_key(node_id)
-                    || live_state.nodes_undone.contains_key(node_id)
-                    || live_state.undo_errors.contains_key(node_id),
-                "completed node is not recorded in any state map"
-            );
-
-            // TODO-cleanup This condition ought to be simplified.  We want to
-            // update the saga state when we become Unwinding (which we do here)
-            // and when we become Done (which we do below).  There may be a
-            // better place to put this logic that's less ad hoc.
-            if live_state.exec_state == SagaCachedState::Unwinding
-                && prev_state != SagaCachedState::Unwinding
-            {
-                live_state
-                    .sec_hdl
-                    .saga_update(SagaCachedState::Unwinding)
-                    .await;
-            }
-            if live_state.exec_state == SagaCachedState::Done {
+            if is_done {
                 break;
             }
         }
@@ -2761,8 +2766,7 @@ End
             fail_undo: None,
             pause_node: "n1_out",
             pause_event: SagaNodeEventKind::Succeeded,
-            // BUG: The action succeeded, so this should be Done.
-            settled: NodeExecState::Blocked,
+            settled: NodeExecState::Done,
         })
         .await;
     }
@@ -2774,8 +2778,7 @@ End
             fail_undo: None,
             pause_node: "n2_out",
             pause_event: SagaNodeEventKind::Failed,
-            // BUG: The action failed, so this should be Undone(ActionFailed).
-            settled: NodeExecState::Blocked,
+            settled: NodeExecState::Undone(UndoMode::ActionFailed),
         })
         .await;
     }
@@ -2787,8 +2790,7 @@ End
             fail_undo: None,
             pause_node: "n1_out",
             pause_event: SagaNodeEventKind::UndoFinished,
-            // BUG: The undo finished, so this should be Undone(ActionUndone).
-            settled: NodeExecState::Done,
+            settled: NodeExecState::Undone(UndoMode::ActionUndone),
         })
         .await;
     }
@@ -2800,8 +2802,7 @@ End
             fail_undo: Some("n1_out"),
             pause_node: "n1_out",
             pause_event: SagaNodeEventKind::UndoFailed,
-            // BUG: The undo failed, so this should be UndoFailed.
-            settled: NodeExecState::Done,
+            settled: NodeExecState::UndoFailed,
         })
         .await;
     }
