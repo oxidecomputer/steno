@@ -2055,7 +2055,7 @@ impl<'a> PrintOrderer<'a> {
     }
 }
 
-/// Return true if all neighbors of `node_id` in the given `direction`  
+/// Return true if all neighbors of `node_id` in the given `direction`
 /// return true for the predicate `test`.
 fn neighbors_all<F>(
     graph: &Graph<InternalNode, ()>,
@@ -2129,15 +2129,20 @@ fn recovery_validate_parent(
         }
 
         // The parent of a node that has never started can have any load status
-        // at all.  The parent could be `NeverStarted` or `Started` during
-        // normal execution when looking at a child node that execution simply
-        // hasn't gotten to yet.  If the parent were `Succeeded`, you might
-        // expect the child to have started, but those two things don't happen
-        // atomically, so we can catch the log in between the parent succeeding
-        // and the child starting.  Finally, it's also possible that the parent
-        // itself fails or gets unwound (because one of its other children
-        // fails) before this child gets started at all.  That makes it
-        // possible to see `Failed`, `UndoStarted`, or `UndoDone`.
+        // at all.  Walking through the different load statuses:
+        //
+        // * The parent could be `NeverStarted` or `Started` during
+        //   normal execution when looking at a child node that execution simply
+        //   hasn't gotten to yet.
+        // * If the parent were `Succeeded`, you might
+        //   expect the child to have started, but those two things don't happen
+        //   atomically, so we can catch the log in between the parent succeeding
+        //   and the child starting.
+        // * Finally, it's also possible that the parent
+        //   itself fails or gets unwound (because one of its other children
+        //   fails) before this child gets started at all.
+        //
+        // That makes it possible to see `Failed`, `UndoStarted`, or `UndoDone`.
         SagaNodeLoadStatus::NeverStarted => true,
     }
 }
