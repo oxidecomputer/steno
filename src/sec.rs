@@ -727,6 +727,37 @@ impl SecExecClient {
     }
 }
 
+#[cfg(test)]
+impl SecExecClient {
+    /// Returns an `SecExecClient` for use in tests of a `SagaExecutor` that
+    /// don't want to set up a whole SEC.
+    ///
+    /// This is an ordinary `SecExecClient` whose channels are wired up to a
+    /// newly-spawned task that simply replies to all requests immediately with
+    /// a successful response.
+    pub(crate) fn new_acking_for_test(saga_id: SagaId) -> SecExecClient {
+        let (exec_tx, mut exec_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            while let Some(message) = exec_rx.recv().await {
+                match message {
+                    SecExecMsg::LogEvent(data) => {
+                        data.ack_tx.send(()).expect("executor awaits log ack");
+                    }
+                    SecExecMsg::UpdateCachedState(data) => {
+                        data.ack_tx
+                            .send(())
+                            .expect("executor awaits state ack");
+                    }
+                    SecExecMsg::SagaGet(_) => {
+                        panic!("test SEC stand-in does not serve saga_get")
+                    }
+                }
+            }
+        });
+        SecExecClient { saga_id, exec_tx }
+    }
+}
+
 /// Message passed from the [`SecExecClient`] to the [`Sec`]
 #[derive(Debug)]
 enum SecExecMsg {
