@@ -11,7 +11,6 @@ use steno::SagaDag;
 use steno::SagaId;
 use steno::SagaName;
 use steno::SagaType;
-use uuid::Uuid;
 
 fn new_log() -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();
@@ -45,7 +44,7 @@ async fn unregistered_action() {
 
     let log = new_log();
     let sec = steno::sec(log.clone(), Arc::new(steno::InMemorySecStore::new()));
-    let saga_id = SagaId(Uuid::new_v4());
+    let saga_id = SagaId::new_v4();
     let context = Arc::new(());
     let result = sec
         .saga_create(

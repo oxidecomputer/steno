@@ -24,7 +24,6 @@ use steno::SagaName;
 use steno::SagaResultErr;
 use steno::SagaType;
 use steno::SecClient;
-use uuid::Uuid;
 
 // This is where we're going: this program will collect payment and book a whole
 // trip that includes a hotel, flight, and car.  This will either all succeed or
@@ -76,7 +75,7 @@ async fn book_trip(
     // Get ready to execute the saga.
 
     // Each execution needs a new unique id.
-    let saga_id = SagaId(Uuid::new_v4());
+    let saga_id = SagaId::new_v4();
 
     // Create the saga.
     let saga_future = sec
