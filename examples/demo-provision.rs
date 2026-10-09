@@ -128,11 +128,10 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     println!("{}", dag.dot());
 
     println!("*** initial state ***");
-    let saga_id = SAGA_ID;
     let uctx = Arc::new(ExampleContext {});
-    let _unused_future = sec.saga_create(saga_id, uctx, dag, registry).await?;
+    let _unused_future = sec.saga_create(SAGA_ID, uctx, dag, registry).await?;
 
-    let saga = sec.saga_get(saga_id).await.unwrap();
+    let saga = sec.saga_get(SAGA_ID).await.unwrap();
     let status = saga.state.status();
     println!("{}", status);
 
@@ -222,10 +221,9 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
                 number_of_instances: 1,
             };
             let dag = make_example_provision_dag(params);
-            let saga_id = SAGA_ID;
             let future =
-                sec.saga_create(saga_id, uctx, dag.clone(), registry).await?;
-            (saga_id, future, dag)
+                sec.saga_create(SAGA_ID, uctx, dag.clone(), registry).await?;
+            (SAGA_ID, future, dag)
         };
 
     for node_name in &args.inject_error {

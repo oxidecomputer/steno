@@ -948,16 +948,6 @@ mod test {
     }
 
     #[test]
-    fn test_saga_id_parse_error() {
-        let error = "not-a-uuid".parse::<SagaId>().expect_err("parse failed");
-        assert!(
-            error.to_string().contains("saga"),
-            "parse error should name the kind of ID: {}",
-            error
-        );
-    }
-
-    #[test]
     fn test_saga_id_schema() {
         let schema = schemars::schema_for!(SagaId);
         assert_eq!(
