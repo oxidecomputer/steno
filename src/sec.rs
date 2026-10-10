@@ -1429,13 +1429,13 @@ impl Sec {
     fn saga_lookup(&self, saga_id: SagaId) -> Result<&Saga, anyhow::Error> {
         self.sagas
             .get(&saga_id)
-            .ok_or_else(|| anyhow!("no such saga: {:?}", saga_id))
+            .ok_or_else(|| anyhow!("no such saga: {}", saga_id))
     }
 
     fn saga_remove(&mut self, saga_id: SagaId) -> Result<Saga, anyhow::Error> {
         self.sagas
             .remove(&saga_id)
-            .ok_or_else(|| anyhow!("no such saga: {:?}", saga_id))
+            .ok_or_else(|| anyhow!("no such saga: {}", saga_id))
     }
 }
 
@@ -1536,7 +1536,6 @@ mod test {
     use crate::test_helpers::{make_diamond_saga, make_test_saga, TestContext};
     use crate::{SagaId, SagaNodeId};
     use slog::Drain;
-    use uuid::Uuid;
 
     fn new_log() -> slog::Logger {
         let decorator = slog_term::TermDecorator::new().build();
@@ -1577,7 +1576,7 @@ mod test {
         let (registry, dag) = make_test_saga();
 
         // Saga Creation
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
         let context = Arc::new(TestContext::new());
         let saga_future = sec
             .saga_create(saga_id, Arc::clone(&context), dag, registry)
@@ -1746,7 +1745,7 @@ mod test {
         let (registry, dag) = make_test_saga();
 
         // Saga Creation
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
         let context = Arc::new(TestContext::new());
         let saga_future = sec
             .saga_create(saga_id, Arc::clone(&context), dag, registry)
@@ -1776,7 +1775,7 @@ mod test {
         let (registry, dag) = make_test_saga();
 
         // Saga Creation
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
         let context = Arc::new(TestContext::new());
         let saga_future = sec
             .saga_resume(
@@ -1809,7 +1808,7 @@ mod test {
         let (registry, dag) = make_test_saga();
 
         // Saga Creation
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
         let context = Arc::new(TestContext::new());
         let _unused_future = sec
             .saga_create(
@@ -1885,7 +1884,7 @@ mod test {
     ) -> (Arc<TestContext>, SagaResult) {
         let log = new_log();
         let (registry, dag) = make_test_saga();
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
 
         // Phase 1: run the saga and capture its log.
         let captured = {
@@ -2009,7 +2008,7 @@ mod test {
     ) -> (Arc<TestContext>, SagaResult) {
         let log = new_log();
         let (registry, dag) = make_diamond_saga();
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
         let a = dag.get_index("a_out").expect("a_out should exist");
         let c = dag.get_index("c_out").expect("c_out should exist");
 
@@ -2145,7 +2144,7 @@ mod test {
         let sec = new_sec(&log);
 
         // Saga Creation
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
         let err = sec
             .saga_start(saga_id)
             .await
@@ -2164,7 +2163,7 @@ mod test {
         let (registry, dag) = make_test_saga();
 
         // Saga Creation
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
         let context = Arc::new(TestContext::new());
         let _unused_future = sec
             .saga_create(saga_id, Arc::clone(&context), dag, registry)
@@ -2195,7 +2194,7 @@ mod test {
         let sec = new_sec(&log);
         let (registry, dag) = make_diamond_saga();
 
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
         let context = Arc::new(TestContext::new());
         let saga_future = sec
             .saga_create(

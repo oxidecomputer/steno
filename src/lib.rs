@@ -60,6 +60,7 @@ pub use dag::Node;
 pub use dag::NodeName;
 pub use dag::SagaDag;
 pub use dag::SagaId;
+pub use dag::SagaIdKind;
 pub use dag::SagaName;
 pub use saga_action_error::ActionError;
 pub use saga_action_error::UndoActionError;

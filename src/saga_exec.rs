@@ -2406,7 +2406,6 @@ mod test {
     use crate::{DagBuilder, Node, SagaDag, SagaName};
     use petgraph::graph::NodeIndex;
     use std::fmt::Write;
-    use uuid::Uuid;
 
     // Return a constant node with a null value
     fn constant(name: &str) -> Node {
@@ -2664,7 +2663,7 @@ End
         registry: Arc<ActionRegistry<TestSaga>>,
         dag: Arc<SagaDag>,
     ) -> SagaExecutor<TestSaga> {
-        let saga_id = SagaId(Uuid::new_v4());
+        let saga_id = SagaId::new_v4();
         SagaExecutor::new(
             slog::Logger::root(slog::Discard, slog::o!()),
             saga_id,

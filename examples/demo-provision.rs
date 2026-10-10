@@ -21,7 +21,6 @@ use steno::SagaLog;
 use steno::SagaResultErr;
 use steno::SagaSerialized;
 use structopt::StructOpt;
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -61,9 +60,8 @@ enum Demo {
 
 // We use a hardcoded SagaId for ease of automated testing. See the note in
 // demo_prov_server_alloc().
-fn make_saga_id() -> SagaId {
-    SagaId(Uuid::parse_str("049b2522-308d-442e-bc65-9bfaef863597").unwrap())
-}
+const SAGA_ID: SagaId =
+    SagaId::from_u128(0x049b2522_308d_442e_bc65_9bfaef863597);
 
 fn make_log() -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();
@@ -130,11 +128,10 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
     println!("{}", dag.dot());
 
     println!("*** initial state ***");
-    let saga_id = make_saga_id();
     let uctx = Arc::new(ExampleContext {});
-    let _unused_future = sec.saga_create(saga_id, uctx, dag, registry).await?;
+    let _unused_future = sec.saga_create(SAGA_ID, uctx, dag, registry).await?;
 
-    let saga = sec.saga_get(saga_id).await.unwrap();
+    let saga = sec.saga_get(SAGA_ID).await.unwrap();
     let status = saga.state.status();
     println!("{}", status);
 
@@ -224,10 +221,9 @@ async fn cmd_run(args: &RunArgs) -> Result<(), anyhow::Error> {
                 number_of_instances: 1,
             };
             let dag = make_example_provision_dag(params);
-            let saga_id = make_saga_id();
             let future =
-                sec.saga_create(saga_id, uctx, dag.clone(), registry).await?;
-            (saga_id, future, dag)
+                sec.saga_create(SAGA_ID, uctx, dag.clone(), registry).await?;
+            (SAGA_ID, future, dag)
         };
 
     for node_name in &args.inject_error {

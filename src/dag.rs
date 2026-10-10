@@ -24,43 +24,80 @@
 use crate::saga_action_generic::Action;
 use crate::SagaType;
 use anyhow::anyhow;
+use newtype_uuid::TypedUuid;
+use newtype_uuid::TypedUuidKind;
+use newtype_uuid::TypedUuidTag;
 use petgraph::dot;
 use petgraph::graph::NodeIndex;
 use petgraph::Directed;
 use petgraph::Graph;
+use schemars::gen::SchemaGenerator;
+use schemars::schema::Schema;
+use schemars::schema::SchemaObject;
+use schemars::schema::SubschemaValidation;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
-use uuid::Uuid;
 
 /// Unique identifier for a Saga (an execution of a saga template)
-#[derive(
-    Clone,
-    Copy,
-    Deserialize,
-    Eq,
-    JsonSchema,
-    Ord,
-    PartialEq,
-    PartialOrd,
-    Serialize,
-)]
-#[serde(transparent)]
-pub struct SagaId(pub Uuid);
-// TODO-cleanup figure out how to use custom_derive here?
-NewtypeDebug! { () pub struct SagaId(Uuid); }
-// TODO-design In the Oxide consumer, we probably want to have the serialized
-// form of ids have a prefix describing the type.  This seems consumer-specific,
-// though.  Is there a good way to do support that?  Maybe the best way to do
-// this is to have the consumer have their own enum or trait that impls Display
-// using the various ids provided by consumers.
-NewtypeDisplay! { () pub struct SagaId(Uuid); }
-NewtypeFrom! { () pub struct SagaId(Uuid); }
+pub type SagaId = TypedUuid<SagaIdKind>;
+
+/// A marker type for the type parameter used in [`SagaId`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SagaIdKind {}
+
+impl TypedUuidKind for SagaIdKind {
+    #[inline]
+    fn tag() -> TypedUuidTag {
+        // const forces tag validation at compile time.
+        const TAG: TypedUuidTag = TypedUuidTag::new("saga");
+        TAG
+    }
+
+    #[inline]
+    fn alias() -> Option<&'static str> {
+        Some("SagaId")
+    }
+}
+
+impl JsonSchema for SagaIdKind {
+    fn schema_name() -> String {
+        "SagaIdKind".to_string()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed("steno::SagaIdKind")
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        SchemaObject {
+            subschemas: Some(Box::new(SubschemaValidation {
+                not: Some(Box::new(Schema::Bool(true))),
+                ..Default::default()
+            })),
+            // newtype-uuid uses this to create `SagaId`'s schema. See
+            // `test_saga_id_schema`.
+            extensions: [(
+                "x-rust-type".to_string(),
+                serde_json::json!({
+                    "crate": "steno",
+                    "version": "*",
+                    "path": "steno::SagaIdKind",
+                }),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }
+        .into()
+    }
+}
 
 /// Unique name for a saga [`Action`]
 ///
@@ -883,7 +920,53 @@ mod test {
     use super::DagBuilderErrorKind;
     use super::Node;
     use super::NodeName;
+    use super::SagaId;
     use super::SagaName;
+
+    const SAGA_ID_STR: &str = "049b2522-308d-442e-bc65-9bfaef863597";
+
+    // Saga IDs are persisted by consumers, so (for backwards compatibility) the
+    // wire and Display forms must remain bare UUIDs. Or, even if in the future
+    // we add a tag to the serialized data, the old format must remain
+    // compatible.
+    #[test]
+    fn test_saga_id_wire_format() {
+        let json = format!("\"{}\"", SAGA_ID_STR);
+        let saga_id: SagaId =
+            serde_json::from_str(&json).expect("deserialized saga ID");
+        assert_eq!(
+            serde_json::to_string(&saga_id).expect("serialized saga ID"),
+            json,
+        );
+        assert_eq!(saga_id.to_string(), SAGA_ID_STR);
+    }
+
+    #[test]
+    fn test_saga_id_debug() {
+        let saga_id: SagaId = SAGA_ID_STR.parse().expect("parsed saga ID");
+        assert_eq!(format!("{:?}", saga_id), format!("{} (saga)", SAGA_ID_STR));
+    }
+
+    #[test]
+    fn test_saga_id_schema() {
+        let schema = schemars::schema_for!(SagaId);
+        assert_eq!(
+            serde_json::to_value(&schema).expect("serialized schema"),
+            serde_json::json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "title": "SagaId",
+                "type": "string",
+                "format": "uuid",
+                "x-rust-type": {
+                    "crate": "steno",
+                    "version": "*",
+                    // The magic in newtype-uuid causes this path to be
+                    // rewritten. Pretty neat!
+                    "path": "steno::SagaId",
+                },
+            }),
+        );
+    }
 
     #[test]
     fn test_saga_names_and_label() {

@@ -18,6 +18,10 @@ serde_json = "1.0"
 thiserror = "2.0"
 lazy_static = "1.5.0"
 
+[dependencies.newtype-uuid]
+version = "1.3.2"
+features = [ "schemars08", "serde", "v4" ]
+
 [dependencies.petgraph]
 version = "0.8.3"
 features =  [ "serde-1" ]
@@ -29,7 +33,7 @@ default-features = false
 
 [dependencies.schemars]
 version = "0.8.22"
-features = [ "chrono", "uuid1" ]
+features = [ "chrono" ]
 
 [dependencies.serde]
 version = "1.0"
@@ -42,10 +46,6 @@ features = [ "max_level_trace", "release_max_level_debug" ]
 [dependencies.tokio]
 version = "1"
 features = [ "full" ]
-
-[dependencies.uuid]
-version = "1.16.0"
-features = [ "serde", "v4" ]
 
 [dev-dependencies]
 expectorate = "1.0"
