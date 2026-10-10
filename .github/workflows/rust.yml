@@ -43,7 +43,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-24.04, windows-2022, macos-14 ]
+        os: [ ubuntu-24.04, windows-2022, macos-26 ]
     steps:
     # actions/checkout@v2
     - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
