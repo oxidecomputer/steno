@@ -2258,13 +2258,8 @@ mod test {
         (saga_id, dag, registry, result)
     }
 
-    // Test the live half of the situation described in #473: the undo actions
-    // of two nodes running in parallel both fail.
-    //
-    // The first failure marks the saga as stopping.  When the second undo
-    // action's task finishes, the executor finds no tasks left and moves the
-    // saga to "done".  Recording that second failure then used to assert that
-    // the saga was still unwinding, which panicked.
+    // Verifies that the executor does not crash when two undo actions fail in
+    // parallel.  (This is a regression test for #473.)
     #[tokio::test]
     async fn test_concurrent_undo_failures_dont_panic() {
         let log = new_log();
@@ -2298,11 +2293,8 @@ mod test {
         );
     }
 
-    // Test the recovery half of the situation described in #473: a saga log
-    // that records two failed undo actions.
-    //
-    // Recovery used to report the saga stuck once for each failure, and the
-    // second of those reports panicked.
+    // Verifies that recovering a saga with two undo action failures does not
+    // crash.  (This is a regression test for #473.)
     #[tokio::test]
     async fn test_recover_saga_with_two_undo_failures() {
         let log = new_log();
