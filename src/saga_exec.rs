@@ -1420,8 +1420,6 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     "expected an action to have failed if an \
                         undo action failed",
                 );
-            // Several undo actions can fail, but `SagaResultErr` has room for
-            // only one.  We report the topologically-first one.
             let (undo_error_node_id, undo_error_source) =
                 live_state.undo_errors.iter().next().unwrap();
             let error_node_name = self
