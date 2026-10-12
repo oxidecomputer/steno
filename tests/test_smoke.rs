@@ -92,7 +92,7 @@ fn cmd_run_recover() {
 
     // First, try recovery without having changed anything.
     let recovery_done = run_example("recover2", |exec| {
-        exec.arg("run").arg("--recover-from=-").stdin(log.as_str())
+        exec.arg("run").arg("--recover-from=-").stdin(log.clone())
     });
     assert_contents("tests/test_smoke_run_recover_done.out", &recovery_done);
 
@@ -106,9 +106,7 @@ fn cmd_run_recover() {
     assert_contents(
         "tests/test_smoke_run_recover_some.out",
         &run_example("recover3", |exec| {
-            exec.arg("run")
-                .arg("--recover-from=-")
-                .stdin(log_shortened.as_str())
+            exec.arg("run").arg("--recover-from=-").stdin(log_shortened.clone())
         }),
     );
 }
@@ -125,7 +123,7 @@ fn cmd_run_recover_unwind() {
 
     // First, try recovery without having changed anything.
     let recovery_done = run_example("recover_fail2", |exec| {
-        exec.arg("run").arg("--recover-from=-").stdin(log.as_str())
+        exec.arg("run").arg("--recover-from=-").stdin(log.clone())
     });
     assert_contents(
         "tests/test_smoke_run_recover_fail_done.out",
@@ -142,9 +140,7 @@ fn cmd_run_recover_unwind() {
     assert_contents(
         "tests/test_smoke_run_recover_fail_some.out",
         &run_example("recover_fail3", |exec| {
-            exec.arg("run")
-                .arg("--recover-from=-")
-                .stdin(log_shortened.as_str())
+            exec.arg("run").arg("--recover-from=-").stdin(log_shortened.clone())
         }),
     );
 }
@@ -162,7 +158,7 @@ fn cmd_run_recover_stuck() {
 
     // First, try recovery without having changed anything.
     let recovery_done = run_example("recover_stuck2", |exec| {
-        exec.arg("run").arg("--recover-from=-").stdin(log.as_str())
+        exec.arg("run").arg("--recover-from=-").stdin(log.clone())
     });
     assert_contents(
         "tests/test_smoke_run_recover_stuck_done.out",
