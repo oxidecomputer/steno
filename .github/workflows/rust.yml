@@ -11,7 +11,7 @@ on:
 
 jobs:
   check-style:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
     # actions/checkout@v2
     - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
@@ -23,7 +23,7 @@ jobs:
       run: cargo fmt -- --check
 
   clippy-lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
     # actions/checkout@v2
     - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
