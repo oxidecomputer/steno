@@ -296,7 +296,6 @@ impl<UserType: SagaType> SagaNodeRest<UserType> for SagaNode<SgnsUndoFailed> {
         _exec: &SagaExecutor<UserType>,
         live_state: &mut SagaExecLiveState,
     ) {
-        assert!(live_state.exec_state == SagaCachedState::Unwinding);
         live_state
             .undo_errors
             .insert(self.node_id, self.state.0.clone())
@@ -1421,6 +1420,8 @@ impl<UserType: SagaType> SagaExecutor<UserType> {
                     "expected an action to have failed if an \
                         undo action failed",
                 );
+            // Several undo actions can fail, but `SagaResultErr` has room for
+            // only one.  We report the topologically-first one.
             let (undo_error_node_id, undo_error_source) =
                 live_state.undo_errors.iter().next().unwrap();
             let error_node_name = self
@@ -1738,8 +1739,38 @@ impl SagaExecLiveState {
         self.exec_state = SagaCachedState::Done;
     }
 
+    /// Records that the saga is stuck: it will neither finish nor finish
+    /// unwinding
+    ///
+    /// The undo actions of several nodes can fail, so this may be called more
+    /// than once for the same saga.
     fn saga_stuck(&mut self) {
-        assert!(self.exec_state == SagaCachedState::Unwinding);
+        // Verify the current live state.
+        //
+        // The saga can only become stuck if an undo action fails.  That means
+        // the saga was already unwinding.  The state thus cannot be `Running`.
+        // It is possible that the state could be `Done`, though.  This could
+        // happen if multiple undo actions fail.  After the first one fails,
+        // `stopping` will be set.  The next time we find no tasks running
+        // (either here or in `node_task_done()`, for example), the saga will
+        // become `Done`.  That doesn't preclude another call to this function.
+        // This also happens in the recovery path when multiple undo action
+        // failures are played back.
+        match self.exec_state {
+            SagaCachedState::Unwinding => (),
+            SagaCachedState::Done => {
+                if !self.stopping {
+                    panic!(
+                        "invoked saga_stuck() on saga that's Done and not \
+                         already stopping"
+                    );
+                }
+            }
+            SagaCachedState::Running => {
+                panic!("invoked saga_stuck() on a saga that's not unwinding");
+            }
+        };
+
         self.stopping = true;
         if self.node_tasks.is_empty() {
             self.exec_state = SagaCachedState::Done;
