@@ -1,5 +1,5 @@
 # This file is used by cargo-release.
-# This version is cribbed from Dropshot and updated for cargo-release 0.21.1
+# This version is cribbed from Dropshot and updated for cargo-release 1.1.6.
 
 # Update the change log to reflect the new release and set us up for the next release.
 pre-release-replacements = [
