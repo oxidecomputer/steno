@@ -1533,7 +1533,9 @@ mod test {
     use super::*;
     use crate::saga_log::SagaNodeEventKind;
     use crate::saga_log::SagaNodeLoadStatus;
-    use crate::test_helpers::{make_diamond_saga, make_test_saga, TestContext};
+    use crate::test_helpers::{
+        make_diamond_saga, make_test_saga, TestContext, TestSaga,
+    };
     use crate::{SagaId, SagaNodeId};
     use slog::Drain;
 
@@ -2217,5 +2219,114 @@ mod test {
         result.kind.expect_err(
             "saga should have failed, since we injected two errors",
         );
+    }
+
+    // Runs the diamond saga with `c`'s action failing and the undo actions of
+    // both `a` and `p` failing.
+    //
+    // `a` and `p` have no dependency on each other, so the executor runs their
+    // undo actions at the same time.  That means both undo actions fail while
+    // the other one is still outstanding.  The saga winds up stuck.
+    //
+    // Returns the saga's id, its DAG, its action registry, and its result.
+    async fn run_diamond_with_two_undo_failures(
+        log: &slog::Logger,
+    ) -> (SagaId, Arc<SagaDag>, Arc<ActionRegistry<TestSaga>>, SagaResult) {
+        let sec = new_sec(log);
+        let (registry, dag) = make_diamond_saga();
+        let saga_id = SagaId::new_v4();
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_create(
+                saga_id,
+                context,
+                Arc::clone(&dag),
+                Arc::clone(&registry),
+            )
+            .await
+            .expect("failed to create saga");
+
+        let a = dag.get_index("a_out").expect("a_out should exist");
+        let p = dag.get_index("p_out").expect("p_out should exist");
+        let c = dag.get_index("c_out").expect("c_out should exist");
+        sec.saga_inject_error(saga_id, c).await.expect("inject c");
+        sec.saga_inject_error_undo(saga_id, a).await.expect("inject a undo");
+        sec.saga_inject_error_undo(saga_id, p).await.expect("inject p undo");
+
+        sec.saga_start(saga_id).await.expect("failed to start saga");
+        let result = saga_future.await;
+        (saga_id, dag, registry, result)
+    }
+
+    // Verifies that the executor does not crash when two undo actions fail in
+    // parallel.  (This is a regression test for #473.)
+    #[tokio::test]
+    async fn test_concurrent_undo_failures_dont_panic() {
+        let log = new_log();
+        let (_, dag, _, result) =
+            run_diamond_with_two_undo_failures(&log).await;
+        let error = result.kind.expect_err(
+            "saga should have failed, since we injected an action error",
+        );
+        assert!(
+            error.undo_failure.is_some(),
+            "saga result should report that an undo action failed"
+        );
+
+        // Both undo failures should be durably recorded.  The two undo actions
+        // race with each other, so we sort before comparing.
+        let mut undo_failed: Vec<_> = result
+            .saga_log
+            .events()
+            .iter()
+            .filter(|e| e.event_type.kind() == SagaNodeEventKind::UndoFailed)
+            .map(|e| e.node_id)
+            .collect();
+        undo_failed.sort();
+        let a = dag.get_index("a_out").expect("a_out should exist");
+        let p = dag.get_index("p_out").expect("p_out should exist");
+        let mut expected = vec![SagaNodeId::from(a), SagaNodeId::from(p)];
+        expected.sort();
+        assert_eq!(
+            undo_failed, expected,
+            "both undo failures should appear in the log"
+        );
+    }
+
+    // Verifies that recovering a saga with two undo action failures does not
+    // crash.  (This is a regression test for #473.)
+    #[tokio::test]
+    async fn test_recover_saga_with_two_undo_failures() {
+        let log = new_log();
+        let (saga_id, dag, registry, result) =
+            run_diamond_with_two_undo_failures(&log).await;
+        result.kind.expect_err("saga should have failed");
+        let events = result.saga_log.events().to_vec();
+
+        // A fresh SEC recovers the stuck saga from that log.
+        let sec = new_sec(&log);
+        let context = Arc::new(TestContext::new());
+        let saga_future = sec
+            .saga_resume(
+                saga_id,
+                Arc::clone(&context),
+                serde_json::to_value(&*dag).unwrap(),
+                registry,
+                events,
+            )
+            .await
+            .expect("recovery must succeed for a stuck saga");
+        sec.saga_start(saga_id).await.expect("failed to start recovered saga");
+        let result = saga_future.await;
+        let error =
+            result.kind.expect_err("recovered saga should still be stuck");
+        assert!(
+            error.undo_failure.is_some(),
+            "recovered saga should report that an undo action failed"
+        );
+
+        // The saga was already at rest, so recovery runs nothing.
+        assert_eq!(context.get_count("do_node"), 0, "no action should re-run");
+        assert_eq!(context.get_count("undo_node"), 0, "no undo should re-run");
     }
 }
