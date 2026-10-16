@@ -1,5 +1,5 @@
 # This file is used by cargo-release.
-# This version is cribbed from Dropshot and updated for cargo-release 0.21.1
+# This version is cribbed from Dropshot and updated for cargo-release 1.1.6.
 
 # Update the change log to reflect the new release and set us up for the next release.
 pre-release-replacements = [
@@ -13,9 +13,6 @@ pre-release-replacements = [
 
 push = false
 pre-release-commit-message = "release {{crate_name}} {{version}}"
-post-release-commit-message = "starting {{crate_name}} {{next_version}} after releasing {{version}}"
 tag-message = "release {{crate_name}} {{version}}"
 tag-prefix = ""
-dev-version = true
-dev-version-ext = "dev"
 allow-branch = [ "main" ]
