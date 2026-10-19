@@ -2,6 +2,8 @@
 
 use anyhow::anyhow;
 use anyhow::Context;
+use clap::Args;
+use clap::Parser;
 use slog::Drain;
 use std::convert::TryFrom;
 use std::fs;
@@ -20,11 +22,10 @@ use steno::SagaId;
 use steno::SagaLog;
 use steno::SagaResultErr;
 use steno::SagaSerialized;
-use structopt::StructOpt;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let subcmd = Demo::from_args();
+    let subcmd = Demo::parse();
     match subcmd {
         Demo::Dot => cmd_dot().await,
         Demo::Info => cmd_info().await,
@@ -36,8 +37,7 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 /// Demo saga implementation
-#[derive(Debug, StructOpt)]
-#[structopt(no_version)]
+#[derive(Debug, Parser)]
 enum Demo {
     /// Dump a dot (graphviz) representation of the saga graph
     Dot,
@@ -47,13 +47,13 @@ enum Demo {
 
     /// Pretty-print the log from a previous execution
     PrintLog {
-        #[structopt(flatten)]
+        #[command(flatten)]
         print_log_args: PrintLogArgs,
     },
 
     /// Execute the saga
     Run {
-        #[structopt(flatten)]
+        #[command(flatten)]
         run_args: RunArgs,
     },
 }
@@ -140,7 +140,7 @@ async fn cmd_info() -> Result<(), anyhow::Error> {
 
 // "print-log" subcommand
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Args)]
 struct PrintLogArgs {
     /// path to the saga log to pretty-print
     input_log_path: PathBuf,
@@ -157,26 +157,26 @@ async fn cmd_print_log(args: &PrintLogArgs) -> Result<(), anyhow::Error> {
 
 // "run" subcommand
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Args)]
 struct RunArgs {
     /// simulate an error at the named saga node
-    #[structopt(long)]
+    #[arg(long)]
     inject_error: Vec<String>,
 
     /// simulate an error at the named saga node's undo action
-    #[structopt(long)]
+    #[arg(long)]
     inject_undo_error: Vec<String>,
 
     /// do not print to stdout
-    #[structopt(long)]
+    #[arg(long)]
     quiet: bool,
 
     /// upon completion, dump the workflog log to the named file
-    #[structopt(long)]
+    #[arg(long)]
     dump_to: Option<PathBuf>,
 
     /// recover the saga log from the named file and resume execution
-    #[structopt(long)]
+    #[arg(long)]
     recover_from: Option<PathBuf>,
 }
 
