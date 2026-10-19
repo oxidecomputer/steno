@@ -1,16 +1,13 @@
-steno 
 Demo saga implementation
 
-USAGE:
-    demo-provision <SUBCOMMAND>
+Usage: demo-provision <COMMAND>
 
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
+Commands:
+  dot        Dump a dot (graphviz) representation of the saga graph
+  info       Dump information about the saga graph (not an execution)
+  print-log  Pretty-print the log from a previous execution
+  run        Execute the saga
+  help       Print this message or the help of the given subcommand(s)
 
-SUBCOMMANDS:
-    dot          Dump a dot (graphviz) representation of the saga graph
-    help         Prints this message or the help of the given subcommand(s)
-    info         Dump information about the saga graph (not an execution)
-    print-log    Pretty-print the log from a previous execution
-    run          Execute the saga
+Options:
+  -h, --help  Print help
