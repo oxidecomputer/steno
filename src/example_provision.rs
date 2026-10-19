@@ -87,47 +87,61 @@ mod actions {
     use super::ExampleSagaType;
     use crate::new_action_noop_undo;
     use crate::Action;
-    use lazy_static::lazy_static;
     use std::sync::Arc;
+    use std::sync::LazyLock;
 
-    lazy_static! {
-        pub static ref INSTANCE_CREATE: Arc<dyn Action<ExampleSagaType>> =
+    pub static INSTANCE_CREATE: LazyLock<Arc<dyn Action<ExampleSagaType>>> =
+        LazyLock::new(|| {
             new_action_noop_undo(
                 "instance_create",
                 super::demo_prov_instance_create,
-            );
-        pub static ref VPC_ALLOC_IP: Arc<dyn Action<ExampleSagaType>> =
-            new_action_noop_undo("vpc_alloc_ip", super::demo_prov_vpc_alloc_ip);
-        pub static ref VOLUME_CREATE: Arc<dyn Action<ExampleSagaType>> =
+            )
+        });
+    pub static VPC_ALLOC_IP: LazyLock<Arc<dyn Action<ExampleSagaType>>> =
+        LazyLock::new(|| {
+            new_action_noop_undo("vpc_alloc_ip", super::demo_prov_vpc_alloc_ip)
+        });
+    pub static VOLUME_CREATE: LazyLock<Arc<dyn Action<ExampleSagaType>>> =
+        LazyLock::new(|| {
             new_action_noop_undo(
                 "volume_create",
                 super::demo_prov_volume_create,
-            );
-        pub static ref INSTANCE_CONFIGURE: Arc<dyn Action<ExampleSagaType>> =
+            )
+        });
+    pub static INSTANCE_CONFIGURE: LazyLock<Arc<dyn Action<ExampleSagaType>>> =
+        LazyLock::new(|| {
             new_action_noop_undo(
                 "instance_configure",
                 super::demo_prov_instance_configure,
-            );
-        pub static ref VOLUME_ATTACH: Arc<dyn Action<ExampleSagaType>> =
+            )
+        });
+    pub static VOLUME_ATTACH: LazyLock<Arc<dyn Action<ExampleSagaType>>> =
+        LazyLock::new(|| {
             new_action_noop_undo(
                 "volume_attach",
                 super::demo_prov_volume_attach,
-            );
-        pub static ref INSTANCE_BOOT: Arc<dyn Action<ExampleSagaType>> =
+            )
+        });
+    pub static INSTANCE_BOOT: LazyLock<Arc<dyn Action<ExampleSagaType>>> =
+        LazyLock::new(|| {
             new_action_noop_undo(
                 "instance_boot",
                 super::demo_prov_instance_boot,
-            );
-        pub static ref PRINT: Arc<dyn Action<ExampleSagaType>> =
-            new_action_noop_undo("print", super::demo_prov_print);
-        pub static ref SERVER_PICK: Arc<dyn Action<ExampleSagaType>> =
-            new_action_noop_undo("server_pick", super::demo_prov_server_pick);
-        pub static ref SERVER_RESERVE: Arc<dyn Action<ExampleSagaType>> =
+            )
+        });
+    pub static PRINT: LazyLock<Arc<dyn Action<ExampleSagaType>>> =
+        LazyLock::new(|| new_action_noop_undo("print", super::demo_prov_print));
+    pub static SERVER_PICK: LazyLock<Arc<dyn Action<ExampleSagaType>>> =
+        LazyLock::new(|| {
+            new_action_noop_undo("server_pick", super::demo_prov_server_pick)
+        });
+    pub static SERVER_RESERVE: LazyLock<Arc<dyn Action<ExampleSagaType>>> =
+        LazyLock::new(|| {
             new_action_noop_undo(
                 "server_reserve",
                 super::demo_prov_server_reserve,
-            );
-    }
+            )
+        });
 }
 
 /// Load our actions into an ActionRegistry

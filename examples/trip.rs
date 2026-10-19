@@ -132,40 +132,46 @@ async fn book_trip(
 /// them during registration and DAG construction.
 mod actions {
     use super::TripSaga;
-    use lazy_static::lazy_static;
     use std::sync::Arc;
+    use std::sync::LazyLock;
     use steno::new_action_noop_undo;
     use steno::Action;
     use steno::ActionFunc;
 
-    lazy_static! {
-        pub(super) static ref PAYMENT: Arc<dyn Action<TripSaga>> =
+    pub(super) static PAYMENT: LazyLock<Arc<dyn Action<TripSaga>>> =
+        LazyLock::new(|| {
             ActionFunc::new_action(
                 "payment",
                 super::saga_charge_card,
-                super::saga_refund_card
-            );
-        pub(super) static ref HOTEL: Arc<dyn Action<TripSaga>> =
+                super::saga_refund_card,
+            )
+        });
+    pub(super) static HOTEL: LazyLock<Arc<dyn Action<TripSaga>>> =
+        LazyLock::new(|| {
             ActionFunc::new_action(
                 "hotel",
                 super::saga_book_hotel,
-                super::saga_cancel_hotel
-            );
-        pub(super) static ref FLIGHT: Arc<dyn Action<TripSaga>> =
+                super::saga_cancel_hotel,
+            )
+        });
+    pub(super) static FLIGHT: LazyLock<Arc<dyn Action<TripSaga>>> =
+        LazyLock::new(|| {
             ActionFunc::new_action(
                 "flight",
                 super::saga_book_flight,
-                super::saga_cancel_flight
-            );
-        pub(super) static ref CAR: Arc<dyn Action<TripSaga>> =
+                super::saga_cancel_flight,
+            )
+        });
+    pub(super) static CAR: LazyLock<Arc<dyn Action<TripSaga>>> =
+        LazyLock::new(|| {
             ActionFunc::new_action(
                 "car",
                 super::saga_book_car,
-                super::saga_cancel_car
-            );
-        pub(super) static ref PRINT: Arc<dyn Action<TripSaga>> =
-            new_action_noop_undo("print", super::saga_print);
-    }
+                super::saga_cancel_car,
+            )
+        });
+    pub(super) static PRINT: LazyLock<Arc<dyn Action<TripSaga>>> =
+        LazyLock::new(|| new_action_noop_undo("print", super::saga_print));
 }
 
 /// Load our actions into an ActionRegistry
