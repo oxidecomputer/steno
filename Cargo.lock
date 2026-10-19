@@ -993,7 +993,6 @@ dependencies = [
  "chrono",
  "expectorate",
  "futures",
- "lazy_static",
  "newtype-uuid",
  "newtype_derive",
  "petgraph",
