@@ -10,10 +10,17 @@ use subprocess::Redirection;
 
 fn example_bin() -> PathBuf {
     // This is unfortunate, but it's the best way I know to run one of the
-    // examples out of our project.
+    // examples out of our project.  Cargo puts this test program in
+    // `<profile dir>/build/<pkg>/<hash>/out` and examples in
+    // `<profile dir>/examples`.  This layout is not a stable interface, so it
+    // may change when we update the toolchain in rust-toolchain.toml.
     let mut my_path = current_exe().expect("failed to find test program");
     my_path.pop();
-    assert_eq!(my_path.file_name().unwrap(), "deps");
+    assert_eq!(my_path.file_name().unwrap(), "out");
+    my_path.pop();
+    my_path.pop();
+    my_path.pop();
+    assert_eq!(my_path.file_name().unwrap(), "build");
     my_path.pop();
     my_path.push("examples");
     my_path.push("demo-provision");
