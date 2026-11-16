@@ -2323,6 +2323,20 @@ impl<UserType: SagaType> ActionContext<UserType> {
     pub fn user_data(&self) -> &UserType::ExecContextType {
         &self.user_context
     }
+
+    /// Maps the user data for this action into a new context type
+    pub fn map_user_data<F, U: SagaType>(self, f: F) -> ActionContext<U>
+    where
+        F: FnOnce(Arc<UserType::ExecContextType>) -> Arc<U::ExecContextType>,
+    {
+        ActionContext {
+            ancestor_tree: self.ancestor_tree,
+            node_id: self.node_id,
+            dag: self.dag,
+            user_context: f(self.user_context),
+            saga_params: self.saga_params,
+        }
+    }
 }
 
 /// Converts a NodeIndex (used by the graph representation to identify a node)
